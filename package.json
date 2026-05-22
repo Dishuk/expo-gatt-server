@@ -29,10 +29,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/Dishuk/expo-gatt-server.git"
   },
-  "author": "",
-  "homepage": "",
+  "author": "Dishuk",
+  "homepage": "https://github.com/Dishuk/expo-gatt-server",
   "license": "MIT",
   "devDependencies": {
     "expo-module-scripts": "^4.0.0",

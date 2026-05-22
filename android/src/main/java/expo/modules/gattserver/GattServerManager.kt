@@ -100,6 +100,7 @@ class GattServerManager(
     ) {
       Log.d(TAG, "onDescriptorWriteRequest: device=${device.address} desc=${descriptor.uuid} responseNeeded=$responseNeeded value=${value?.joinToString(",") { String.format("%02x", it) }}")
       if (value != null) {
+        @Suppress("DEPRECATION")
         descriptor.value = value
       }
       if (responseNeeded) {
@@ -111,6 +112,7 @@ class GattServerManager(
       device: BluetoothDevice, requestId: Int, offset: Int,
       descriptor: BluetoothGattDescriptor
     ) {
+      @Suppress("DEPRECATION")
       val value = descriptor.value ?: BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
       Log.d(TAG, "onDescriptorReadRequest: device=${device.address} desc=${descriptor.uuid} value=${value.joinToString(",") { String.format("%02x", it) }}")
       gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)

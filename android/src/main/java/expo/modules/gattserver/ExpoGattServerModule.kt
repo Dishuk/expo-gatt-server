@@ -191,6 +191,7 @@ class ExpoGattServerModule : Module() {
 
     val initialValue = (map["value"] as? List<*>)?.mapNotNull { (it as? Number)?.toByte() }?.toByteArray()
     if (initialValue != null) {
+      @Suppress("DEPRECATION")
       characteristic.value = initialValue
     }
 

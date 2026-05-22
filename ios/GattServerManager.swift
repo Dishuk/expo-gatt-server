@@ -221,7 +221,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     }
   }
 
-  func peripheralManagerIsReadyToUpdateSubscribers(_ peripheral: CBPeripheralManager) {
+  func peripheralManagerIsReady(_ peripheral: CBPeripheralManager) {
     // Retry pending notifications when the transmit queue has space
     for (deviceId, subs) in subscribedCentrals {
       for (charUUID, central) in subs {
