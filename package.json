@@ -1,0 +1,46 @@
+{
+  "name": "expo-gatt-server",
+  "version": "0.1.0",
+  "description": "Expo module for BLE GATT server (peripheral) functionality",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "files": [
+    "src",
+    "ios",
+    "android/src",
+    "android/build.gradle",
+    "android/consumer-rules.pro",
+    "expo-module.config.json"
+  ],
+  "scripts": {
+    "build": "expo-module build",
+    "clean": "expo-module clean",
+    "lint": "expo-module lint",
+    "test": "expo-module test"
+  },
+  "keywords": [
+    "expo",
+    "react-native",
+    "bluetooth",
+    "ble",
+    "gatt",
+    "server",
+    "peripheral"
+  ],
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "author": "",
+  "homepage": "",
+  "license": "MIT",
+  "devDependencies": {
+    "expo-module-scripts": "^4.0.0",
+    "expo-modules-core": "^2.0.0"
+  },
+  "peerDependencies": {
+    "expo": "*",
+    "react": "*",
+    "react-native": "*"
+  }
+}

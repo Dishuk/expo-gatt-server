@@ -1,0 +1,24 @@
+# Build outputs
+build/
+*.aar
+
+# Android
+android/build/
+android/.gradle/
+android/local.properties
+
+# iOS
+ios/build/
+ios/*.xcframework
+ios/Pods/
+
+# Node
+node_modules/
+
+# TypeScript build
+build/
+*.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["ExpoGattServerModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.gattserver.ExpoGattServerModule"]
+  }
+}
