@@ -77,19 +77,33 @@ class ExpoGattServerModule : Module() {
         val bytes = value.map { it.toByte() }.toByteArray()
         mgr.sendNotification(deviceId, serviceUuid, characteristicUuid, bytes, confirm)
         promise.resolve(null)
+      } catch (e: GattServerException) {
+        promise.reject(e.code, e.message, e)
       } catch (e: Exception) {
         promise.reject("ERR_NOTIFY", e.message, e)
       }
     }
 
-    Function("sendResponse") {
+    AsyncFunction("sendResponse") {
       deviceId: String,
       requestId: Int,
       status: Int,
       offset: Int,
-      value: List<Int> ->
-      val bytes = value.map { it.toByte() }.toByteArray()
-      manager?.sendResponse(deviceId, requestId, status, offset, bytes)
+      value: List<Int>,
+      promise: Promise ->
+      val mgr = manager ?: run {
+        promise.reject("ERR_NO_SERVER", "Server not created", null)
+        return@AsyncFunction
+      }
+      try {
+        val bytes = value.map { it.toByte() }.toByteArray()
+        mgr.sendResponse(deviceId, requestId, status, offset, bytes)
+        promise.resolve(null)
+      } catch (e: GattServerException) {
+        promise.reject(e.code, e.message, e)
+      } catch (e: Exception) {
+        promise.reject("ERR_RESPONSE", e.message, e)
+      }
     }
 
     Function("updateCharacteristicValue") {

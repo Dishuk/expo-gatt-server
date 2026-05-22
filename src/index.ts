@@ -53,14 +53,14 @@ export async function sendNotification(
   );
 }
 
-export function sendResponse(
+export async function sendResponse(
   deviceId: string,
   requestId: number,
   status: number,
   offset: number,
   value: number[],
-): void {
-  ExpoGattServerModule.sendResponse(deviceId, requestId, status, offset, value);
+): Promise<void> {
+  return ExpoGattServerModule.sendResponse(deviceId, requestId, status, offset, value);
 }
 
 export function updateCharacteristicValue(

@@ -1,5 +1,34 @@
 import CoreBluetooth
 
+private let defaultAttMtuPayload = 20 // ATT_MTU 23 - 3 header bytes
+private let mtuSmallData = "MTU_SMALL".data(using: .utf8)!
+
+enum GattServerError: Error {
+  case mtuSmall(maxPayload: Int, payloadSize: Int)
+  case payloadExceedsMtu(maxPayload: Int, payloadSize: Int, responded: Bool)
+  case requestNotFound(requestId: Int)
+
+  var code: String {
+    switch self {
+    case .mtuSmall: return "MTU_SMALL"
+    case .payloadExceedsMtu: return "PAYLOAD_EXCEEDS_MTU"
+    case .requestNotFound: return "REQUEST_NOT_FOUND"
+    }
+  }
+
+  var message: String {
+    switch self {
+    case .mtuSmall(let maxPayload, let payloadSize):
+      return "Payload size \(payloadSize) exceeds default MTU payload capacity of \(maxPayload) bytes. Client has not negotiated a larger MTU. A fallback value was sent."
+    case .payloadExceedsMtu(let maxPayload, let payloadSize, let responded):
+      let suffix = responded ? " An error response was sent." : ""
+      return "Payload size \(payloadSize) exceeds negotiated MTU payload capacity of \(maxPayload) bytes.\(suffix)"
+    case .requestNotFound(let requestId):
+      return "Request \(requestId) not found or already responded"
+    }
+  }
+}
+
 protocol GattServerManagerDelegate: AnyObject {
   func onDeviceConnected(deviceId: String, name: String?)
   func onDeviceDisconnected(deviceId: String)
@@ -48,7 +77,7 @@ class GattServerManager: NSObject {
   func sendNotification(
     deviceId: String, serviceUuid: String,
     characteristicUuid: String, value: Data
-  ) -> Bool {
+  ) throws -> Bool {
     let charUUID = CBUUID(string: characteristicUuid)
 
     guard let characteristic = findCharacteristic(
@@ -56,13 +85,26 @@ class GattServerManager: NSObject {
       characteristicUuid: charUUID
     ) else { return false }
 
-    characteristicValues[charUUID] = value
-
     guard let centrals = subscribedCentrals[deviceId],
           let central = centrals[charUUID] else {
-      // Not subscribed — update value only
+      characteristicValues[charUUID] = value
       return true
     }
+
+    let maxPayload = central.maximumUpdateValueLength
+    if value.count > maxPayload {
+      if maxPayload <= defaultAttMtuPayload {
+        characteristicValues[charUUID] = mtuSmallData
+        peripheralManager?.updateValue(
+          mtuSmallData, for: characteristic, onSubscribedCentrals: [central]
+        )
+        throw GattServerError.mtuSmall(maxPayload: maxPayload, payloadSize: value.count)
+      } else {
+        throw GattServerError.payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count, responded: false)
+      }
+    }
+
+    characteristicValues[charUUID] = value
 
     return peripheralManager?.updateValue(
       value, for: characteristic, onSubscribedCentrals: [central]
@@ -72,8 +114,22 @@ class GattServerManager: NSObject {
   func sendResponse(
     deviceId: String, requestId: Int, status: Int,
     offset: Int, value: Data
-  ) {
-    guard let request = pendingRequests.removeValue(forKey: requestId) else { return }
+  ) throws {
+    guard let request = pendingRequests.removeValue(forKey: requestId) else {
+      throw GattServerError.requestNotFound(requestId: requestId)
+    }
+
+    let maxPayload = request.central.maximumUpdateValueLength
+    if value.count > maxPayload {
+      if maxPayload <= defaultAttMtuPayload {
+        request.value = mtuSmallData
+        peripheralManager?.respond(to: request, withResult: .success)
+        throw GattServerError.mtuSmall(maxPayload: maxPayload, payloadSize: value.count)
+      } else {
+        peripheralManager?.respond(to: request, withResult: .invalidAttributeValueLength)
+        throw GattServerError.payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count, responded: true)
+      }
+    }
 
     let result: CBATTError.Code = status == 0 ? .success : .requestNotSupported
     request.value = value
@@ -154,6 +210,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     subscribedCentrals[deviceId]?.removeValue(forKey: characteristic.uuid)
     if subscribedCentrals[deviceId]?.isEmpty == true {
       subscribedCentrals.removeValue(forKey: deviceId)
+      pendingRequests = pendingRequests.filter { $0.value.central.identifier.uuidString != deviceId }
       delegate?.onDeviceDisconnected(deviceId: deviceId)
     }
   }
@@ -167,11 +224,10 @@ extension GattServerManager: CBPeripheralManagerDelegate {
 
     let serviceUuid = request.characteristic.service?.uuid.uuidString ?? ""
 
-    // If we have a cached value, auto-respond
     if let value = characteristicValues[request.characteristic.uuid] {
       let offset = request.offset
-      if offset < value.count {
-        request.value = value.subdata(in: offset..<value.count)
+      if offset <= value.count {
+        request.value = offset < value.count ? value.subdata(in: offset..<value.count) : Data()
         peripheral.respond(to: request, withResult: .success)
         pendingRequests.removeValue(forKey: reqId)
         return
@@ -191,10 +247,12 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     _ peripheral: CBPeripheralManager,
     didReceiveWrite requests: [CBATTRequest]
   ) {
-    for request in requests {
-      let reqId = nextRequestId()
-      pendingRequests[reqId] = request
+    // iOS requires exactly one response per didReceiveWrite — auto-respond before notifying JS
+    if let first = requests.first {
+      peripheral.respond(to: first, withResult: .success)
+    }
 
+    for request in requests {
       let serviceUuid = request.characteristic.service?.uuid.uuidString ?? ""
       let value = request.value ?? Data()
 
@@ -206,23 +264,17 @@ extension GattServerManager: CBPeripheralManagerDelegate {
 
       delegate?.onCharacteristicWriteRequest(
         deviceId: request.central.identifier.uuidString,
-        requestId: reqId,
+        requestId: 0,
         serviceUuid: serviceUuid,
         characteristicUuid: request.characteristic.uuid.uuidString,
         offset: request.offset,
         value: value,
-        responseNeeded: true
+        responseNeeded: false
       )
-    }
-
-    // Auto-respond success for the first request (iOS requires exactly one response per didReceiveWrite)
-    if let first = requests.first {
-      peripheral.respond(to: first, withResult: .success)
     }
   }
 
   func peripheralManagerIsReady(_ peripheral: CBPeripheralManager) {
-    // Retry pending notifications when the transmit queue has space
     for (deviceId, subs) in subscribedCentrals {
       for (charUUID, central) in subs {
         guard let value = characteristicValues[charUUID],
@@ -232,6 +284,9 @@ extension GattServerManager: CBPeripheralManagerDelegate {
               let characteristic = service.characteristics?.first(where: {
                 $0.uuid == charUUID
               }) as? CBMutableCharacteristic else { continue }
+
+        let maxPayload = central.maximumUpdateValueLength
+        if value.count > maxPayload { continue }
 
         let sent = peripheral.updateValue(
           value, for: characteristic, onSubscribedCentrals: [central]

@@ -23,7 +23,7 @@ declare class ExpoGattServerModuleType extends NativeModule<GattServerEvents> {
     status: number,
     offset: number,
     value: number[],
-  ): void;
+  ): Promise<void>;
   updateCharacteristicValue(
     serviceUuid: string,
     characteristicUuid: string,

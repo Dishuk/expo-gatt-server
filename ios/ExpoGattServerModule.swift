@@ -53,34 +53,56 @@ public class ExpoGattServerModule: Module {
         return
       }
       let data = Data(value.map { UInt8(clamping: $0) })
-      let success = mgr.sendNotification(
-        deviceId: deviceId,
-        serviceUuid: serviceUuid,
-        characteristicUuid: characteristicUuid,
-        value: data
-      )
-      if success {
-        promise.resolve(nil)
-      } else {
-        promise.reject("ERR_NOTIFY", "Failed to send notification — transmit queue full, will retry on peripheralManagerIsReady")
+      DispatchQueue.main.async {
+        do {
+          let success = try mgr.sendNotification(
+            deviceId: deviceId,
+            serviceUuid: serviceUuid,
+            characteristicUuid: characteristicUuid,
+            value: data
+          )
+          if success {
+            promise.resolve(nil)
+          } else {
+            promise.reject("ERR_NOTIFY", "Failed to send notification — transmit queue full, will retry on peripheralManagerIsReady")
+          }
+        } catch let error as GattServerError {
+          promise.reject(error.code, error.message)
+        } catch {
+          promise.reject("ERR_NOTIFY", error.localizedDescription)
+        }
       }
     }
 
-    Function("sendResponse") { (
+    AsyncFunction("sendResponse") { (
       deviceId: String,
       requestId: Int,
       status: Int,
       offset: Int,
-      value: [Int]
+      value: [Int],
+      promise: Promise
     ) in
+      guard let mgr = self.manager else {
+        promise.reject("ERR_NO_SERVER", "Server not created")
+        return
+      }
       let data = Data(value.map { UInt8(clamping: $0) })
-      self.manager?.sendResponse(
-        deviceId: deviceId,
-        requestId: requestId,
-        status: status,
-        offset: offset,
-        value: data
-      )
+      DispatchQueue.main.async {
+        do {
+          try mgr.sendResponse(
+            deviceId: deviceId,
+            requestId: requestId,
+            status: status,
+            offset: offset,
+            value: data
+          )
+          promise.resolve(nil)
+        } catch let error as GattServerError {
+          promise.reject(error.code, error.message)
+        } catch {
+          promise.reject("ERR_RESPONSE", error.localizedDescription)
+        }
+      }
     }
 
     Function("updateCharacteristicValue") { (

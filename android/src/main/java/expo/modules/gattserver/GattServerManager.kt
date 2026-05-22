@@ -13,6 +13,12 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = "ExpoGattServer"
+private const val DEFAULT_ATT_MTU = 23
+private const val ATT_HEADER_SIZE = 3
+private val MTU_SMALL_BYTES = "MTU_SMALL".toByteArray(Charsets.UTF_8)
+
+open class GattServerException(val code: String, message: String) : Exception(message)
+class MtuException(code: String, message: String) : GattServerException(code, message)
 
 @SuppressLint("MissingPermission")
 class GattServerManager(
@@ -40,6 +46,8 @@ class GattServerManager(
   private var advertiser: BluetoothLeAdvertiser? = null
   private var advertiseCallback: AdvertiseCallback? = null
   private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
+  private val deviceMtu = ConcurrentHashMap<String, Int>()
+  private val pendingRequests = ConcurrentHashMap<Int, String>()
   private var lastNotifiedCharacteristicUuid: String = ""
 
   private val gattServerCallback = object : BluetoothGattServerCallback() {
@@ -53,6 +61,8 @@ class GattServerManager(
         }
         BluetoothGattServer.STATE_DISCONNECTED -> {
           connectedDevices.remove(id)
+          deviceMtu.remove(id)
+          pendingRequests.entries.removeIf { it.value == id }
           listener?.onDeviceDisconnected(id)
         }
       }
@@ -63,14 +73,21 @@ class GattServerManager(
       characteristic: BluetoothGattCharacteristic
     ) {
       @Suppress("DEPRECATION")
-      val value = characteristic.value ?: ByteArray(0)
-      val responseValue = if (offset > 0 && offset < value.size) {
-        value.copyOfRange(offset, value.size)
-      } else {
-        value
+      val value = characteristic.value
+
+      if (value != null && offset <= value.size) {
+        val responseValue = if (offset < value.size) {
+          value.copyOfRange(offset, value.size)
+        } else {
+          ByteArray(0)
+        }
+        Log.d(TAG, "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset auto-respond valueLen=${responseValue.size}")
+        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, responseValue)
+        return
       }
-      Log.d(TAG, "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset valueLen=${responseValue.size}")
-      gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, responseValue)
+
+      Log.d(TAG, "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset delegating to JS")
+      pendingRequests[requestId] = device.address
 
       val serviceUuid = characteristic.service?.uuid?.toString() ?: ""
       listener?.onCharacteristicReadRequest(
@@ -89,8 +106,8 @@ class GattServerManager(
         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, data)
       }
       listener?.onCharacteristicWriteRequest(
-        device.address, requestId, serviceUuid,
-        characteristic.uuid.toString(), offset, data, responseNeeded
+        device.address, 0, serviceUuid,
+        characteristic.uuid.toString(), offset, data, false
       )
     }
 
@@ -123,7 +140,10 @@ class GattServerManager(
     }
 
     override fun onMtuChanged(device: BluetoothDevice?, mtu: Int) {
-      // Available for future use
+      device?.let {
+        Log.d(TAG, "onMtuChanged: device=${it.address} mtu=$mtu")
+        deviceMtu[it.address] = mtu
+      }
     }
   }
 
@@ -208,21 +228,60 @@ class GattServerManager(
     val characteristic = service.getCharacteristic(UUID.fromString(characteristicUuid))
       ?: throw IllegalArgumentException("Characteristic $characteristicUuid not found")
 
+    val negotiatedMtu = deviceMtu[deviceId]
+    val mtu = negotiatedMtu ?: DEFAULT_ATT_MTU
+    val maxPayload = mtu - ATT_HEADER_SIZE
+    if (value.size > maxPayload) {
+      if (negotiatedMtu == null) {
+        lastNotifiedCharacteristicUuid = characteristicUuid
+        notifyValue(server, device, characteristic, confirm, MTU_SMALL_BYTES)
+        throw MtuException("MTU_SMALL", "Payload size ${value.size} exceeds default MTU payload capacity of $maxPayload bytes. Client has not negotiated a larger MTU. A fallback value was sent.")
+      } else {
+        throw MtuException("PAYLOAD_EXCEEDS_MTU", "Payload size ${value.size} exceeds negotiated MTU payload capacity of $maxPayload bytes (MTU: $mtu).")
+      }
+    }
+
     lastNotifiedCharacteristicUuid = characteristicUuid
 
-    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-      server.notifyCharacteristicChanged(device, characteristic, confirm, value)
-    } else {
-      @Suppress("DEPRECATION")
-      characteristic.value = value
-      @Suppress("DEPRECATION")
-      server.notifyCharacteristicChanged(device, characteristic, confirm)
-    }
+    notifyValue(server, device, characteristic, confirm, value)
   }
 
   fun sendResponse(deviceId: String, requestId: Int, status: Int, offset: Int, value: ByteArray) {
-    val device = connectedDevices[deviceId] ?: return
-    gattServer?.sendResponse(device, requestId, status, offset, value)
+    val server = gattServer ?: throw IllegalStateException("Server not open")
+    pendingRequests.remove(requestId)
+      ?: throw GattServerException("REQUEST_NOT_FOUND", "Request $requestId not found or already responded")
+    val device = connectedDevices[deviceId]
+      ?: throw IllegalArgumentException("Device $deviceId not connected")
+    val negotiatedMtu = deviceMtu[deviceId]
+    val mtu = negotiatedMtu ?: DEFAULT_ATT_MTU
+    val maxPayload = mtu - ATT_HEADER_SIZE
+    if (value.size > maxPayload) {
+      if (negotiatedMtu == null) {
+        server.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, MTU_SMALL_BYTES)
+        throw MtuException("MTU_SMALL", "Response size ${value.size} exceeds default MTU payload capacity of $maxPayload bytes. Client has not negotiated a larger MTU. A fallback value was sent.")
+      } else {
+        server.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_ATTRIBUTE_LENGTH, offset, ByteArray(0))
+        throw MtuException("PAYLOAD_EXCEEDS_MTU", "Response size ${value.size} exceeds negotiated MTU payload capacity of $maxPayload bytes (MTU: $mtu). An error response was sent.")
+      }
+    }
+    server.sendResponse(device, requestId, status, offset, value)
+  }
+
+  private fun notifyValue(
+    server: BluetoothGattServer,
+    device: BluetoothDevice,
+    characteristic: BluetoothGattCharacteristic,
+    confirm: Boolean,
+    payload: ByteArray,
+  ) {
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+      server.notifyCharacteristicChanged(device, characteristic, confirm, payload)
+    } else {
+      @Suppress("DEPRECATION")
+      characteristic.value = payload
+      @Suppress("DEPRECATION")
+      server.notifyCharacteristicChanged(device, characteristic, confirm)
+    }
   }
 
   fun updateCharacteristicValue(serviceUuid: String, characteristicUuid: String, value: ByteArray) {
@@ -237,5 +296,7 @@ class GattServerManager(
     gattServer?.close()
     gattServer = null
     connectedDevices.clear()
+    deviceMtu.clear()
+    pendingRequests.clear()
   }
 }
