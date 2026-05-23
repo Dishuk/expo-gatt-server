@@ -11,6 +11,8 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.util.UUID
 
+private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
 class ExpoGattServerModule : Module() {
   private var manager: GattServerManager? = null
 
@@ -220,7 +222,7 @@ class ExpoGattServerModule : Module() {
 
     if (properties and (BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0) {
       val cccd = android.bluetooth.BluetoothGattDescriptor(
-        UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"),
+        CCCD_UUID,
         android.bluetooth.BluetoothGattDescriptor.PERMISSION_READ or
           android.bluetooth.BluetoothGattDescriptor.PERMISSION_WRITE
       )

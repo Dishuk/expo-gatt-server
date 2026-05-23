@@ -3,27 +3,31 @@ plugins {
   id 'expo-module-gradle-plugin'
 }
 
+def safeExtGet(prop, fallback) {
+  rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+}
+
 group = 'expo.modules.gattserver'
 version = '0.1.0'
 
 android {
   namespace "expo.modules.gattserver"
-  compileSdk 35
+  compileSdk safeExtGet("compileSdkVersion", 35)
 
   defaultConfig {
-    minSdk 24
+    minSdk safeExtGet("minSdkVersion", 24)
     versionCode 1
     versionName '0.1.0'
     consumerProguardFiles 'consumer-rules.pro'
   }
 
   compileOptions {
-    sourceCompatibility JavaVersion.VERSION_17
-    targetCompatibility JavaVersion.VERSION_17
+    sourceCompatibility JavaVersion.toVersion(safeExtGet("jvmTarget", "17"))
+    targetCompatibility JavaVersion.toVersion(safeExtGet("jvmTarget", "17"))
   }
 
   kotlinOptions {
-    jvmTarget = '17'
+    jvmTarget = safeExtGet("jvmTarget", "17")
   }
 }
 
