@@ -45,6 +45,7 @@ class GattServerManager(
   private var gattServer: BluetoothGattServer? = null
   private var advertiser: BluetoothLeAdvertiser? = null
   private var advertiseCallback: AdvertiseCallback? = null
+  private var pendingAdvertiseResult: ((String?) -> Unit)? = null
   private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
   private val deviceMtu = ConcurrentHashMap<String, Int>()
   private val pendingRequests = ConcurrentHashMap<Int, String>()
@@ -164,7 +165,11 @@ class GattServerManager(
     serviceUuids: List<String>?,
     includeTxPower: Boolean,
     connectable: Boolean,
+    onResult: (error: String?) -> Unit,
   ) {
+    pendingAdvertiseResult?.invoke("Advertising restarted")
+    pendingAdvertiseResult = onResult
+
     val adapter = bluetoothAdapter
       ?: throw IllegalStateException("Bluetooth not available")
 
@@ -198,9 +203,21 @@ class GattServerManager(
     val callback = object : AdvertiseCallback() {
       override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
         Log.d(TAG, "Advertising started successfully")
+        pendingAdvertiseResult?.invoke(null)
+        pendingAdvertiseResult = null
       }
       override fun onStartFailure(errorCode: Int) {
-        Log.e(TAG, "Advertising failed: errorCode=$errorCode")
+        val msg = when (errorCode) {
+          ADVERTISE_FAILED_DATA_TOO_LARGE -> "Advertise data too large"
+          ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "Too many advertisers"
+          ADVERTISE_FAILED_ALREADY_STARTED -> "Advertising already started"
+          ADVERTISE_FAILED_INTERNAL_ERROR -> "Internal error"
+          ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> "Feature unsupported"
+          else -> "Advertising failed (error $errorCode)"
+        }
+        Log.e(TAG, "Advertising failed: $msg")
+        pendingAdvertiseResult?.invoke(msg)
+        pendingAdvertiseResult = null
       }
     }
     advertiseCallback = callback
@@ -210,6 +227,8 @@ class GattServerManager(
   fun stopAdvertising() {
     advertiseCallback?.let { advertiser?.stopAdvertising(it) }
     advertiseCallback = null
+    pendingAdvertiseResult?.invoke("Advertising stopped")
+    pendingAdvertiseResult = null
   }
 
   fun sendNotification(

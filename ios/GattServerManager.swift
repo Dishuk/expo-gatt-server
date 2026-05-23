@@ -48,6 +48,7 @@ class GattServerManager: NSObject {
 
   private var peripheralManager: CBPeripheralManager?
   private var pendingServices: [CBMutableService] = []
+  private var advertisingCompletion: ((Error?) -> Void)?
   private var addedServices: [CBUUID: CBMutableService] = [:]
   private var subscribedCentrals: [String: [CBUUID: CBCentral]] = [:]
   private var characteristicValues: [CBUUID: Data] = [:]
@@ -59,7 +60,16 @@ class GattServerManager: NSObject {
     peripheralManager = CBPeripheralManager(delegate: self, queue: .main)
   }
 
-  func startAdvertising(localName: String?, serviceUuids: [CBUUID]?) {
+  var bluetoothState: CBManagerState {
+    peripheralManager?.state ?? .unknown
+  }
+
+  func startAdvertising(localName: String?, serviceUuids: [CBUUID]?, completion: @escaping (Error?) -> Void) {
+    if let pending = advertisingCompletion {
+      advertisingCompletion = nil
+      pending(NSError(domain: "ExpoGattServer", code: 0, userInfo: [NSLocalizedDescriptionKey: "Advertising restarted"]))
+    }
+    advertisingCompletion = completion
     var advertisementData: [String: Any] = [:]
     if let name = localName {
       advertisementData[CBAdvertisementDataLocalNameKey] = name
@@ -72,6 +82,10 @@ class GattServerManager: NSObject {
 
   func stopAdvertising() {
     peripheralManager?.stopAdvertising()
+    if let pending = advertisingCompletion {
+      advertisingCompletion = nil
+      pending(NSError(domain: "ExpoGattServer", code: 0, userInfo: [NSLocalizedDescriptionKey: "Advertising stopped"]))
+    }
   }
 
   func sendNotification(
@@ -177,6 +191,11 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       peripheral.add(service)
     }
     pendingServices.removeAll()
+  }
+
+  func peripheralManager(_ peripheral: CBPeripheralManager, didStartAdvertising error: Error?) {
+    advertisingCompletion?(error)
+    advertisingCompletion = nil
   }
 
   func peripheralManager(

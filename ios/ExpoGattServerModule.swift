@@ -4,6 +4,17 @@ import CoreBluetooth
 public class ExpoGattServerModule: Module {
   private var manager: GattServerManager?
 
+  private func checkBluetoothAuthorization() -> String? {
+    switch CBManager.authorization {
+    case .denied:
+      return "Bluetooth permission denied. Grant Bluetooth access in Settings."
+    case .restricted:
+      return "Bluetooth access restricted."
+    default:
+      return nil
+    }
+  }
+
   public func definition() -> ModuleDefinition {
     Name("ExpoGattServer")
 
@@ -16,6 +27,11 @@ public class ExpoGattServerModule: Module {
     )
 
     AsyncFunction("createServer") { (services: [[String: Any]], promise: Promise) in
+      if let err = self.checkBluetoothAuthorization() {
+        promise.reject("ERR_PERMISSION", err)
+        return
+      }
+
       self.manager?.stop()
       let mgr = GattServerManager()
       mgr.delegate = self
@@ -26,14 +42,42 @@ public class ExpoGattServerModule: Module {
     }
 
     AsyncFunction("startAdvertising") { (config: [String: Any], promise: Promise) in
+      if let err = self.checkBluetoothAuthorization() {
+        promise.reject("ERR_PERMISSION", err)
+        return
+      }
+
       guard let mgr = self.manager else {
         promise.reject("ERR_NO_SERVER", "Server not created. Call createServer first.")
         return
       }
+
+      switch mgr.bluetoothState {
+      case .poweredOff:
+        promise.reject("ERR_BLUETOOTH", "Bluetooth is turned off")
+        return
+      case .unauthorized:
+        promise.reject("ERR_PERMISSION", "Bluetooth permission not granted")
+        return
+      case .unsupported:
+        promise.reject("ERR_BLUETOOTH", "BLE not supported on this device")
+        return
+      case .poweredOn:
+        break
+      default:
+        promise.reject("ERR_BLUETOOTH", "Bluetooth not ready")
+        return
+      }
+
       let localName = config["localName"] as? String
       let serviceUuids = (config["serviceUuids"] as? [String])?.map { CBUUID(string: $0) }
-      mgr.startAdvertising(localName: localName, serviceUuids: serviceUuids)
-      promise.resolve(nil)
+      mgr.startAdvertising(localName: localName, serviceUuids: serviceUuids) { error in
+        if let error = error {
+          promise.reject("ERR_ADVERTISE", error.localizedDescription)
+        } else {
+          promise.resolve(nil)
+        }
+      }
     }
 
     Function("stopAdvertising") {

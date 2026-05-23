@@ -2,6 +2,9 @@ package expo.modules.gattserver
 
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattService
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.core.os.bundleOf
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
@@ -10,6 +13,12 @@ import java.util.UUID
 
 class ExpoGattServerModule : Module() {
   private var manager: GattServerManager? = null
+
+  private fun missingPermission(permission: String): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
+    val context = appContext.reactContext ?: return false
+    return ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED
+  }
 
   override fun definition() = ModuleDefinition {
     Name("ExpoGattServer")
@@ -23,6 +32,11 @@ class ExpoGattServerModule : Module() {
     )
 
     AsyncFunction("createServer") { services: List<Map<String, Any?>>, promise: Promise ->
+      if (missingPermission(android.Manifest.permission.BLUETOOTH_CONNECT)) {
+        promise.reject("ERR_PERMISSION", "BLUETOOTH_CONNECT permission not granted", null)
+        return@AsyncFunction
+      }
+
       val context = appContext.reactContext ?: run {
         promise.reject("ERR_NO_CONTEXT", "React context not available", null)
         return@AsyncFunction
@@ -42,6 +56,11 @@ class ExpoGattServerModule : Module() {
     }
 
     AsyncFunction("startAdvertising") { config: Map<String, Any?>, promise: Promise ->
+      if (missingPermission(android.Manifest.permission.BLUETOOTH_ADVERTISE)) {
+        promise.reject("ERR_PERMISSION", "BLUETOOTH_ADVERTISE permission not granted", null)
+        return@AsyncFunction
+      }
+
       val mgr = manager ?: run {
         promise.reject("ERR_NO_SERVER", "Server not created. Call createServer first.", null)
         return@AsyncFunction
@@ -51,8 +70,13 @@ class ExpoGattServerModule : Module() {
         val serviceUuids = (config["serviceUuids"] as? List<*>)?.mapNotNull { it as? String }
         val includeTxPower = config["includeTxPowerLevel"] as? Boolean ?: false
         val connectable = config["connectable"] as? Boolean ?: true
-        mgr.startAdvertising(localName, serviceUuids, includeTxPower, connectable)
-        promise.resolve(null)
+        mgr.startAdvertising(localName, serviceUuids, includeTxPower, connectable) { error ->
+          if (error != null) {
+            promise.reject("ERR_ADVERTISE", error, null)
+          } else {
+            promise.resolve(null)
+          }
+        }
       } catch (e: Exception) {
         promise.reject("ERR_ADVERTISE", e.message, e)
       }
