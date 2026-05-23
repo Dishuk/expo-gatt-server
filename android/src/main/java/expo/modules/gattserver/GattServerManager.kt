@@ -15,7 +15,6 @@ import java.util.concurrent.ConcurrentHashMap
 private const val TAG = "ExpoGattServer"
 private const val DEFAULT_ATT_MTU = 23
 private const val ATT_HEADER_SIZE = 3
-private val MTU_SMALL_BYTES = "MTU_SMALL".toByteArray(Charsets.UTF_8)
 
 open class GattServerException(val code: String, message: String) : Exception(message)
 class MtuException(code: String, message: String) : GattServerException(code, message)
@@ -247,22 +246,20 @@ class GattServerManager(
     val characteristic = service.getCharacteristic(UUID.fromString(characteristicUuid))
       ?: throw IllegalArgumentException("Characteristic $characteristicUuid not found")
 
+    lastNotifiedCharacteristicUuid = characteristicUuid
+
+    notifyValue(server, device, characteristic, confirm, value)
+
     val negotiatedMtu = deviceMtu[deviceId]
     val mtu = negotiatedMtu ?: DEFAULT_ATT_MTU
     val maxPayload = mtu - ATT_HEADER_SIZE
     if (value.size > maxPayload) {
       if (negotiatedMtu == null) {
-        lastNotifiedCharacteristicUuid = characteristicUuid
-        notifyValue(server, device, characteristic, confirm, MTU_SMALL_BYTES)
-        throw MtuException("MTU_SMALL", "Payload size ${value.size} exceeds default MTU payload capacity of $maxPayload bytes. Client has not negotiated a larger MTU. A fallback value was sent.")
+        throw MtuException("MTU_SMALL", "Payload size ${value.size} exceeds default MTU payload capacity of $maxPayload bytes. Client has not negotiated a larger MTU.")
       } else {
         throw MtuException("PAYLOAD_EXCEEDS_MTU", "Payload size ${value.size} exceeds negotiated MTU payload capacity of $maxPayload bytes (MTU: $mtu).")
       }
     }
-
-    lastNotifiedCharacteristicUuid = characteristicUuid
-
-    notifyValue(server, device, characteristic, confirm, value)
   }
 
   fun sendResponse(deviceId: String, requestId: Int, status: Int, offset: Int, value: ByteArray) {
@@ -271,19 +268,18 @@ class GattServerManager(
       ?: throw GattServerException("REQUEST_NOT_FOUND", "Request $requestId not found or already responded")
     val device = connectedDevices[deviceId]
       ?: throw IllegalArgumentException("Device $deviceId not connected")
+    server.sendResponse(device, requestId, status, offset, value)
+
     val negotiatedMtu = deviceMtu[deviceId]
     val mtu = negotiatedMtu ?: DEFAULT_ATT_MTU
     val maxPayload = mtu - ATT_HEADER_SIZE
     if (value.size > maxPayload) {
       if (negotiatedMtu == null) {
-        server.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, MTU_SMALL_BYTES)
-        throw MtuException("MTU_SMALL", "Response size ${value.size} exceeds default MTU payload capacity of $maxPayload bytes. Client has not negotiated a larger MTU. A fallback value was sent.")
+        throw MtuException("MTU_SMALL", "Response size ${value.size} exceeds default MTU payload capacity of $maxPayload bytes. Client has not negotiated a larger MTU.")
       } else {
-        server.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_ATTRIBUTE_LENGTH, offset, ByteArray(0))
-        throw MtuException("PAYLOAD_EXCEEDS_MTU", "Response size ${value.size} exceeds negotiated MTU payload capacity of $maxPayload bytes (MTU: $mtu). An error response was sent.")
+        throw MtuException("PAYLOAD_EXCEEDS_MTU", "Response size ${value.size} exceeds negotiated MTU payload capacity of $maxPayload bytes (MTU: $mtu).")
       }
     }
-    server.sendResponse(device, requestId, status, offset, value)
   }
 
   private fun notifyValue(

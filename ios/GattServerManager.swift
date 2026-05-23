@@ -1,7 +1,6 @@
 import CoreBluetooth
 
 private let defaultAttMtuPayload = 20 // ATT_MTU 23 - 3 header bytes
-private let mtuSmallData = "MTU_SMALL".data(using: .utf8)!
 
 enum GattServerError: Error {
   case mtuSmall(maxPayload: Int, payloadSize: Int)
@@ -19,7 +18,7 @@ enum GattServerError: Error {
   var message: String {
     switch self {
     case .mtuSmall(let maxPayload, let payloadSize):
-      return "Payload size \(payloadSize) exceeds default MTU payload capacity of \(maxPayload) bytes. Client has not negotiated a larger MTU. A fallback value was sent."
+      return "Payload size \(payloadSize) exceeds default MTU payload capacity of \(maxPayload) bytes. Client has not negotiated a larger MTU."
     case .payloadExceedsMtu(let maxPayload, let payloadSize, let responded):
       let suffix = responded ? " An error response was sent." : ""
       return "Payload size \(payloadSize) exceeds negotiated MTU payload capacity of \(maxPayload) bytes.\(suffix)"
@@ -105,24 +104,22 @@ class GattServerManager: NSObject {
       return true
     }
 
+    characteristicValues[charUUID] = value
+
+    let sent = peripheralManager?.updateValue(
+      value, for: characteristic, onSubscribedCentrals: [central]
+    ) ?? false
+
     let maxPayload = central.maximumUpdateValueLength
     if value.count > maxPayload {
       if maxPayload <= defaultAttMtuPayload {
-        characteristicValues[charUUID] = mtuSmallData
-        peripheralManager?.updateValue(
-          mtuSmallData, for: characteristic, onSubscribedCentrals: [central]
-        )
         throw GattServerError.mtuSmall(maxPayload: maxPayload, payloadSize: value.count)
       } else {
         throw GattServerError.payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count, responded: false)
       }
     }
 
-    characteristicValues[charUUID] = value
-
-    return peripheralManager?.updateValue(
-      value, for: characteristic, onSubscribedCentrals: [central]
-    ) ?? false
+    return sent
   }
 
   func sendResponse(
@@ -133,21 +130,18 @@ class GattServerManager: NSObject {
       throw GattServerError.requestNotFound(requestId: requestId)
     }
 
-    let maxPayload = request.central.maximumUpdateValueLength
-    if value.count > maxPayload {
-      if maxPayload <= defaultAttMtuPayload {
-        request.value = mtuSmallData
-        peripheralManager?.respond(to: request, withResult: .success)
-        throw GattServerError.mtuSmall(maxPayload: maxPayload, payloadSize: value.count)
-      } else {
-        peripheralManager?.respond(to: request, withResult: .invalidAttributeValueLength)
-        throw GattServerError.payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count, responded: true)
-      }
-    }
-
     let result: CBATTError.Code = status == 0 ? .success : .requestNotSupported
     request.value = value
     peripheralManager?.respond(to: request, withResult: result)
+
+    let maxPayload = request.central.maximumUpdateValueLength
+    if value.count > maxPayload {
+      if maxPayload <= defaultAttMtuPayload {
+        throw GattServerError.mtuSmall(maxPayload: maxPayload, payloadSize: value.count)
+      } else {
+        throw GattServerError.payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count, responded: true)
+      }
+    }
   }
 
   func updateCharacteristicValue(
@@ -303,9 +297,6 @@ extension GattServerManager: CBPeripheralManagerDelegate {
               let characteristic = service.characteristics?.first(where: {
                 $0.uuid == charUUID
               }) as? CBMutableCharacteristic else { continue }
-
-        let maxPayload = central.maximumUpdateValueLength
-        if value.count > maxPayload { continue }
 
         let sent = peripheral.updateValue(
           value, for: characteristic, onSubscribedCentrals: [central]
