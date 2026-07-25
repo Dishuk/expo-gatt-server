@@ -1,8 +1,30 @@
+/**
+ * Per-characteristic opt-in delegation of ATT request handling to JavaScript.
+ *
+ * Every flag defaults to `false`, which keeps the module's automatic behaviour, so an existing
+ * configuration behaves exactly as it did before this option existed.
+ */
+export interface CharacteristicDelegateConfig {
+  /**
+   * Do not acknowledge writes automatically. `onCharacteristicWriteRequest` is emitted with a
+   * live `requestId` and the write stays unanswered until `sendResponse` is called with
+   * `GATT_SUCCESS` or one of the `ATT_ERROR_*` codes — the only way to reject a write.
+   *
+   * On iOS a single write callback can carry several requests. Apple requires exactly one
+   * response per callback, taken from the first request of the batch, and documents the batch as
+   * all-or-nothing, so every event produced by one batch shares a single `requestId` and the
+   * first `sendResponse` for that id answers the whole batch.
+   */
+  write?: boolean;
+}
+
 export interface GattCharacteristicConfig {
   uuid: string;
   properties: CharacteristicProperty[];
   permissions: CharacteristicPermission[];
   value?: number[];
+  /** Opt out of the module's automatic responses for this characteristic. */
+  delegate?: CharacteristicDelegateConfig;
 }
 
 export type CharacteristicProperty = 'read' | 'write' | 'writeNoResponse' | 'notify' | 'indicate';
@@ -44,6 +66,11 @@ export interface CharacteristicWriteRequestEvent {
   characteristicUuid: string;
   offset: number;
   value: number[];
+  /**
+   * `true` when the module is waiting for JavaScript to answer this request with `sendResponse`.
+   * Only ever `true` for a characteristic configured with `delegate.write` whose write actually
+   * carries a response; the module answers every other write itself before emitting the event.
+   */
   responseNeeded: boolean;
 }
 

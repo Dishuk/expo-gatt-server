@@ -18,6 +18,7 @@ export type { EventSubscription };
 export {
   type GattServiceConfig,
   type GattCharacteristicConfig,
+  type CharacteristicDelegateConfig,
   type AdvertiseConfig,
   type CharacteristicProperty,
   type CharacteristicPermission,

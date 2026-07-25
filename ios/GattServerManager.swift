@@ -46,6 +46,20 @@ enum GattServerError: Error {
   }
 }
 
+/// Identifies a characteristic within the configured GATT database.
+struct CharacteristicAddress: Hashable {
+  let service: CBUUID
+  let characteristic: CBUUID
+}
+
+/// Per-characteristic opt-in delegation of ATT request handling to JavaScript. Every flag defaults
+/// to `false`, which keeps the module answering the request itself.
+struct CharacteristicDelegation: Equatable {
+  var write = false
+
+  static let none = CharacteristicDelegation()
+}
+
 protocol GattServerManagerDelegate: AnyObject {
   func onDeviceConnected(deviceId: String, name: String?)
   func onDeviceDisconnected(deviceId: String)
@@ -87,8 +101,45 @@ class GattServerManager: NSObject {
   private var addedServices: [CBUUID: CBMutableService] = [:]
   private var subscribedCentrals: [String: [CBUUID: CBCentral]] = [:]
   private var characteristicValues: [CBUUID: Data] = [:]
-  private var pendingRequests: [Int: CBATTRequest] = [:]
+  private var pendingRequests: [Int: PendingRequest] = [:]
   private var requestCounter = 0
+  private var delegations: [CharacteristicAddress: CharacteristicDelegation] = [:]
+  // Fallback for a characteristic whose owning service cannot be identified. Only populated for
+  // characteristic UUIDs that occur exactly once in the configuration, so a hit is unambiguous.
+  private var delegationsByCharacteristic: [CBUUID: CharacteristicDelegation] = [:]
+
+  private struct PendingRequest {
+    let request: CBATTRequest
+    /// Only a read response carries a value back to the central, so only a read request's `value`
+    /// is overwritten when the response is sent. A write request's `value` is the written data and
+    /// CoreBluetooth does not document overwriting it as supported.
+    let isRead: Bool
+  }
+
+  /// Records which characteristics hand their ATT requests to JavaScript. Call before `open`.
+  func setDelegations(_ map: [CharacteristicAddress: CharacteristicDelegation]) {
+    delegations = map
+    var occurrences: [CBUUID: Int] = [:]
+    for address in map.keys {
+      occurrences[address.characteristic, default: 0] += 1
+    }
+    delegationsByCharacteristic = [:]
+    for (address, delegation) in map where occurrences[address.characteristic] == 1 {
+      delegationsByCharacteristic[address.characteristic] = delegation
+    }
+  }
+
+  /// `CBATTRequest.characteristic.service` is a weak reference, so an unambiguous
+  /// characteristic-UUID match is used rather than silently dropping the delegation.
+  private func delegation(for characteristic: CBCharacteristic) -> CharacteristicDelegation {
+    if let serviceUuid = characteristic.service?.uuid,
+       let exact = delegations[
+        CharacteristicAddress(service: serviceUuid, characteristic: characteristic.uuid)
+       ] {
+      return exact
+    }
+    return delegationsByCharacteristic[characteristic.uuid] ?? CharacteristicDelegation.none
+  }
 
   /// Opens the peripheral manager and publishes `services`. `completion` runs exactly once on the
   /// main queue — with `nil` only after every service is confirmed published, or with an error if
@@ -221,12 +272,15 @@ class GattServerManager: NSObject {
     deviceId: String, requestId: Int, status: Int,
     offset: Int, value: Data
   ) throws {
-    guard let request = pendingRequests.removeValue(forKey: requestId) else {
+    guard let pending = pendingRequests.removeValue(forKey: requestId) else {
       throw GattServerError.requestNotFound(requestId: requestId)
     }
+    let request = pending.request
 
     let result: CBATTError.Code = status == 0 ? .success : .requestNotSupported
-    request.value = value
+    if pending.isRead {
+      request.value = value
+    }
     peripheralManager?.respond(to: request, withResult: result)
 
     let maxPayload = request.central.maximumUpdateValueLength
@@ -259,6 +313,8 @@ class GattServerManager: NSObject {
     subscribedCentrals.removeAll()
     characteristicValues.removeAll()
     pendingRequests.removeAll()
+    delegations.removeAll()
+    delegationsByCharacteristic.removeAll()
     peripheralManager = nil
   }
 
@@ -359,7 +415,9 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     subscribedCentrals[deviceId]?.removeValue(forKey: characteristic.uuid)
     if subscribedCentrals[deviceId]?.isEmpty == true {
       subscribedCentrals.removeValue(forKey: deviceId)
-      pendingRequests = pendingRequests.filter { $0.value.central.identifier.uuidString != deviceId }
+      pendingRequests = pendingRequests.filter {
+        $0.value.request.central.identifier.uuidString != deviceId
+      }
       delegate?.onDeviceDisconnected(deviceId: deviceId)
     }
   }
@@ -369,7 +427,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     didReceiveRead request: CBATTRequest
   ) {
     let reqId = nextRequestId()
-    pendingRequests[reqId] = request
+    pendingRequests[reqId] = PendingRequest(request: request, isRead: true)
 
     let serviceUuid = request.characteristic.service?.uuid.uuidString ?? ""
 
@@ -396,8 +454,19 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     _ peripheral: CBPeripheralManager,
     didReceiveWrite requests: [CBATTRequest]
   ) {
-    // iOS requires exactly one response per didReceiveWrite — auto-respond before notifying JS
-    if let first = requests.first {
+    guard let first = requests.first else { return }
+
+    // Apple documents that `respond(to:withResult:)` must be called exactly once per callback,
+    // passing the first request of the array, and that the batch is all-or-nothing: "if you can't
+    // fulfill an individual request, you shouldn't fulfill any of them". So a delegated batch is
+    // registered as a single pending request backed by `first`, every event it produces carries
+    // that one id, and the first `sendResponse` for it answers the whole batch.
+    let batchId = nextRequestId()
+    let delegated = requests.contains { delegation(for: $0.characteristic).write }
+
+    if delegated {
+      pendingRequests[batchId] = PendingRequest(request: first, isRead: false)
+    } else {
       peripheral.respond(to: first, withResult: .success)
     }
 
@@ -405,7 +474,9 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       let serviceUuid = request.characteristic.service?.uuid.uuidString ?? ""
       let value = request.value ?? Data()
 
-      if let charUUID = addedServices.values
+      // A delegated batch may still be rejected, so the mirrored value is left untouched and the
+      // listener commits it with `updateCharacteristicValue` once it has accepted the write.
+      if !delegated, let charUUID = addedServices.values
         .flatMap({ $0.characteristics ?? [] })
         .first(where: { $0.uuid == request.characteristic.uuid })?.uuid {
         characteristicValues[charUUID] = value
@@ -413,12 +484,12 @@ extension GattServerManager: CBPeripheralManagerDelegate {
 
       delegate?.onCharacteristicWriteRequest(
         deviceId: request.central.identifier.uuidString,
-        requestId: 0,
+        requestId: batchId,
         serviceUuid: serviceUuid,
         characteristicUuid: request.characteristic.uuid.uuidString,
         offset: request.offset,
         value: value,
-        responseNeeded: false
+        responseNeeded: delegated
       )
     }
   }

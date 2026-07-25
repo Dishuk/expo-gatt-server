@@ -60,8 +60,10 @@ public class ExpoGattServerModule: Module {
         for serviceConfig in services {
           cbServices.append(try self.parseServiceConfig(serviceConfig, initialValues: &initialValues))
         }
+        let delegations = try self.parseDelegations(services)
         self.manager?.stop()
         let mgr = GattServerManager()
+        mgr.setDelegations(delegations)
         mgr.delegate = self
         mgr.onStateChange = { [weak self] state in
           self?.sendEvent("onBluetoothStateChanged", [
@@ -290,6 +292,28 @@ public class ExpoGattServerModule: Module {
       bytes.append(byte)
     }
     return Data(bytes)
+  }
+
+  /// Collects the characteristics that opted out of the module's automatic responses. Absent or
+  /// empty `delegate` configuration produces no entry, so the default stays fully automatic.
+  private func parseDelegations(
+    _ services: [[String: Any]]
+  ) throws -> [CharacteristicAddress: CharacteristicDelegation] {
+    var result: [CharacteristicAddress: CharacteristicDelegation] = [:]
+    for serviceConfig in services {
+      let serviceUuid = try parseUuid(serviceConfig["uuid"], field: "service")
+      guard let charList = serviceConfig["characteristics"] as? [[String: Any]] else { continue }
+      for charMap in charList {
+        guard let delegateMap = charMap["delegate"] as? [String: Any] else { continue }
+        let delegation = CharacteristicDelegation(
+          write: delegateMap["write"] as? Bool ?? false
+        )
+        if delegation == CharacteristicDelegation.none { continue }
+        let charUuid = try parseUuid(charMap["uuid"], field: "characteristic")
+        result[CharacteristicAddress(service: serviceUuid, characteristic: charUuid)] = delegation
+      }
+    }
+    return result
   }
 
   private func parseServiceConfig(

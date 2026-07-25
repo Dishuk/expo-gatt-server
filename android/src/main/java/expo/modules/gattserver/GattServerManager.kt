@@ -25,6 +25,21 @@ private const val ATT_HEADER_SIZE = 3
 open class GattServerException(val code: String, message: String) : Exception(message)
 class MtuException(code: String, message: String) : GattServerException(code, message)
 
+/** Identifies a characteristic within the configured GATT database. */
+data class CharacteristicAddress(val service: UUID, val characteristic: UUID)
+
+/**
+ * Per-characteristic opt-in delegation of ATT request handling to JavaScript. Every flag defaults
+ * to `false`, which keeps the module answering the request itself.
+ */
+data class CharacteristicDelegation(
+  val write: Boolean = false,
+) {
+  companion object {
+    val none = CharacteristicDelegation()
+  }
+}
+
 /**
  * Maps a [BluetoothAdapter] state constant onto the platform-neutral state union shared with iOS.
  * The two transitional states are reported as `resetting` because the platform documents both as
@@ -75,6 +90,13 @@ class GattServerManager(
   private val pendingRequests = ConcurrentHashMap<Int, String>()
   private var lastNotifiedCharacteristicUuid: String = ""
 
+  // Delegation is fixed for the lifetime of a server but is read from the binder threads that
+  // deliver the GATT callbacks, so both maps are concurrent.
+  private val delegations = ConcurrentHashMap<CharacteristicAddress, CharacteristicDelegation>()
+  // Fallback for a characteristic whose owning service cannot be identified. Only populated for
+  // characteristic UUIDs that occur exactly once in the configuration, so a hit is unambiguous.
+  private val delegationsByCharacteristic = ConcurrentHashMap<UUID, CharacteristicDelegation>()
+
   // `BluetoothGattServer.addService` is asynchronous and documents "Do not add another service
   // before this callback", so services are queued and added strictly one at a time as
   // `onServiceAdded` acknowledges each one. Both fields are touched from the caller's thread and
@@ -87,6 +109,29 @@ class GattServerManager(
   // registration pass. Re-adding the previously registered instances would reuse the instance IDs
   // the framework assigned them, and the platform does not document that as supported.
   private val serviceFactory = AtomicReference<(() -> List<BluetoothGattService>)?>(null)
+
+  /**
+   * Records which characteristics hand their ATT requests to JavaScript. Call before [open]; the
+   * configuration is retained across the server rebuilds that an adapter power cycle triggers.
+   */
+  fun setDelegations(map: Map<CharacteristicAddress, CharacteristicDelegation>) {
+    delegations.clear()
+    delegationsByCharacteristic.clear()
+    delegations.putAll(map)
+    val occurrences = map.keys.groupingBy { it.characteristic }.eachCount()
+    for ((address, delegation) in map) {
+      if (occurrences[address.characteristic] == 1) {
+        delegationsByCharacteristic[address.characteristic] = delegation
+      }
+    }
+  }
+
+  private fun delegationFor(characteristic: BluetoothGattCharacteristic): CharacteristicDelegation {
+    characteristic.service?.uuid?.let { serviceUuid ->
+      delegations[CharacteristicAddress(serviceUuid, characteristic.uuid)]?.let { return it }
+    }
+    return delegationsByCharacteristic[characteristic.uuid] ?: CharacteristicDelegation.none
+  }
 
   /** Invoked for every adapter state change while the server is open. */
   var onStateChange: ((String) -> Unit)? = null
@@ -205,12 +250,22 @@ class GattServerManager(
     ) {
       val serviceUuid = characteristic.service?.uuid?.toString() ?: ""
       val data = value ?: ByteArray(0)
-      if (responseNeeded) {
+      // A write without a response cannot be answered at all, so it is never delegated even when
+      // the characteristic opted in — there is nothing for JavaScript to reply to.
+      val delegated = delegationFor(characteristic).write && responseNeeded
+      Log.d(TAG, "onCharacteristicWriteRequest: device=${device.address} char=${characteristic.uuid} offset=$offset responseNeeded=$responseNeeded delegated=$delegated")
+
+      if (delegated) {
+        // Registered before the event is emitted so a listener that responds synchronously still
+        // finds the request.
+        pendingRequests[requestId] = device.address
+      } else if (responseNeeded) {
         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, data)
       }
+
       listener?.onCharacteristicWriteRequest(
-        device.address, 0, serviceUuid,
-        characteristic.uuid.toString(), offset, data, false
+        device.address, requestId, serviceUuid,
+        characteristic.uuid.toString(), offset, data, delegated
       )
     }
 
@@ -492,5 +547,7 @@ class GattServerManager(
     connectedDevices.clear()
     deviceMtu.clear()
     pendingRequests.clear()
+    delegations.clear()
+    delegationsByCharacteristic.clear()
   }
 }

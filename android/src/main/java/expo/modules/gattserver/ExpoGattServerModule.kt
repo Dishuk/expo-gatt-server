@@ -64,6 +64,7 @@ class ExpoGattServerModule : Module() {
         // Parse once up front so malformed configuration rejects synchronously, then hand the
         // manager a factory it can call again to rebuild the services after a power cycle.
         services.forEach { parseServiceConfig(it) }
+        mgr.setDelegations(parseDelegations(services))
         manager = mgr
         // Resolves only once every service is confirmed registered — until then the server has
         // no attributes to expose and advertising it would be meaningless.
@@ -246,6 +247,31 @@ class ExpoGattServerModule : Module() {
       bytes[index] = intValue.toByte()
     }
     return bytes
+  }
+
+  /**
+   * Collects the characteristics that opted out of the module's automatic responses. Absent or
+   * empty `delegate` configuration produces no entry, so the default stays fully automatic.
+   */
+  private fun parseDelegations(
+    services: List<Map<String, Any?>>
+  ): Map<CharacteristicAddress, CharacteristicDelegation> {
+    val result = mutableMapOf<CharacteristicAddress, CharacteristicDelegation>()
+    for (service in services) {
+      val serviceUuid = UUID.fromString(service["uuid"] as String)
+      val characteristics = (service["characteristics"] as? List<*>) ?: emptyList<Any>()
+      for (item in characteristics) {
+        val charMap = item as? Map<*, *> ?: continue
+        val delegate = charMap["delegate"] as? Map<*, *> ?: continue
+        val delegation = CharacteristicDelegation(
+          write = delegate["write"] as? Boolean ?: false,
+        )
+        if (delegation == CharacteristicDelegation.none) continue
+        result[CharacteristicAddress(serviceUuid, UUID.fromString(charMap["uuid"] as String))] =
+          delegation
+      }
+    }
+    return result
   }
 
   private fun parseServiceConfig(map: Map<String, Any?>): BluetoothGattService {
