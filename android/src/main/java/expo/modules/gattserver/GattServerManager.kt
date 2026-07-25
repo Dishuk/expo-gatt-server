@@ -313,7 +313,17 @@ class GattServerManager(
       // An opted-in characteristic always reaches JS, however current the mirrored value looks.
       val delegated = delegationFor(characteristic).read
 
-      if (!delegated && value != null && offset <= value.size) {
+      if (!delegated && value != null) {
+        // An offset past the end of the value is answered with the error the specification
+        // requires — 0x07 "Invalid Offset", `BluetoothGatt.GATT_INVALID_OFFSET` (Core
+        // Specification, Vol 3, Part F, Section 3.4.1.1) — rather than handed to a listener the
+        // characteristic never opted in to, which left the central waiting for its ATT transaction
+        // to time out. An offset equal to the length is in range and answered with an empty value.
+        if (offset > value.size) {
+          Log.w(TAG, "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset past end of ${value.size}-byte value, rejecting")
+          gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null)
+          return
+        }
         val responseValue = if (offset < value.size) {
           value.copyOfRange(offset, value.size)
         } else {

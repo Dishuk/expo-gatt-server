@@ -737,12 +737,21 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     if !delegation(for: request.characteristic).read,
        let value = characteristicValues[request.characteristic.uuid] {
       let offset = request.offset
-      if offset <= value.count {
+      pendingRequests.removeValue(forKey: reqId)
+
+      // An offset past the end of the value is answered with the error the specification requires —
+      // 0x07 "Invalid Offset", `CBATTError.invalidOffset` (Core Specification, Vol 3, Part F,
+      // Section 3.4.1.1) — rather than handed to a listener the characteristic never opted in to,
+      // which left the central waiting for its ATT transaction to time out. This is also exactly
+      // what Apple's own peripheral-role guidance prescribes. An offset equal to the length is
+      // in range and answered with an empty value.
+      if offset > value.count {
+        peripheral.respond(to: request, withResult: .invalidOffset)
+      } else {
         request.value = offset < value.count ? value.subdata(in: offset..<value.count) : Data()
         peripheral.respond(to: request, withResult: .success)
-        pendingRequests.removeValue(forKey: reqId)
-        return
       }
+      return
     }
 
     delegate?.onCharacteristicReadRequest(

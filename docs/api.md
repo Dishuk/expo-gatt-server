@@ -272,6 +272,11 @@ Fired when a central reads a characteristic that has no cached value. Respond wi
 
 > **Note:** If the characteristic has a cached value (from `value` in config or `updateCharacteristicValue`), the native layer auto-responds and this listener is not called.
 
+> **Note:** A read whose offset is past the end of the cached value is answered directly with ATT
+> error `0x07` "Invalid Offset" (Core Specification, Vol 3, Part F, Section 3.4.1.1) and does not
+> reach this listener. An offset equal to the value's length is in range and answers with an empty
+> value, as the specification intends for a Read Blob that has consumed the whole attribute.
+
 ---
 
 ### addCharacteristicWriteRequestListener
