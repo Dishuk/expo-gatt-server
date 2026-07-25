@@ -1039,6 +1039,10 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     _ peripheral: CBPeripheralManager,
     didAdd service: CBService, error: Error?
   ) {
+    // Bluetooth dropping mid-registration discards the database while adds are still outstanding; without
+    // this the late acknowledgement would publish it again and report a server that no longer exists.
+    guard publication == .inProgress else { return }
+
     servicesAwaitingRegistration.remove(service.uuid)
 
     if let error = error {
