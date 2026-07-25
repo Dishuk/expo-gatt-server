@@ -552,7 +552,7 @@ public class ExpoGattServerModule: Module {
 
     let characteristic = CBMutableCharacteristic(
       type: uuid,
-      properties: properties,
+      properties: securedSubscription(properties, permissions),
       value: nil,
       permissions: permissions
     )
@@ -562,6 +562,39 @@ public class ExpoGattServerModule: Module {
     }
 
     return characteristic
+  }
+
+  /// Raises the security of the subscription itself to match the security declared on the value.
+  ///
+  /// A `CBAttributePermissions` member guards only a read or a write of the value; nothing in it reaches
+  /// the Client Characteristic Configuration descriptor, which CoreBluetooth owns and never exposes. The
+  /// only gate on subscribing is the separate property pair Apple documents as "only trusted devices can
+  /// enable notifications/indications of the characteristic value", so without this an unpaired central
+  /// could subscribe to a characteristic whose direct read it is refused and receive every later value in
+  /// cleartext — the same hole Android leaves in that descriptor's own write permission.
+  ///
+  /// Derived from the permissions rather than exposed as two more `CharacteristicProperty` names so that
+  /// one configuration means the same thing on both platforms and no consumer has to branch on the OS.
+  /// The plain `.notify`/`.indicate` member is kept alongside: it is what sets the corresponding bit of
+  /// the published characteristic declaration (Core Spec Vol 3, Part G, Table 3.5), which a central needs
+  /// to see before it will subscribe at all.
+  private func securedSubscription(
+    _ properties: CBCharacteristicProperties,
+    _ permissions: CBAttributePermissions
+  ) -> CBCharacteristicProperties {
+    guard permissions.contains(.readEncryptionRequired)
+      || permissions.contains(.writeEncryptionRequired) else {
+      return properties
+    }
+
+    var secured = properties
+    if properties.contains(.notify) {
+      secured.insert(.notifyEncryptionRequired)
+    }
+    if properties.contains(.indicate) {
+      secured.insert(.indicateEncryptionRequired)
+    }
+    return secured
   }
 
   /// `CBMutableDescriptor` is documented as supporting "only the `Characteristic User Description` and

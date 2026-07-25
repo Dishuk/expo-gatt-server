@@ -155,6 +155,11 @@ per-platform mapping and the reasoning.
 An unrecognised property or permission name throws, so a typo cannot silently publish an attribute with
 one fewer of either than the configuration asked for.
 
+An encrypted permission also applies to subscriptions, so a central cannot receive by notification what
+it may not read directly: combining `notify` or `indicate` with `readEncrypted` or `writeEncrypted`
+means a central must reach that link security before it can subscribe. See
+[Permissions and subscriptions](./api.md#permissions-and-subscriptions).
+
 ### Optional extras
 
 | Field | Purpose |

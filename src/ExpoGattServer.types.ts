@@ -116,6 +116,13 @@ export type CharacteristicProperty =
  * asked for — an MITM variant demands authenticated pairing rather than any encrypted link, a signed
  * variant a signature over an unencrypted one — so the call fails rather than publishing an attribute
  * less protected than the app declared.
+ *
+ * An encrypted permission also raises the security of the *subscription*, so a central cannot receive
+ * by notification what it may not read directly: Android publishes the Client Characteristic
+ * Configuration descriptor with the matching encrypted write permission, and iOS adds
+ * `.notifyEncryptionRequired`/`.indicateEncryptionRequired` to the declared property. Both are a
+ * behaviour change for a characteristic that declares `notify` or `indicate` alongside `readEncrypted`
+ * or `writeEncrypted` — an unpaired central can no longer subscribe.
  */
 export type CharacteristicPermission =
   | 'readable'

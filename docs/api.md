@@ -1349,13 +1349,34 @@ A characteristic declaring only `readable` and `writeable` keeps the plain
 `GATT_INSUF_ENCRYPTION` or `GATT_INSUF_AUTHENTICATION`, where before it could subscribe and receive
 every value in cleartext.
 
-> **The residual limitation.** `sendNotification` with `requireSubscription: false` sends without any
-> subscription, and so without the descriptor check above. Android offers nothing at this layer to
-> replace it with: `BluetoothDevice.isEncrypted()` is `@hide`/`@SystemApi` and unreachable from an
-> app, and the public `getBondState()` answers a different question — LE pairing without bonding
-> leaves it at `BOND_NONE` over an encrypted link, and a bonded device is not necessarily on an
-> encrypted one. Leave `requireSubscription` at its default of `true` for a characteristic whose value
-> needs a secure link.
+iOS reaches the same place by a different mechanism. CoreBluetooth owns the CCCD and never exposes it,
+and `CBAttributePermissions` guards only a read or a write of the value — so the gate on subscribing is
+the separate property pair Apple documents as "only trusted devices can enable
+notifications/indications of the characteristic value". A characteristic declaring `notify` or
+`indicate` together with `readEncrypted` or `writeEncrypted` is therefore published with
+`.notifyEncryptionRequired` / `.indicateEncryptionRequired` added to the property it declared:
+
+| Characteristic declares | iOS properties published |
+|---|---|
+| `notify`, no encrypted permission | `.notify` |
+| `notify` + `readEncrypted` or `writeEncrypted` | `.notify`, `.notifyEncryptionRequired` |
+| `indicate` + `readEncrypted` or `writeEncrypted` | `.indicate`, `.indicateEncryptionRequired` |
+
+These are derived rather than offered as two more [`CharacteristicProperty`](#characteristicproperty)
+names, so one configuration means the same thing on both platforms and nothing has to branch on
+`Platform.OS`. The plain member is kept alongside, because it is what sets the matching bit of the
+published characteristic declaration (Vol 3, Part G, Table 3.5) that a central looks for before it
+subscribes at all. The MITM and signed permissions are still rejected on iOS before any of this
+applies.
+
+> **The residual limitation, on Android only.** `sendNotification` with `requireSubscription: false`
+> transmits to a device that never subscribed, and so never passed the descriptor check above. Android
+> offers nothing at this layer to check instead: `BluetoothDevice.isEncrypted()` is `@hide`/`@SystemApi`
+> and unreachable from an app, and the public `getBondState()` answers a different question — LE pairing
+> without bonding leaves it at `BOND_NONE` over an encrypted link, and a bonded device is not
+> necessarily on an encrypted one. Leave `requireSubscription` at its default of `true` for a
+> characteristic whose value needs a secure link. iOS has no such gap: `updateValue` "ignores any
+> centrals that haven't subscribed", so there is no send to force.
 
 ### AdvertiseConfig
 

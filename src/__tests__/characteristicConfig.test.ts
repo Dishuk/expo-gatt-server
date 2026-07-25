@@ -116,6 +116,41 @@ describe('characteristic permissions', () => {
   });
 });
 
+// Both platforms raise the security of the subscription itself from these combinations, so the
+// configuration has to survive validation on either one for that to be reachable at all.
+describe('encrypted subscriptions', () => {
+  it.each([
+    ['notify', 'readEncrypted'],
+    ['notify', 'writeEncrypted'],
+    ['indicate', 'readEncrypted'],
+    ['indicate', 'writeEncrypted'],
+  ])('accepts %s with %s', async (property, permission) => {
+    nativeModuleMock.createServer.mockClear();
+    await expect(
+      publish({
+        properties: [property as CharacteristicProperty],
+        permissions: [permission as CharacteristicPermission],
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(nativeModuleMock.createServer).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          uuid: SERVICE,
+          characteristics: [
+            expect.objectContaining({
+              uuid: CHARACTERISTIC,
+              properties: [property],
+              permissions: [permission],
+            }),
+          ],
+        }),
+      ],
+      expect.anything(),
+    );
+  });
+});
+
 describe('descriptors', () => {
   it('rejects a manually declared CCCD in its 128-bit form', async () => {
     await expect(

@@ -232,6 +232,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read it was correctly refused and then receive every value in cleartext. A characteristic declaring
   only `readable` and `writeable` is unaffected; one declaring an encrypted permission now requires that
   link security before a central can subscribe
+- **Breaking:** on iOS a characteristic declaring `notify` or `indicate` alongside `readEncrypted` or
+  `writeEncrypted` is published with `.notifyEncryptionRequired` / `.indicateEncryptionRequired` added
+  to the property it declared, so only a trusted device can enable the subscription. CoreBluetooth owns
+  the Client Characteristic Configuration descriptor and `CBAttributePermissions` guards only a read or
+  a write of the value, leaving that property pair as the one gate on subscribing — without it iOS had
+  the same hole Android did. Derived from the permissions rather than exposed as new property names, so
+  the configuration means the same thing on both platforms and nothing has to branch on `Platform.OS`
 - `onNotificationSent` reports the characteristic the notification actually carried
 - iOS resends only the payload the transmit queue refused, instead of pushing cached values to every
   subscribed central
