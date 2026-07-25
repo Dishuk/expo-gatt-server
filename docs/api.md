@@ -243,22 +243,27 @@ Begin BLE advertisement. The device becomes visible to nearby scanners.
 | `config.android.setAdapterName` | `boolean` | `false` | Rename the device's Bluetooth adapter to `localName` |
 
 Requires a **published** database, not merely a server object: `startAdvertising` rejects with
-`ERR_NO_SERVER` before `createServer`, before its promise resolves, after a service failed to publish,
-and after Bluetooth went down and took the database with it. Advertising a half-built or empty database
-would otherwise expose it to scanners, which is worse than not advertising at all.
-[`isServerRunning`](#isserverrunning) reports the same condition, so awaiting `createServer` is all that
-is normally needed.
+`ERR_NO_SERVER` before `createServer`, after a service failed to publish, and after Bluetooth went down
+and took the database with it. Advertising a half-built or empty database would otherwise expose it to
+scanners, which is worse than not advertising at all. [`isServerRunning`](#isserverrunning) reports the
+same condition, so awaiting `createServer` is all that is normally needed.
 
-On iOS the call **waits** for Bluetooth to reach a definitive state rather than sampling it, because
-`CBPeripheralManager.state` is `unknown` until its first callback arrives -- so calling
-`startAdvertising` immediately after awaiting `createServer` is safe. A terminal state rejects with
-`ERR_BLUETOOTH`, or `ERR_PERMISSION` when Bluetooth is unauthorized.
+**A publication still in flight is waited for on iOS and rejected on Android.** On iOS the call parks
+until the database is published rather than sampling the state, because `CBPeripheralManager.state` is
+`unknown` until its first callback arrives and the services it then publishes are only acknowledged
+some callbacks later -- so `startAdvertising` is safe both immediately after awaiting `createServer` and
+alongside a `createServer` that has not resolved yet, and safe from a `poweredOn` event handler. A
+terminal Bluetooth state rejects with `ERR_BLUETOOTH`, or `ERR_PERMISSION` when Bluetooth is
+unauthorized, and a publication that failed rejects with `ERR_NO_SERVER`. Android has no such wait: a
+call made while the services are still registering rejects with `ERR_NO_SERVER` straight away. Await
+`createServer`, or retry once [`isServerRunning`](#isserverrunning) is `true`, for behaviour that holds
+on both.
 
 **Rejects** with:
 
 | Code | When |
 |---|---|
-| `ERR_NO_SERVER` | No server exists, or its database is not published -- `createServer` has not resolved, or a service failed to publish |
+| `ERR_NO_SERVER` | No server exists, or its database is not published -- a service failed to publish, or, on Android, `createServer` has not resolved yet |
 | `ERR_PERMISSION` | Android: `BLUETOOTH_ADVERTISE` is not granted, or `BLUETOOTH_CONNECT` is not granted while `android.setAdapterName` is set (API 31+). iOS: Bluetooth is unauthorized |
 | `ERR_NO_CONTEXT` | Android only: no React context, so the permission could not be checked |
 | `ERR_UNSUPPORTED` | iOS: `manufacturerData`, `serviceData` or `connectable: false` was supplied. Android: the adapter has no BLE advertising support, which no amount of retrying changes |
@@ -1077,6 +1082,22 @@ so expect `onCharacteristicUnsubscribed` and `onDeviceDisconnected` for everythi
 module **re-publishes the services** on the next transition to `poweredOn`, at which point
 [`isServerRunning`](#isserverrunning) goes `true` again -- but **advertising is not restarted**, so
 call `startAdvertising` again yourself.
+
+The event fires *before* that re-publication has finished, so the two platforms answer a
+`startAdvertising` made straight from the handler differently: iOS parks the call until the services
+are published and then advertises, while Android rejects it with `ERR_NO_SERVER` because the
+registration is still in flight. Retry there until [`isServerRunning`](#isserverrunning) is `true`:
+
+```typescript
+addBluetoothStateChangedListener(async ({ state }) => {
+  if (state !== 'poweredOn') return;
+  // iOS parks the call itself, so this loop exits on the first check there.
+  for (let attempt = 0; attempt < 20 && !(await isServerRunning()); attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await startAdvertising({ serviceUuids: [SERVICE_UUID] });
+});
+```
 
 **On iOS `resetting` does the same.** `CBManagerState.resetting` sorts *below* `poweredOff`, and Apple
 documents any state below it as clearing the local database and disconnecting every central, so the

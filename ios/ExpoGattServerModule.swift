@@ -198,10 +198,10 @@ public class ExpoGattServerModule: Module {
           promise.reject("ERR_NO_SERVER", "Server not created. Call createServer first.")
           return
         }
-        // Waits for a definitive powered-on state rather than sampling it: a synchronous read is
-        // `.unknown` until peripheralManagerDidUpdateState fires, which rejected perfectly healthy
-        // calls made straight after createServer.
-        mgr.whenPoweredOn { readinessError in
+        // Waits for the database to be published rather than sampling the state: it is `.unknown` until
+        // peripheralManagerDidUpdateState fires and the publication that follows takes further
+        // main-queue turns, which rejected perfectly healthy calls made straight after createServer.
+        mgr.whenDatabasePublished { readinessError in
           if let readinessError = readinessError as? GattServerError {
             promise.reject(readinessError.code, readinessError.message)
             return

@@ -263,10 +263,22 @@ class GattServerManager: NSObject {
   private var advertisingTimeout: DispatchWorkItem?
   private var addedServices: [CBUUID: CBMutableService] = [:]
 
-  /// Whether every configured service is currently published. Apple documents that "the powered off
-  /// state clears the local database", so this drops on any state below powered on and is set again
-  /// once the re-publish that follows powering on is acknowledged.
-  private var databasePublished = false
+  /// How far the current round of `add(_:)` calls has got. Apple documents that "the powered off state
+  /// clears the local database", so this drops back to `idle` on any state below powered on and only
+  /// reaches `published` once the re-publish that follows powering on is acknowledged.
+  private enum DatabasePublication {
+    /// Nothing is published and a publication round is still expected — before the first state update,
+    /// and after a transient state discarded the database.
+    case idle
+    case inProgress
+    case published
+    case failed
+  }
+
+  private var publication: DatabasePublication = .idle
+
+  /// Whether every configured service is currently published.
+  private var databasePublished: Bool { publication == .published }
 
   /// Whether the current round of `add(_:)` calls has already had one service rejected. The callbacks
   /// arrive in no guaranteed order, so without this a failure followed by a success would see nothing
@@ -353,18 +365,29 @@ class GattServerManager: NSObject {
     peripheralManager?.state ?? .unknown
   }
 
-  /// Invokes `completion` once Bluetooth is known to be powered on, rather than sampling `state`
+  /// Invokes `completion` once the configured services are published, rather than sampling `state`
   /// synchronously: a synchronous read right after `open` still returns `.unknown`, because the state
-  /// only becomes meaningful when `peripheralManagerDidUpdateState` fires. Transient states park the
-  /// caller until the next definitive update; terminal states fail it immediately.
-  func whenPoweredOn(_ completion: @escaping (Error?) -> Void) {
+  /// only becomes meaningful when `peripheralManagerDidUpdateState` fires, and the publication that
+  /// transition starts finishes in later main-queue turns again. Powering on is therefore not enough to
+  /// release a parked caller — anything requiring a published database would find one half-built.
+  ///
+  /// A transient state or a publication still running parks the caller; a terminal state or a
+  /// publication that failed fails it immediately.
+  func whenDatabasePublished(_ completion: @escaping (Error?) -> Void) {
     guard let peripheral = peripheralManager else {
       completion(GattServerError.serverStopped)
       return
     }
     switch peripheral.state {
     case .poweredOn:
-      completion(nil)
+      switch publication {
+      case .published:
+        completion(nil)
+      case .failed:
+        completion(GattServerError.databaseNotPublished)
+      case .idle, .inProgress:
+        readinessWaiters.append(completion)
+      }
     case .unknown, .resetting:
       readinessWaiters.append(completion)
     default:
@@ -387,12 +410,13 @@ class GattServerManager: NSObject {
   }
 
   private func publishConfiguredServices(on peripheral: CBPeripheralManager) {
-    databasePublished = false
+    publication = .inProgress
     registrationFailed = false
     servicesAwaitingRegistration = Set(serviceConfiguration.map { $0.uuid })
     guard !servicesAwaitingRegistration.isEmpty else {
-      databasePublished = true
+      publication = .published
       completeOpen(nil)
+      flushReadinessWaiters(nil)
       return
     }
     for service in serviceConfiguration {
@@ -792,7 +816,7 @@ class GattServerManager: NSObject {
     // back to life through either route.
     serviceConfiguration.removeAll()
     servicesAwaitingRegistration.removeAll()
-    databasePublished = false
+    publication = .idle
     registrationFailed = false
     addedServices.removeAll()
     connectedCentrals.removeAll()
@@ -939,9 +963,9 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     case .poweredOn:
       // Apple documents that "the powered off state clears the local database; in this case you must
       // explicitly re-add all services", which is why `serviceConfiguration` is retained and every
-      // transition to powered on re-publishes it — the first one included.
+      // transition to powered on re-publishes it — the first one included. Waiters are released by the
+      // publication itself, several main-queue turns later, rather than here.
       publishConfiguredServices(on: peripheral)
-      flushReadinessWaiters(nil)
     case .unknown:
       // Nothing has happened yet — a further state update is coming.
       break
@@ -967,7 +991,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
   /// `resetting` as well as `poweredOff`, `unauthorized` and `unsupported`. Requests are dropped rather
   /// than answered, because the bearers they belong to are gone with the connections.
   private func discardPublishedDatabase(reason: GattServerError) {
-    databasePublished = false
+    publication = .idle
     servicesAwaitingRegistration.removeAll()
 
     // Every subscription dies with the database, so report each one as ended.
@@ -1007,7 +1031,6 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     servicesAwaitingRegistration.remove(service.uuid)
 
     if let error = error {
-      databasePublished = false
       registrationFailed = true
       completeOpen(GattServerError.serviceRegistrationFailed(
         uuid: service.uuid.normalizedString,
@@ -1027,10 +1050,15 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     // than abandoned — which is what makes the unpublish below safe to schedule.
     guard servicesAwaitingRegistration.isEmpty else { return }
     if registrationFailed {
+      publication = .failed
       unpublishFailedRegistration()
+      // Settled here rather than left parked for a re-publish that is not coming: nothing retries a
+      // failed registration, so the next state update is the only other thing that could release them.
+      flushReadinessWaiters(GattServerError.databaseNotPublished)
     } else {
-      databasePublished = true
+      publication = .published
       completeOpen(nil)
+      flushReadinessWaiters(nil)
     }
   }
 
