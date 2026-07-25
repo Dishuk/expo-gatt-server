@@ -1158,9 +1158,17 @@ class GattServerManager(
         candidate
       }
       val error = dispatchNotification(deviceId, next) ?: return
-      synchronized(queue) {
-        if (queue.inFlight === next) queue.inFlight = null
+      // Only the thread that still owns the entry may settle it: a disconnect or a stop can take it
+      // during the dispatch and settle it first, and a second settle throws on a release build.
+      val stillOurs = synchronized(queue) {
+        if (queue.inFlight !== next) {
+          false
+        } else {
+          queue.inFlight = null
+          true
+        }
       }
+      if (!stillOurs) return
       next.onResult(error)
     }
   }
