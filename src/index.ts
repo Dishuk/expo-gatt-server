@@ -401,6 +401,10 @@ export function stopAdvertising(): void {
  *
  * Rejects with `ERR_NO_SUBSCRIBER` when the device has not enabled the transmission on the
  * characteristic. See `options.requireSubscription` to send anyway where the platform allows it.
+ *
+ * **Does not change the value a read returns.** Pushing a value to subscribers and setting the value
+ * an ATT Read is answered from are separate operations; `updateCharacteristicValue` does the latter,
+ * so call both when a value should be pushed *and* readable.
  */
 export async function sendNotification(
   deviceId: string,
@@ -465,8 +469,8 @@ export async function sendResponse(
 }
 
 /**
- * Replaces the value a read of this characteristic is answered from. Does not notify anybody; use
- * `sendNotification` to push the new value to subscribed centrals.
+ * Replaces the value a read of this characteristic is answered from. Does not notify anybody, and
+ * `sendNotification` does not do this — use both to push a value and make it readable.
  *
  * Rejects with `ERR_CHARACTERISTIC_NOT_FOUND` when the pair of UUIDs names nothing in the published
  * database, and with `ERR_NO_SERVER` when no server exists, rather than resolving silently and

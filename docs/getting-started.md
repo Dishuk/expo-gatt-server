@@ -410,6 +410,14 @@ await sendNotification(deviceId, '180d', '2a37', heartRate);
 The central must have subscribed first, or the call rejects with `ERR_NO_SUBSCRIBER` -- wait for
 `onCharacteristicSubscribed`.
 
+This pushes the value; it does **not** change what a read of the characteristic returns. Call
+`updateCharacteristicValue` first if it should also be readable:
+
+```typescript
+await updateCharacteristicValue('180d', '2a37', heartRate);
+await sendNotification(deviceId, '180d', '2a37', heartRate);
+```
+
 **The promise resolves when the platform reports the send as complete**, not when it is handed to the
 Bluetooth stack, and sends issued while an earlier one is still in flight are queued in order. So
 awaiting it is what paces a stream against the link:

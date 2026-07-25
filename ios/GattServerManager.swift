@@ -466,6 +466,11 @@ class GattServerManager: NSObject {
   /// `confirm` is validated against the declared properties and then goes no further, because
   /// `updateValue` takes no such parameter and derives notification versus indication from those same
   /// properties. Validating is the only way the flag can mean anything here.
+  ///
+  /// The mirrored value is deliberately left alone: this pushes a value to subscribers, while a read is
+  /// answered from whatever `updateCharacteristicValue` last stored. Mirroring here also used to give a
+  /// characteristic configured without a `value` one, which silently stopped its reads reaching the
+  /// listener.
   func sendNotification(
     deviceId: String, serviceUuid: String,
     characteristicUuid: String, value: Data, confirm: Bool,
@@ -495,10 +500,6 @@ class GattServerManager: NSObject {
         characteristic: characteristicUuid, confirm: confirm
       )
     }
-
-    // The mirrored value is updated either way, so a read still serves the latest value even when
-    // no one is listening for it.
-    characteristicValues[charUUID] = value
 
     // Checked before the subscription, so an unknown central is told it is not connected rather than
     // that it has not subscribed — the same distinction Android draws.

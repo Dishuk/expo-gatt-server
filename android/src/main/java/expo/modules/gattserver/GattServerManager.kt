@@ -294,8 +294,8 @@ class GattServerManager(
   // `BluetoothGattCharacteristic.value` is a plain non-volatile field the framework never synchronises,
   // and it is both the mirrored attribute value and — on the pre-33 `notifyCharacteristicChanged`
   // overload — the payload a send reads. So every mutation goes through this monitor: it publishes the
-  // value to the binder threads that answer reads, and keeps the pre-33 assign-then-notify pair atomic
-  // against a write or another device's send targeting the same characteristic.
+  // value to the binder threads that answer reads, and keeps the pre-33 park-notify-restore sequence
+  // atomic against a write or another device's send targeting the same characteristic.
   private val characteristicValueLock = Any()
 
   // Delegation is fixed for the lifetime of a server but is read from the binder threads that deliver
@@ -1486,11 +1486,24 @@ class GattServerManager(
       }
       return null
     }
+    // No pre-33 overload takes the payload: `notifyCharacteristicChanged(device, characteristic,
+    // confirm)` reads it from `characteristic.getValue()` and rejects a null one outright. So the payload
+    // is parked in the mirrored value for the duration of the call and the stored value put back
+    // afterwards, which is what keeps a send from changing what a read returns here as it does on 33+.
+    // Restoring cannot truncate the notification: the framework reads the field and hands the array over
+    // binder before returning.
     val triggered = synchronized(characteristicValueLock) {
       @Suppress("DEPRECATION")
-      characteristic.value = payload
+      val stored = characteristic.value
       @Suppress("DEPRECATION")
-      server.notifyCharacteristicChanged(device, characteristic, confirm)
+      characteristic.value = payload
+      try {
+        @Suppress("DEPRECATION")
+        server.notifyCharacteristicChanged(device, characteristic, confirm)
+      } finally {
+        @Suppress("DEPRECATION")
+        characteristic.value = stored
+      }
     }
     if (!triggered) {
       return GattServerException(

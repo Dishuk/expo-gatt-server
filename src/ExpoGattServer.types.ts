@@ -6,8 +6,7 @@ export interface CharacteristicDelegateConfig {
   /**
    * Always emit `onCharacteristicReadRequest` and wait for `sendResponse`, even when the
    * characteristic already has a value to serve. Computed or dynamic reads need this: without it the
-   * module answers from the last known value as soon as one exists, so the event stops firing. A
-   * configured `value` is still used for notifications.
+   * module answers from the last known value as soon as one exists, so the event stops firing.
    */
   read?: boolean;
   /**

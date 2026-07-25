@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 >   uppercase spelling that used to match on one platform no longer does
 > - `sendNotification` rejects instead of resolving when nothing is subscribed, when the characteristic
 >   does not declare the property `confirm` asks for, or when the payload exceeds the MTU
+> - `sendNotification` no longer changes the value a read returns — call `updateCharacteristicValue` too
+>   if it should
 > - `updateCharacteristicValue` returns a promise and rejects on an unknown characteristic
 > - `CharacteristicWriteRequestEvent.responseNeeded` now means "the module is waiting for you", not
 >   "the central asked for an acknowledgement"
@@ -193,6 +195,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiting before `ERR_NOTIFY_QUEUE_FULL`
 - `sendNotification` rejects with `ERR_NO_SUBSCRIBER` instead of resolving when nothing is
   subscribed to the characteristic
+- **Breaking:** `sendNotification` no longer changes the value a read of the characteristic returns.
+  Pushing a value to subscribers and setting the value an ATT Read is answered from are separate
+  operations, and `updateCharacteristicValue` is the one documented to do the latter — so a value that
+  should be both pushed and readable now needs both calls, in that order. Previously the two were
+  entangled, and inconsistently: iOS stored the payload on **every** call, before it had even checked
+  that anyone was subscribed, so a failed send still changed what a later read returned; Android stored
+  it only below API 33, as an incidental side effect of the deprecated
+  `notifyCharacteristicChanged(device, characteristic, confirm)` overload reading its payload from
+  `characteristic.getValue()`, while the API 33+ overload takes the payload directly and left the stored
+  value alone. The same call therefore changed the readable value depending on the platform *and* on the
+  Android version. Only the explicit call does now, on both platforms and every API level. This also
+  un-breaks a characteristic configured **without** a `value`: on iOS a single `sendNotification` used to
+  give it one, which silently stopped every subsequent read from reaching
+  `onCharacteristicReadRequest`. No option is offered to restore the old coupling, because
+  `updateCharacteristicValue` already expresses it in one line and an implicit second write would only
+  reintroduce the question of whether a failed send should apply it
 - **Breaking:** `updateCharacteristicValue` returns `Promise<void>` instead of `void`, and rejects
   with `ERR_CHARACTERISTIC_NOT_FOUND` or `ERR_NO_SERVER` instead of silently doing nothing when the
   UUIDs name no published characteristic. It also now runs on the main queue on iOS, where it

@@ -360,8 +360,27 @@ characteristic's value", so there is no send to force and `ERR_NO_SUBSCRIBER` is
 
 It never relaxes the `confirm` property check, which applies on both platforms regardless.
 
-The mirrored characteristic value is updated whether or not the notification could be sent, so a
-subsequent read still serves the latest value.
+#### The stored value is left alone
+
+**`sendNotification` does not change the value a read returns.** A notification pushes a value to
+subscribed centrals; the *stored* attribute value is what an ATT Read is answered from, and
+[`updateCharacteristicValue`](#updatecharacteristicvalue) is what sets it. Do both when a value should
+be pushed *and* readable:
+
+```typescript
+await updateCharacteristicValue(SERVICE, CHARACTERISTIC, value);
+await sendNotification(deviceId, SERVICE, CHARACTERISTIC, value);
+```
+
+The order is the useful one: the value is readable before the central it just notified can act on the
+notification by reading. Nothing forces you to store a notified value at all -- a characteristic that
+streams events or deltas usually should not, and one declaring only `notify` has no readable value to
+keep in step in the first place.
+
+> **This changed, and it is breaking.** The stored value used to follow a notification on iOS
+> unconditionally -- including on a failed send -- and on Android only below API 33, as a side effect
+> of the deprecated overload taking its payload from `characteristic.getValue()`. A consumer relying on
+> that must now call `updateCharacteristicValue` itself. See the [changelog](../CHANGELOG.md).
 
 The returned promise resolves once the platform reports the notification as delivered, not when the
 call is handed to the Bluetooth stack. Calls made while an earlier notification for the same device
@@ -467,12 +486,14 @@ updateCharacteristicValue(
 ): Promise<void>
 ```
 
-Update the cached value of a characteristic. Subsequent read requests from centrals are auto-responded
+Update the stored value of a characteristic. Subsequent read requests from centrals are auto-responded
 by the native layer using this value -- unless the characteristic is configured with
 [`delegate.read`](#characteristicdelegateconfig), in which case every read still reaches JavaScript
-and the cached value is only used as the payload of a notification.
+and the stored value is never consulted.
 
-Does **not** send a notification. Use `sendNotification` to push updates to subscribed centrals.
+This is the **only** call that changes what a read returns, besides an automatically acknowledged write.
+It does **not** send a notification, and [`sendNotification`](#sendnotification) does not do this -- the
+two are independent, so use both to push a value and make it readable.
 
 **Rejects** with `ERR_CHARACTERISTIC_NOT_FOUND` when the pair of UUIDs names nothing in the published
 GATT database, `ERR_NO_SERVER` when no server exists, and `ERR_BLUETOOTH` when Bluetooth is not powered
