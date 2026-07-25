@@ -29,11 +29,35 @@ export {
   GATT_FAILURE,
 } from './ExpoGattServer.types';
 
+// Accepted by CBUUID(string:) on iOS: 16-bit (4 hex digits), 32-bit (8 hex digits) or the
+// hyphenated 128-bit form. Anything else raises an uncatchable ObjC exception natively.
+const SHORT_UUID_RE = /^(?:[0-9a-fA-F]{4}|[0-9a-fA-F]{8})$/;
+const LONG_UUID_RE =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function assertValidUuid(uuid: unknown, field: string): void {
+  if (typeof uuid !== 'string' || (!SHORT_UUID_RE.test(uuid) && !LONG_UUID_RE.test(uuid))) {
+    throw new Error(
+      `Invalid ${field} UUID ${JSON.stringify(uuid)}. Expected 4 hex digits (16-bit), ` +
+        '8 hex digits (32-bit) or the hyphenated 8-4-4-4-12 form (128-bit).',
+    );
+  }
+}
+
 export async function createServer(services: GattServiceConfig[]): Promise<void> {
+  for (const service of services ?? []) {
+    assertValidUuid(service?.uuid, 'service');
+    for (const characteristic of service?.characteristics ?? []) {
+      assertValidUuid(characteristic?.uuid, 'characteristic');
+    }
+  }
   return ExpoGattServerModule.createServer(services);
 }
 
 export async function startAdvertising(config: AdvertiseConfig = {}): Promise<void> {
+  for (const uuid of config.serviceUuids ?? []) {
+    assertValidUuid(uuid, 'service');
+  }
   return ExpoGattServerModule.startAdvertising(config);
 }
 
@@ -48,6 +72,8 @@ export async function sendNotification(
   value: number[],
   confirm: boolean = false,
 ): Promise<void> {
+  assertValidUuid(serviceUuid, 'service');
+  assertValidUuid(characteristicUuid, 'characteristic');
   return ExpoGattServerModule.sendNotification(
     deviceId,
     serviceUuid,
@@ -72,6 +98,8 @@ export function updateCharacteristicValue(
   characteristicUuid: string,
   value: number[],
 ): void {
+  assertValidUuid(serviceUuid, 'service');
+  assertValidUuid(characteristicUuid, 'characteristic');
   ExpoGattServerModule.updateCharacteristicValue(serviceUuid, characteristicUuid, value);
 }
 

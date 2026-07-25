@@ -1,6 +1,11 @@
 import ExpoModulesCore
 import CoreBluetooth
 
+struct GattArgumentError: LocalizedError {
+  let message: String
+  var errorDescription: String? { message }
+}
+
 public class ExpoGattServerModule: Module {
   private var manager: GattServerManager?
 
@@ -32,13 +37,17 @@ public class ExpoGattServerModule: Module {
         return
       }
 
-      self.manager?.stop()
-      let mgr = GattServerManager()
-      mgr.delegate = self
-      let cbServices = services.map { self.parseServiceConfig($0) }
-      mgr.open(services: cbServices)
-      self.manager = mgr
-      promise.resolve(nil)
+      do {
+        let cbServices = try services.map { try self.parseServiceConfig($0) }
+        self.manager?.stop()
+        let mgr = GattServerManager()
+        mgr.delegate = self
+        mgr.open(services: cbServices)
+        self.manager = mgr
+        promise.resolve(nil)
+      } catch {
+        promise.reject("ERR_CREATE_SERVER", error.localizedDescription)
+      }
     }
 
     AsyncFunction("startAdvertising") { (config: [String: Any], promise: Promise) in
@@ -70,7 +79,14 @@ public class ExpoGattServerModule: Module {
       }
 
       let localName = config["localName"] as? String
-      let serviceUuids = (config["serviceUuids"] as? [String])?.map { CBUUID(string: $0) }
+      let serviceUuids: [CBUUID]?
+      do {
+        serviceUuids = try (config["serviceUuids"] as? [String])?
+          .map { try self.parseUuid($0, field: "service") }
+      } catch {
+        promise.reject("ERR_ADVERTISE", error.localizedDescription)
+        return
+      }
       mgr.startAdvertising(localName: localName, serviceUuids: serviceUuids) { error in
         if let error = error {
           promise.reject("ERR_ADVERTISE", error.localizedDescription)
@@ -94,6 +110,13 @@ public class ExpoGattServerModule: Module {
     ) in
       guard let mgr = self.manager else {
         promise.reject("ERR_NO_SERVER", "Server not created")
+        return
+      }
+      do {
+        try self.validateUuid(serviceUuid, field: "service")
+        try self.validateUuid(characteristicUuid, field: "characteristic")
+      } catch {
+        promise.reject("ERR_NOTIFY", error.localizedDescription)
         return
       }
       let data = Data(value.map { UInt8(clamping: $0) })
@@ -154,6 +177,8 @@ public class ExpoGattServerModule: Module {
       characteristicUuid: String,
       value: [Int]
     ) in
+      try self.validateUuid(serviceUuid, field: "service")
+      try self.validateUuid(characteristicUuid, field: "characteristic")
       let data = Data(value.map { UInt8(clamping: $0) })
       self.manager?.updateCharacteristicValue(
         serviceUuid: serviceUuid,
@@ -173,22 +198,60 @@ public class ExpoGattServerModule: Module {
     }
   }
 
-  private func parseServiceConfig(_ map: [String: Any]) -> CBMutableService {
-    let uuid = CBUUID(string: map["uuid"] as! String)
+  /// `CBUUID(string:)` raises an uncatchable Objective-C exception for anything other than a
+  /// 16-bit (4 hex digits), 32-bit (8 hex digits) or hyphenated 128-bit (8-4-4-4-12) string,
+  /// so every string has to be checked before it reaches CoreBluetooth.
+  private func isValidUuid(_ string: String) -> Bool {
+    func isHex(_ characters: Substring) -> Bool {
+      !characters.isEmpty && characters.allSatisfy { $0.isASCII && $0.isHexDigit }
+    }
+
+    switch string.count {
+    case 4, 8:
+      return isHex(string[...])
+    case 36:
+      let groups = string.split(separator: "-", omittingEmptySubsequences: false)
+      let expectedLengths = [8, 4, 4, 4, 12]
+      guard groups.count == expectedLengths.count else { return false }
+      return zip(groups, expectedLengths).allSatisfy { $0.count == $1 && isHex($0) }
+    default:
+      return false
+    }
+  }
+
+  private func validateUuid(_ string: String, field: String) throws {
+    guard isValidUuid(string) else {
+      throw GattArgumentError(
+        message: "Invalid \(field) UUID \"\(string)\". Expected 4 hex digits (16-bit), " +
+          "8 hex digits (32-bit) or the hyphenated 8-4-4-4-12 form (128-bit)."
+      )
+    }
+  }
+
+  private func parseUuid(_ value: Any?, field: String) throws -> CBUUID {
+    guard let string = value as? String else {
+      throw GattArgumentError(message: "Missing or non-string \(field) UUID")
+    }
+    try validateUuid(string, field: field)
+    return CBUUID(string: string)
+  }
+
+  private func parseServiceConfig(_ map: [String: Any]) throws -> CBMutableService {
+    let uuid = try parseUuid(map["uuid"], field: "service")
     let service = CBMutableService(type: uuid, primary: true)
 
     var characteristics: [CBMutableCharacteristic] = []
     if let charList = map["characteristics"] as? [[String: Any]] {
       for charMap in charList {
-        characteristics.append(parseCharacteristicConfig(charMap))
+        characteristics.append(try parseCharacteristicConfig(charMap))
       }
     }
     service.characteristics = characteristics
     return service
   }
 
-  private func parseCharacteristicConfig(_ map: [String: Any]) -> CBMutableCharacteristic {
-    let uuid = CBUUID(string: map["uuid"] as! String)
+  private func parseCharacteristicConfig(_ map: [String: Any]) throws -> CBMutableCharacteristic {
+    let uuid = try parseUuid(map["uuid"], field: "characteristic")
     let properties = parseProperties(map["properties"] as? [String])
     let permissions = parsePermissions(map["permissions"] as? [String])
     let initialValue: Data? = (map["value"] as? [Int])?.isEmpty == false
