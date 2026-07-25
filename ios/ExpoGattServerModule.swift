@@ -264,19 +264,41 @@ public class ExpoGattServerModule: Module {
       }
     }
 
-    Function("updateCharacteristicValue") { (
+    AsyncFunction("updateCharacteristicValue") { (
       serviceUuid: String,
       characteristicUuid: String,
-      value: [Int]
+      value: [Int],
+      promise: Promise
     ) in
-      try self.validateUuid(serviceUuid, field: "service")
-      try self.validateUuid(characteristicUuid, field: "characteristic")
-      let data = try self.parseBytes(value, field: "characteristic")
-      self.manager?.updateCharacteristicValue(
-        serviceUuid: serviceUuid,
-        characteristicUuid: characteristicUuid,
-        value: data
-      )
+      guard let mgr = self.manager else {
+        promise.reject("ERR_NO_SERVER", "Server not created")
+        return
+      }
+      let data: Data
+      do {
+        try self.validateUuid(serviceUuid, field: "service")
+        try self.validateUuid(characteristicUuid, field: "characteristic")
+        data = try self.parseBytes(value, field: "characteristic")
+      } catch {
+        promise.reject("ERR_UPDATE_VALUE", error.localizedDescription)
+        return
+      }
+      // The mirrored values are only touched on the main queue, which is also the queue the
+      // peripheral manager delivers the read requests that consume them on.
+      DispatchQueue.main.async {
+        do {
+          try mgr.updateCharacteristicValue(
+            serviceUuid: serviceUuid,
+            characteristicUuid: characteristicUuid,
+            value: data
+          )
+          promise.resolve(nil)
+        } catch let error as GattServerError {
+          promise.reject(error.code, error.message)
+        } catch {
+          promise.reject("ERR_UPDATE_VALUE", error.localizedDescription)
+        }
+      }
     }
 
     Function("stopServer") {

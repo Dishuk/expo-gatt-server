@@ -232,12 +232,25 @@ class ExpoGattServerModule : Module() {
       }
     }
 
-    Function("updateCharacteristicValue") {
+    AsyncFunction("updateCharacteristicValue") {
       serviceUuid: String,
       characteristicUuid: String,
-      value: List<Int> ->
-      val bytes = toByteArray(value, "characteristic")
-      manager?.updateCharacteristicValue(serviceUuid, characteristicUuid, bytes)
+      value: List<Int>,
+      promise: Promise ->
+      val mgr = manager ?: run {
+        promise.reject("ERR_NO_SERVER", "Server not created", null)
+        return@AsyncFunction
+      }
+      try {
+        mgr.updateCharacteristicValue(
+          serviceUuid, characteristicUuid, toByteArray(value, "characteristic")
+        )
+        promise.resolve(null)
+      } catch (e: GattServerException) {
+        promise.reject(e.code, e.message, e)
+      } catch (e: Exception) {
+        promise.reject("ERR_UPDATE_VALUE", e.message, e)
+      }
     }
 
     Function("stopServer") {

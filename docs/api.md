@@ -281,12 +281,20 @@ updateCharacteristicValue(
   serviceUuid: string,
   characteristicUuid: string,
   value: number[],
-): void
+): Promise<void>
 ```
 
 Update the cached value of a characteristic. Subsequent read requests from centrals are auto-responded by the native layer using this value.
 
 Does **not** send a notification. Use `sendNotification` to push updates to subscribed centrals.
+
+**Rejects** with `ERR_CHARACTERISTIC_NOT_FOUND` when the pair of UUIDs names nothing in the published
+GATT database, and with `ERR_NO_SERVER` when no server exists. On iOS it also rejects with
+`ERR_BLUETOOTH` while Bluetooth is not powered on, because the published database only exists then --
+"the powered off state clears the local database".
+
+Both failures used to be silent no-ops on both platforms, so a mistyped UUID looked identical to a
+successful update while the characteristic went on serving its old value.
 
 ---
 
@@ -727,5 +735,6 @@ Errors thrown by `sendNotification` and `sendResponse` include a `code` property
 | `ERR_NOTIFY_QUEUE_FULL` | Too many notifications are already queued for the device. Await earlier sends before queueing more. |
 | `ERR_DEVICE_DISCONNECTED` | The central disconnected, or unsubscribed, before a queued notification could be delivered. |
 | `ERR_CHARACTERISTIC_NOT_FOUND` | The characteristic is not part of the published GATT database. |
+| `ERR_UPDATE_VALUE` | An `updateCharacteristicValue` argument was rejected by the native layer. |
 | `ERR_NO_SUBSCRIBER` | The device has not enabled the transmission `confirm` selects on the characteristic. |
 | `ERR_CONFIRM_UNSUPPORTED` | `confirm` asks for a transmission the characteristic does not declare the property for -- `indicate` for `true`, `notify` for `false`. |

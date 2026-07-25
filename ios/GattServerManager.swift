@@ -688,10 +688,30 @@ class GattServerManager: NSObject {
     return value.subdata(in: skip..<value.count)
   }
 
+  /// Replaces the mirrored value that a read of this characteristic is answered from.
+  ///
+  /// The address is checked against the published database even though the cache is keyed by
+  /// characteristic UUID alone. Writing an unchecked key used to succeed silently and leave the
+  /// value somewhere no read would ever look, which made a mistyped UUID indistinguishable from a
+  /// working update.
   func updateCharacteristicValue(
     serviceUuid: String, characteristicUuid: String, value: Data
-  ) {
+  ) throws {
+    guard let peripheral = peripheralManager else { throw GattServerError.serverStopped }
+    // A database exists only while powered on — Apple documents that "the powered off state clears
+    // the local database" — so anything else is reported as the Bluetooth problem it is rather than
+    // as a missing characteristic.
+    guard peripheral.state == .poweredOn else {
+      throw GattServerError.bluetoothUnavailable(state: peripheral.state)
+    }
     let charUUID = CBUUID(string: characteristicUuid)
+    guard findCharacteristic(
+      serviceUuid: CBUUID(string: serviceUuid), characteristicUuid: charUUID
+    ) != nil else {
+      throw GattServerError.characteristicNotFound(
+        service: serviceUuid, characteristic: characteristicUuid
+      )
+    }
     characteristicValues[charUUID] = value
   }
 

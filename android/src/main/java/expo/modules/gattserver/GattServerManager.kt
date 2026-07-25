@@ -1198,9 +1198,25 @@ class GattServerManager(
     return null
   }
 
+  /**
+   * Replaces the mirrored value that a read of this characteristic is answered from.
+   *
+   * An address that names nothing in the published database is reported rather than dropped: the
+   * call used to return silently, so a mistyped UUID looked exactly like a successful update and
+   * the characteristic simply kept serving its old value forever.
+   */
   fun updateCharacteristicValue(serviceUuid: String, characteristicUuid: String, value: ByteArray) {
-    val service = gattServer?.getService(UUID.fromString(serviceUuid)) ?: return
-    val characteristic = service.getCharacteristic(UUID.fromString(characteristicUuid)) ?: return
+    val server = gattServer ?: throw GattServerException(
+      "ERR_NO_SERVER",
+      "The GATT server is not open, so it has no characteristic to update. Bluetooth may be turned " +
+        "off; services are re-published when it is re-enabled."
+    )
+    val characteristic = server.getService(UUID.fromString(serviceUuid))
+      ?.getCharacteristic(UUID.fromString(characteristicUuid))
+      ?: throw GattServerException(
+        "ERR_CHARACTERISTIC_NOT_FOUND",
+        "Characteristic $characteristicUuid was not found in service $serviceUuid"
+      )
     @Suppress("DEPRECATION")
     characteristic.value = value
   }

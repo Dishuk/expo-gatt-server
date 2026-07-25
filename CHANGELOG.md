@@ -47,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sends behind one still in flight instead of letting the platform drop them
 - `sendNotification` rejects with `ERR_NO_SUBSCRIBER` instead of resolving when nothing is
   subscribed to the characteristic
+- **Breaking:** `updateCharacteristicValue` returns `Promise<void>` instead of `void`, and rejects
+  with `ERR_CHARACTERISTIC_NOT_FOUND` or `ERR_NO_SERVER` instead of silently doing nothing when the
+  UUIDs name no published characteristic. It also now runs on the main queue on iOS, where it
+  previously mutated the peripheral manager's state from the JavaScript thread
 - **Breaking:** `sendNotification` rejects with `ERR_CONFIRM_UNSUPPORTED` when `confirm` asks for a
   transmission the characteristic does not declare the property for, instead of sending it anyway on
   Android and silently sending the other kind on iOS

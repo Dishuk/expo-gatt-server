@@ -308,15 +308,23 @@ export async function sendResponse(
   return ExpoGattServerModule.sendResponse(deviceId, requestId, status, offset, value);
 }
 
-export function updateCharacteristicValue(
+/**
+ * Replaces the value a read of this characteristic is answered from. Does not notify anybody; use
+ * `sendNotification` to push the new value to subscribed centrals.
+ *
+ * Rejects with `ERR_CHARACTERISTIC_NOT_FOUND` when the pair of UUIDs names nothing in the published
+ * database, and with `ERR_NO_SERVER` when no server exists — previously both were silent no-ops, so
+ * a mistyped UUID was indistinguishable from a working update.
+ */
+export async function updateCharacteristicValue(
   serviceUuid: string,
   characteristicUuid: string,
   value: number[],
-): void {
+): Promise<void> {
   assertValidUuid(serviceUuid, 'service');
   assertValidUuid(characteristicUuid, 'characteristic');
   assertValidBytes(value, 'characteristic');
-  ExpoGattServerModule.updateCharacteristicValue(serviceUuid, characteristicUuid, value);
+  return ExpoGattServerModule.updateCharacteristicValue(serviceUuid, characteristicUuid, value);
 }
 
 export function stopServer(): void {

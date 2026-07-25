@@ -156,7 +156,7 @@ export default function App() {
           label="updateCharacteristicValue"
           onPress={run('updateCharacteristicValue', () => {
             counter.current = (counter.current + 1) % 256;
-            updateCharacteristicValue(SERVICE_UUID, CHARACTERISTIC_UUID, [0, counter.current]);
+            return updateCharacteristicValue(SERVICE_UUID, CHARACTERISTIC_UUID, [0, counter.current]);
           })}
         />
         <Button

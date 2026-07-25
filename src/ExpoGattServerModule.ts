@@ -32,7 +32,7 @@ declare class ExpoGattServerModuleType extends NativeModule<GattServerEvents> {
     serviceUuid: string,
     characteristicUuid: string,
     value: number[],
-  ): void;
+  ): Promise<void>;
   stopServer(): void;
   getBluetoothState(): Promise<BluetoothState>;
   getMtu(deviceId: string): Promise<DeviceMtu>;
