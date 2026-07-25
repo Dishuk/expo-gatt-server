@@ -19,6 +19,8 @@ private let maxQueuedNotifications = 64
 enum GattServerError: Error {
   case payloadExceedsMtu(maxPayload: Int, payloadSize: Int)
   case requestNotFound(requestId: Int)
+  case requestDeviceMismatch(requestId: Int, owner: String, supplied: String)
+  case responseOffsetAfterRequest(requestId: Int, requested: Int, supplied: Int)
   case bluetoothUnavailable(state: CBManagerState)
   case serviceRegistrationFailed(uuid: String, reason: String)
   case serverStopped
@@ -31,6 +33,8 @@ enum GattServerError: Error {
     switch self {
     case .payloadExceedsMtu: return "PAYLOAD_EXCEEDS_MTU"
     case .requestNotFound: return "REQUEST_NOT_FOUND"
+    case .requestDeviceMismatch: return "REQUEST_DEVICE_MISMATCH"
+    case .responseOffsetAfterRequest: return "ERR_RESPONSE_OFFSET"
     case .bluetoothUnavailable(let state):
       return state == .unauthorized ? "ERR_PERMISSION" : "ERR_BLUETOOTH"
     case .serviceRegistrationFailed: return "ERR_CREATE_SERVER"
@@ -54,6 +58,13 @@ enum GattServerError: Error {
       return message
     case .requestNotFound(let requestId):
       return "Request \(requestId) not found or already responded"
+    case .requestDeviceMismatch(let requestId, let owner, let supplied):
+      return "Request \(requestId) belongs to device \(owner), not \(supplied)"
+    case .responseOffsetAfterRequest(let requestId, let requested, let supplied):
+      return "Request \(requestId) asked for the attribute from offset \(requested), but the " +
+        "response supplies it from offset \(supplied), which leaves the requested bytes missing. " +
+        "Pass the value together with the offset it starts at — offset 0 with the whole value " +
+        "always works."
     case .bluetoothUnavailable(let state):
       switch state {
       case .poweredOff: return "Bluetooth is turned off"
@@ -475,18 +486,39 @@ class GattServerManager: NSObject {
     }
   }
 
+  /// Answers a pending read or write request.
+  ///
+  /// `offset` states where `value` begins within the attribute, and the response is rebased onto the
+  /// offset the request actually asked for — so passing offset 0 with the whole value answers a Read
+  /// Blob continuation correctly, and passing the request's own offset with a pre-sliced value works
+  /// too. This is the same contract Android honours.
   func sendResponse(
     deviceId: String, requestId: Int, status: Int,
     offset: Int, value: Data
   ) throws {
-    guard let pending = pendingRequests.removeValue(forKey: requestId) else {
+    // Everything that could reject the call is checked before the pending entry is consumed, so a
+    // failed attempt leaves the request answerable instead of stranding the central until its ATT
+    // transaction times out. This is the ordering Android already used.
+    guard let pending = pendingRequests[requestId] else {
       throw GattServerError.requestNotFound(requestId: requestId)
     }
     let request = pending.request
 
+    let owner = request.central.identifier.uuidString
+    guard owner == deviceId else {
+      throw GattServerError.requestDeviceMismatch(
+        requestId: requestId, owner: owner, supplied: deviceId
+      )
+    }
+
+    let payload = try responsePayload(
+      for: pending, requestId: requestId, offset: offset, value: value
+    )
+    pendingRequests.removeValue(forKey: requestId)
+
     let result = attErrorCode(for: status)
     if pending.isRead {
-      request.value = value
+      request.value = payload
     }
     // A read response is deliberately not size-checked. An `ATT_READ_RSP` carries at most
     // `ATT_MTU - 1` octets and the central continues a longer value with `ATT_READ_BLOB_REQ`, which
@@ -496,6 +528,31 @@ class GattServerManager: NSObject {
     // does exactly that, so rejecting it here would only have penalised delegated reads for
     // behaving identically.
     peripheralManager?.respond(to: request, withResult: result)
+  }
+
+  /// Rebases a supplied response value onto the offset the request asked for.
+  ///
+  /// `CBATTRequest.offset` is "the zero-based index of the first byte for the read or write" and is
+  /// read-only, and `respond(to:withResult:)` takes no offset — CoreBluetooth derives it from the
+  /// request — so honouring the caller's `offset` means aligning the value to it here.
+  private func responsePayload(
+    for pending: PendingRequest, requestId: Int, offset: Int, value: Data
+  ) throws -> Data {
+    // A Write Response carries no value, so there is nothing to rebase.
+    guard pending.isRead else { return value }
+
+    let requested = pending.request.offset
+    guard offset <= requested else {
+      throw GattServerError.responseOffsetAfterRequest(
+        requestId: requestId, requested: requested, supplied: offset
+      )
+    }
+    let skip = requested - offset
+    guard skip > 0 else { return value }
+    // The caller supplied nothing at or beyond the requested offset, which is the specification's
+    // signal that the attribute ends there.
+    guard skip < value.count else { return Data() }
+    return value.subdata(in: skip..<value.count)
   }
 
   func updateCharacteristicValue(

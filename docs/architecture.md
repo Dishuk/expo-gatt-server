@@ -82,7 +82,7 @@ The module does not hold BLE state itself -- it delegates to `GattServerManager`
 |-------|----------|--------------|---------|
 | Connected devices | `[String: CBCentral]` (from observed ATT activity) | `ConcurrentHashMap<String, BluetoothDevice>` | Track which centrals are connected |
 | Device MTU | Read live from `central.maximumUpdateValueLength` | `ConcurrentHashMap<String, Int>` | Validate payload size, answer `getMtu` |
-| Pending requests | `[Int: CBATTRequest]` | `ConcurrentHashMap<Int, String>` | Match `sendResponse` to read requests |
+| Pending requests | `[Int: PendingRequest]` | `ConcurrentHashMap<Int, PendingRequest>` | Match `sendResponse` to a request, validate its device, rebase the response onto the requested offset |
 | Characteristic values | `[CBUUID: Data]` | Set on `BluetoothGattCharacteristic.value` | Auto-respond to reads |
 | Subscribed centrals | `[String: [CBUUID: CBCentral]]` | Managed via CCCD descriptor | Track notification subscribers |
 

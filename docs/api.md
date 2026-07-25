@@ -148,10 +148,24 @@ Respond to a characteristic read request forwarded from the native layer.
 | `deviceId` | `string` | Requesting device identifier |
 | `requestId` | `number` | Request ID from the read event |
 | `status` | `number` | `GATT_SUCCESS` or an `ATT_ERROR_*` code |
-| `offset` | `number` | Read offset from the request event |
-| `value` | `number[]` | Response byte array |
+| `offset` | `number` | The offset within the attribute at which `value` begins |
+| `value` | `number[]` | Response byte array, starting at `offset` |
 
-**Throws** `REQUEST_NOT_FOUND` if the request ID is invalid or already responded to.
+`offset` says where `value` begins within the attribute, and the response is rebased onto the offset
+the request actually asked for. So both of these are correct and equivalent, on both platforms:
+
+```typescript
+// Pass the whole value and let the module take the part the request asked for.
+await sendResponse(deviceId, requestId, GATT_SUCCESS, 0, wholeValue);
+
+// Or slice it yourself and say where the slice starts.
+await sendResponse(deviceId, requestId, GATT_SUCCESS, event.offset, wholeValue.slice(event.offset));
+```
+
+**Throws** `REQUEST_NOT_FOUND` if the request ID is invalid or already responded to,
+`REQUEST_DEVICE_MISMATCH` if the request belongs to a different device than `deviceId`, and
+`ERR_RESPONSE_OFFSET` if `offset` is past the offset the request asked for -- which would leave the
+requested bytes missing from the response.
 
 `value` is **not** size-checked against the MTU. An `ATT_READ_RSP` carries at most `ATT_MTU - 1`
 octets and the central finishes a longer value with a Read Blob request, which arrives as another
@@ -555,6 +569,8 @@ Errors thrown by `sendNotification` and `sendResponse` include a `code` property
 |------|-------------|
 | `PAYLOAD_EXCEEDS_MTU` | A `sendNotification` payload is longer than one notification can carry (`mtu - 3`). Checked before transmitting, so nothing was sent. The message says when the link is still at the default ATT MTU of 23. |
 | `REQUEST_NOT_FOUND` | The `requestId` does not match any pending read request. |
+| `REQUEST_DEVICE_MISMATCH` | The `requestId` is pending, but for a different device than the `deviceId` supplied. |
+| `ERR_RESPONSE_OFFSET` | The `offset` given to `sendResponse` is past the offset the request asked for, so the requested bytes would be missing. |
 | `ERR_NOTIFY` | The Bluetooth stack refused the notification, or reported it as undelivered. |
 | `ERR_NOTIFY_QUEUE_FULL` | Too many notifications are already queued for the device. Await earlier sends before queueing more. |
 | `ERR_DEVICE_DISCONNECTED` | The central disconnected, or unsubscribed, before a queued notification could be delivered. |

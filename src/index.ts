@@ -148,6 +148,22 @@ export async function sendNotification(
   );
 }
 
+/**
+ * Answers a pending read or write request.
+ *
+ * `offset` states where `value` begins within the attribute, and the response is rebased onto the
+ * offset the request actually asked for. Passing `offset: 0` with the whole value therefore answers
+ * a Read Blob continuation correctly, and passing the request event's own `offset` with an
+ * already-sliced value works too. Both platforms honour this identically.
+ *
+ * Rejects with `REQUEST_NOT_FOUND` when the request is unknown or already answered,
+ * `REQUEST_DEVICE_MISMATCH` when the request belongs to a different device, and
+ * `ERR_RESPONSE_OFFSET` when `offset` is past the offset the request asked for, which would leave
+ * the requested bytes missing.
+ *
+ * `value` is not size-checked against the MTU: a read response longer than one PDU can carry is
+ * normal ATT, and the central continues it with a Read Blob request.
+ */
 export async function sendResponse(
   deviceId: string,
   requestId: number,
@@ -162,6 +178,14 @@ export async function sendResponse(
     throw new Error(
       `Invalid response status ${JSON.stringify(status)}. An ATT error code is a single byte, ` +
         'so it must be an integer between 0 and 255.',
+    );
+  }
+  // An ATT offset is an unsigned 16-bit value, and a negative one would be rebased into a slice
+  // beyond the value's end on both platforms rather than reported.
+  if (!Number.isInteger(offset) || offset < 0 || offset > 0xffff) {
+    throw new Error(
+      `Invalid response offset ${JSON.stringify(offset)}. An ATT offset is an unsigned 16-bit ` +
+        'value, so it must be an integer between 0 and 65535.',
     );
   }
   assertValidBytes(value, 'response');

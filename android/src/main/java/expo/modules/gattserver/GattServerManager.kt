@@ -133,13 +133,26 @@ class GattServerManager(
   private var pendingAdvertiseResult: ((String?) -> Unit)? = null
   private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
   private val deviceMtu = ConcurrentHashMap<String, Int>()
-  private val pendingRequests = ConcurrentHashMap<Int, String>()
+  private val pendingRequests = ConcurrentHashMap<Int, PendingRequest>()
   // Android delivers one notification at a time: "When multiple notifications are to be sent, an
   // application must wait for this callback to be received before sending additional
   // notifications" (BluetoothGattServerCallback.onNotificationSent). Sends are therefore queued
   // per device and handed to the stack one at a time, each waiting for its own callback. The map
   // is touched from the caller's thread and from the binder thread that delivers the callback.
   private val notificationQueues = ConcurrentHashMap<String, NotificationQueue>()
+
+  /**
+   * A request awaiting `sendResponse`.
+   *
+   * [offset] is the offset the central asked for. It is retained so a response can be rebased onto
+   * it, and so the offset handed back to the stack is the one the request carried rather than
+   * whatever the caller happened to pass.
+   */
+  private data class PendingRequest(
+    val deviceId: String,
+    val offset: Int,
+    val isRead: Boolean,
+  )
 
   /** One notification waiting for, or occupying, the single outstanding slot a device has. */
   private class QueuedNotification(
@@ -295,7 +308,7 @@ class GattServerManager(
         BluetoothGattServer.STATE_DISCONNECTED -> {
           connectedDevices.remove(id)
           deviceMtu.remove(id)
-          pendingRequests.entries.removeIf { it.value == id }
+          pendingRequests.entries.removeIf { it.value.deviceId == id }
           // Nothing will ever acknowledge these now, so fail them instead of leaking the queue.
           failNotifications(id, GattServerException("ERR_DEVICE_DISCONNECTED", "Device $id disconnected"))
           clearSubscriptions(id)
@@ -335,7 +348,7 @@ class GattServerManager(
       }
 
       Log.d(TAG, "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset delegating to JS")
-      pendingRequests[requestId] = device.address
+      pendingRequests[requestId] = PendingRequest(device.address, offset, isRead = true)
 
       val serviceUuid = characteristic.service?.uuid?.toString() ?: ""
       listener?.onCharacteristicReadRequest(
@@ -358,7 +371,7 @@ class GattServerManager(
       if (delegated) {
         // Registered before the event is emitted so a listener that responds synchronously still
         // finds the request.
-        pendingRequests[requestId] = device.address
+        pendingRequests[requestId] = PendingRequest(device.address, offset, isRead = false)
       } else if (responseNeeded) {
         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, data)
       }
@@ -846,6 +859,11 @@ class GattServerManager(
    * ATT, not a failure. This module's own automatic read path already answers with the whole
    * remainder from the requested offset, so rejecting it here only ever penalised delegated reads
    * for behaving identically.
+   *
+   * [offset] states where [value] begins within the attribute, and the response is rebased onto the
+   * offset the request actually asked for — so passing offset 0 with the whole value answers a Read
+   * Blob continuation correctly, and passing the request's own offset with a pre-sliced value works
+   * too. iOS honours the same contract.
    */
   fun sendResponse(deviceId: String, requestId: Int, status: Int, offset: Int, value: ByteArray) {
     val server = gattServer ?: throw IllegalStateException("Server not open")
@@ -854,16 +872,19 @@ class GattServerManager(
     // Everything that could reject the call is checked before the pending entry is touched, so a
     // failed attempt leaves the request answerable instead of stranding the central until its ATT
     // transaction times out.
-    val owner = pendingRequests[requestId]
+    val pending = pendingRequests[requestId]
       ?: throw GattServerException("REQUEST_NOT_FOUND", "Request $requestId not found or already responded")
-    if (owner != deviceId) {
+    if (pending.deviceId != deviceId) {
       throw GattServerException(
         "REQUEST_DEVICE_MISMATCH",
-        "Request $requestId belongs to device $owner, not $deviceId"
+        "Request $requestId belongs to device ${pending.deviceId}, not $deviceId"
       )
     }
+    val payload = responsePayload(pending, requestId, offset, value)
 
-    if (!server.sendResponse(device, requestId, status, offset, value)) {
+    // The offset handed to the stack is the request's own, so it always describes where `payload`
+    // sits within the attribute regardless of what the caller passed.
+    if (!server.sendResponse(device, requestId, status, pending.offset, payload)) {
       throw GattServerException(
         "ERR_RESPONSE",
         "The Bluetooth stack did not accept the response for request $requestId"
@@ -871,7 +892,39 @@ class GattServerManager(
     }
     // Two-argument remove so a request id the framework has already reissued to another device is
     // not consumed by this call.
-    pendingRequests.remove(requestId, deviceId)
+    pendingRequests.remove(requestId, pending)
+  }
+
+  /**
+   * Rebases a supplied response value onto the offset the request asked for.
+   *
+   * The stack copies the value into the response PDU verbatim — it does not slice it by the offset,
+   * which for a read response is never even transmitted — so the alignment has to happen here.
+   */
+  private fun responsePayload(
+    pending: PendingRequest,
+    requestId: Int,
+    offset: Int,
+    value: ByteArray,
+  ): ByteArray {
+    // A Write Response carries no value, so there is nothing to rebase.
+    if (!pending.isRead) return value
+
+    if (offset > pending.offset) {
+      throw GattServerException(
+        "ERR_RESPONSE_OFFSET",
+        "Request $requestId asked for the attribute from offset ${pending.offset}, but the " +
+          "response supplies it from offset $offset, which leaves the requested bytes missing. " +
+          "Pass the value together with the offset it starts at — offset 0 with the whole value " +
+          "always works."
+      )
+    }
+    val skip = pending.offset - offset
+    if (skip == 0) return value
+    // The caller supplied nothing at or beyond the requested offset, which is the specification's
+    // signal that the attribute ends there.
+    if (skip >= value.size) return ByteArray(0)
+    return value.copyOfRange(skip, value.size)
   }
 
   /**
