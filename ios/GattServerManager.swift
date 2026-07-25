@@ -516,8 +516,8 @@ class GattServerManager: NSObject {
       )
     }
 
-    // Checked before the subscription, so an unknown central is told it is not connected rather than
-    // that it has not subscribed — the same distinction Android draws.
+    // Checked after the address and before the subscription, which is the order Android uses too, so a
+    // call carrying more than one fault reports the same code on either platform.
     guard connectedCentrals[deviceId] != nil else {
       throw GattServerError.deviceDisconnected(deviceId: deviceId)
     }

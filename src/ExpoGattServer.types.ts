@@ -14,6 +14,9 @@ export interface CharacteristicDelegateConfig {
    * `requestId` and the write stays unanswered until `sendResponse` is called with `GATT_SUCCESS` or
    * an `ATT_ERROR_*` code — the only way to reject a write.
    *
+   * Android never delegates a Write Without Response, which carries nothing to answer; iOS cannot tell
+   * one apart and delegates it like any other write. See `CharacteristicWriteRequestEvent`.
+   *
    * Decided per characteristic, so a plain characteristic written in the same batch as a delegated one
    * still has its value applied. Because that batch is atomic, the plain characteristic's value is held
    * until the batch is answered with `GATT_SUCCESS` and discarded if it is rejected.
@@ -352,10 +355,15 @@ export interface CharacteristicWriteRequestEvent {
   offset: number;
   value: number[];
   /**
-   * `true` only for a characteristic configured with `delegate.write` whose write actually carries a
-   * response; the module answers every other write itself before emitting the event. Decided per
-   * characteristic, so a batch touching a delegated and a plain characteristic emits one event of each
-   * and only the delegated one asks to be answered.
+   * `true` only for a characteristic configured with `delegate.write`; the module answers every other
+   * write itself before emitting the event. Decided per characteristic, so a batch touching a delegated
+   * and a plain characteristic emits one event of each and only the delegated one asks to be answered.
+   *
+   * On **Android** it is additionally `false` for a Write Without Response, which carries nothing to
+   * answer. **iOS cannot make that distinction**: `didReceiveWriteRequests:` delivers an ATT request and
+   * an ATT command through the same callback and `CBATTRequest` exposes no flag telling them apart, so
+   * there a Write Without Response to a `delegate.write` characteristic arrives with
+   * `responseNeeded: true` and does wait for `sendResponse`.
    */
   responseNeeded: boolean;
 }

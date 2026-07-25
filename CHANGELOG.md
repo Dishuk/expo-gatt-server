@@ -335,6 +335,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   platform. Both cases now throw from `createServer` in the shared TypeScript layer, comparing UUIDs
   after normalisation so a 16-bit alias and its 128-bit expansion count as one, and both platforms
   repeat the check natively. The same characteristic UUID in two *different* services stays legal
+- A `sendNotification` carrying both a stale `deviceId` and a mistyped characteristic UUID reported
+  `ERR_CHARACTERISTIC_NOT_FOUND` on iOS and `ERR_DEVICE_DISCONNECTED` on Android, so a retry handler did
+  opposite things per platform despite each single fault already agreeing. Android now checks the
+  address before the connection, as iOS does, and the full order is documented — the address is the
+  permanent fault of the two, and no retry fixes it
+- `CharacteristicWriteRequestEvent.responseNeeded` was documented as never `true` for a Write Without
+  Response. Android implements exactly that, but iOS cannot: `didReceiveWriteRequests:` delivers an ATT
+  request and an ATT command through the same callback and `CBATTRequest` exposes no flag telling them
+  apart. The types and the documentation now say so instead of promising it
 
 ### Removed
 

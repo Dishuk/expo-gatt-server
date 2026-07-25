@@ -1000,14 +1000,14 @@ class GattServerManager(
     onResult: (GattServerException?) -> Unit,
   ) {
     val server = gattServer ?: throw serverUnavailable()
-    val device = connectedDevices[deviceId]
-      ?: throw GattServerException(
-        "ERR_DEVICE_DISCONNECTED", "Device $deviceId is not connected"
-      )
 
     // An unknown service and an unknown characteristic collapse into one code, because an address that
     // names nothing in the published database is the same mistake either way — and because that is the
     // only distinction iOS can draw, where `CBATTRequest.characteristic.service` is a weak reference.
+    //
+    // Checked before the connection, and iOS checks them in the same order, so a call carrying both a
+    // stale deviceId and a mistyped UUID reports the same code on either platform. The address is the
+    // permanent fault of the two: no retry fixes it, while a disconnection may well resolve itself.
     val characteristicId = UUID.fromString(characteristicUuid)
     val characteristic = server.getService(UUID.fromString(serviceUuid))
       ?.getCharacteristic(characteristicId)
@@ -1017,6 +1017,11 @@ class GattServerManager(
       )
 
     confirmError(characteristic, confirm)?.let { throw it }
+
+    val device = connectedDevices[deviceId]
+      ?: throw GattServerException(
+        "ERR_DEVICE_DISCONNECTED", "Device $deviceId is not connected"
+      )
 
     if (requireSubscription && !hasEnabled(deviceId, characteristicId, confirm)) {
       val kind = if (confirm) "indications" else "notifications"

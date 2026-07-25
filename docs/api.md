@@ -429,6 +429,12 @@ stream against the connection instead of overrunning it.
 | `ERR_NO_SERVER` | No server exists, or it was stopped while the send was queued |
 | `ERR_BLUETOOTH` | Bluetooth is not powered on, or was turned off while the send was queued |
 
+A call with more than one thing wrong reports the **first** of these, in this order, identically on both
+platforms: `ERR_NO_SERVER` / `ERR_BLUETOOTH`, then `ERR_CHARACTERISTIC_NOT_FOUND`, then
+`ERR_CONFIRM_UNSUPPORTED`, then `ERR_DEVICE_DISCONNECTED`, then `ERR_NO_SUBSCRIBER`, then
+`PAYLOAD_EXCEEDS_MTU`. The address is checked before the connection because it is the permanent fault of
+the two -- no retry fixes a mistyped UUID, while a disconnection may well resolve itself.
+
 ---
 
 ### sendResponse
@@ -823,9 +829,20 @@ decided **per characteristic**, so a batch touching a delegated and a plain char
 event of each and only the delegated one asks to be answered.
 
 Every other write has already been acknowledged with `GATT_SUCCESS` before the event was emitted, and
-arrives with `responseNeeded: false` -- including a Write Without Response, which cannot be answered
-at all, so it is never delegated even on an opted-in characteristic. Calling `sendResponse` for such a
-request rejects with `REQUEST_NOT_FOUND`.
+arrives with `responseNeeded: false`. Calling `sendResponse` for such a request rejects with
+`REQUEST_NOT_FOUND`.
+
+> **A Write Without Response is not delegated on Android, and cannot be told apart on iOS.** Android's
+> `onCharacteristicWriteRequest` carries a `responseNeeded` flag, so the module never delegates a write
+> that carries nothing to answer -- an opted-in characteristic still receives the event, with
+> `responseNeeded: false`, and its value is left alone. **iOS has no such flag.**
+> `peripheralManager:didReceiveWriteRequests:` is documented as invoked "when *peripheral* receives an
+> ATT request **or command**", and `CBATTRequest` exposes only `central`, `characteristic`, `offset` and
+> `value` -- nothing distinguishing an `ATT_WRITE_REQ` from an `ATT_WRITE_CMD`. CoreBluetooth also
+> requires `respond(to:withResult:)` for every invocation regardless. So on iOS a Write Without Response
+> to a `delegate.write` characteristic arrives with `responseNeeded: true` and does wait for
+> `sendResponse`; leaving it unanswered expires it after `requestTimeoutMs` as any other delegated
+> request would. Declare `writeNoResponse` on a delegated characteristic only if that is acceptable.
 
 When it is `true`, the write is **not applied** until JavaScript accepts it: answer with
 `GATT_SUCCESS` and commit the value yourself with
@@ -1136,8 +1153,10 @@ Per-characteristic opt-in delegation of ATT request handling to JavaScript. Both
 
 Both behave identically on Android and iOS, with three notes:
 
-- A **Write Without Response** carries nothing to answer, so it is never delegated even with
-  `write: true`, on either platform.
+- A **Write Without Response** carries nothing to answer, so Android never delegates one even with
+  `write: true`. iOS cannot make that distinction -- `CBATTRequest` carries no response flag -- so there
+  it is delegated like any other write. See
+  [addCharacteristicWriteRequestListener](#addcharacteristicwriterequestlistener).
 - Delegation is decided **per characteristic**, so a batch touching a delegated and a plain
   characteristic applies the plain one's value once the batch is accepted, and discards it if the
   delegated one is rejected. See
@@ -1540,6 +1559,10 @@ one without it always means the arguments were wrong.
 one platform below, it is because only that platform has the situation at all -- not because the other
 reports it differently -- so `code` can be branched on without also branching on `Platform.OS`. The
 messages are not part of that contract and do differ.
+
+That extends to a call with **more than one** thing wrong: both platforms check in the same order and
+report the same one of the faults. `sendNotification`'s order is
+[given with the call](#sendnotification).
 
 | Code | Description |
 |------|-------------|
