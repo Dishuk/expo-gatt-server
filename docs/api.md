@@ -336,6 +336,12 @@ stopServer(): void
 
 Shut down the GATT server. Removes all services, disconnects peripherals, and releases native resources. Call this in cleanup or when done with BLE.
 
+Pending work is settled rather than abandoned: an unresolved `createServer` rejects with
+`ERR_NO_SERVER`, queued notifications reject, unanswered delegated requests are dropped, and
+advertising stops (restoring the adapter name on Android if `android.setAdapterName` changed it).
+Both platforms unpublish the whole database and stop listening for adapter state, so a later
+`createServer` starts from an empty GATT database rather than colliding with the previous one.
+
 ## Event Listeners
 
 All listeners return a `Subscription` object with a `.remove()` method. Call `.remove()` to unsubscribe.

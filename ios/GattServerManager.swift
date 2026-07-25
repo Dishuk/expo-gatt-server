@@ -715,14 +715,23 @@ class GattServerManager: NSObject {
     characteristicValues[charUUID] = value
   }
 
+  /// Releases everything the server holds, so a later `open` starts from an empty database.
+  ///
+  /// Unpublishing goes through `removeAllServices` rather than removing each entry of
+  /// `addedServices`: that mirror only holds what `peripheralManager(_:didAdd:error:)` has already
+  /// acknowledged, so a service still awaiting its callback — or one whose callback reported an
+  /// error — stayed in the shared GATT database for the lifetime of the process and collided with
+  /// the next `createServer`.
   func stop() {
     stopAdvertising()
     completeOpen(GattServerError.serverStopped)
     flushReadinessWaiters(GattServerError.serverStopped)
     failPendingNotifications(.serverStopped)
-    for (_, service) in addedServices {
-      peripheralManager?.remove(service)
-    }
+    peripheralManager?.removeAllServices()
+
+    // Cleared before the delegate is dropped: `peripheralManagerDidUpdateState` re-publishes
+    // `serviceConfiguration` on every transition to powered on, and a stopped server must not come
+    // back to life through either route.
     serviceConfiguration.removeAll()
     servicesAwaitingRegistration.removeAll()
     addedServices.removeAll()
@@ -733,6 +742,13 @@ class GattServerManager: NSObject {
     discardPendingRequests { _ in true }
     delegations.removeAll()
     delegationsByCharacteristic.removeAll()
+    requestCounter = 0
+    onStateChange = nil
+
+    // CoreBluetooth can outlive this reference and still deliver a queued callback, which would
+    // otherwise repopulate the state just cleared above. `delegate` is weak, so this is about
+    // stopping the callbacks rather than about ownership.
+    peripheralManager?.delegate = nil
     peripheralManager = nil
   }
 

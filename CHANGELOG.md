@@ -64,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `stopServer` left services published on iOS. It unpublished only the services CoreBluetooth had
+  already acknowledged, so anything still awaiting `didAdd` — or whose `didAdd` reported an error —
+  stayed in the shared GATT database and collided with the next `createServer`. It now calls
+  `removeAllServices`, clears the peripheral manager's delegate so late callbacks cannot revive the
+  torn-down state, and resets the rest
 - Android ignored the `preparedWrite` flag and never answered `onExecuteWrite`, so a central
   performing an ATT long or reliable write had its fragments applied immediately and then hung
   waiting for an execute response that never came. Fragments are now buffered per device and applied
