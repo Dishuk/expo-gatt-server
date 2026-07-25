@@ -801,7 +801,9 @@ not JavaScript has to answer it.
 
 `responseNeeded` is `true` only when the module is holding the ATT transaction open for
 [`sendResponse`](#sendresponse). That happens exactly when the characteristic is configured with
-[`delegate.write`](#characteristicdelegateconfig) **and** the write actually carries a response.
+[`delegate.write`](#characteristicdelegateconfig) **and** the write actually carries a response. It is
+decided **per characteristic**, so a batch touching a delegated and a plain characteristic emits one
+event of each and only the delegated one asks to be answered.
 
 Every other write has already been acknowledged with `GATT_SUCCESS` before the event was emitted, and
 arrives with `responseNeeded: false` -- including a Write Without Response, which cannot be answered
@@ -828,12 +830,30 @@ value yourself with [`updateCharacteristicValue`](#updatecharacteristicvalue) wh
 `GATT_SUCCESS`. A characteristic configured with `delegate.write` never has a written value stored for
 it automatically, including for a Write Without Response that arrives with `responseNeeded: false`.
 
+#### A batch that is only partly delegated
+
+One write batch -- a CoreBluetooth `didReceiveWrite:` array, or one Android reliable-write execute --
+can touch several characteristics at once, and they need not agree about delegation. Delegation is
+decided **per characteristic**, and the batch stays atomic:
+
+- Each characteristic gets its own event. `responseNeeded` is `true` on the delegated ones only.
+- The plain characteristics' values are **held, not applied**, and committed the moment the batch is
+  answered with `GATT_SUCCESS`. An `ATT_ERROR_*` answer, or letting the request expire after
+  `requestTimeoutMs`, discards them.
+- If nothing in the batch delegates, it is applied and acknowledged immediately, as before.
+
+Deferring rather than applying immediately is what keeps the batch all-or-nothing, which both platforms
+require: CoreBluetooth documents that "if the execution of one of the requests would cause a failure
+[...] none of the requests should be executed", and an execute either applies its whole queue or none of
+it (Vol 3, Part F, Section 3.4.6.3). Rejecting a delegated write in a batch therefore also rolls back the
+plain characteristic written beside it.
+
 > **iOS shares one `requestId` across a batch.** CoreBluetooth delivers writes as an array and
-> requires exactly one `respond(to:withResult:)` per callback, passing the first request, documenting
-> the batch as all-or-nothing: "if you can't fulfill an individual request, you shouldn't fulfill any
-> of them". So a delegated batch emits one event per attribute written, all carrying the **same**
-> `requestId`, and the first `sendResponse` for that id answers the whole batch. Later calls for it
-> reject with `REQUEST_NOT_FOUND`. On Android each write request has its own id.
+> requires exactly one `respond(to:withResult:)` per callback, passing the first request. So one batch
+> emits one event per attribute written, all carrying the **same** `requestId`, and the first
+> `sendResponse` for that id answers the whole batch. Later calls for it reject with
+> `REQUEST_NOT_FOUND`. On Android each direct write request has its own id, but an execute is a single
+> request, so a reliable write behaves the same way there.
 
 #### Long writes and reliable writes
 
@@ -858,10 +878,11 @@ execute:
 - The queue is per device and is dropped when that device disconnects, when Bluetooth is turned off,
   and on `stopServer`.
 
-If the characteristic is configured with `delegate.write`, the execute is what waits for
+If any characteristic in the execute is configured with `delegate.write`, the execute is what waits for
 `sendResponse` -- a single `requestId` covering the whole atomic operation, exactly as an iOS write
-batch does. The individual prepare steps are never delegated; there is nothing meaningful to accept
-or reject until the execute says the value is real.
+batch does, and the characteristics that did not opt in have their values held until it is answered.
+The individual prepare steps are never delegated; there is nothing meaningful to accept or reject until
+the execute says the value is real.
 
 > **iOS does not expose prepared writes at all.** `CBPeripheralManagerDelegate` declares twelve
 > methods and none of them concerns prepare or execute; `CBATTRequest` carries only `central`,
@@ -1096,13 +1117,17 @@ Per-characteristic opt-in delegation of ATT request handling to JavaScript. Both
 | `read` | Always emit `onCharacteristicReadRequest` and wait for `sendResponse`, even when the characteristic already has a value to serve. Without it the module answers from the last known value as soon as one exists, so the event stops firing -- which is why a computed or dynamic read needs this. A configured `value` is still used as the payload of a notification |
 | `write` | Do not acknowledge writes automatically. The write stays unapplied and unanswered, and `onCharacteristicWriteRequest` arrives with `responseNeeded: true`, until `sendResponse` is called with `GATT_SUCCESS` or an `ATT_ERROR_*` code. **This is the only way to reject a write** |
 
-Both behave identically on Android and iOS, with two platform notes:
+Both behave identically on Android and iOS, with three notes:
 
 - A **Write Without Response** carries nothing to answer, so it is never delegated even with
   `write: true`, on either platform.
-- On iOS a batch of writes delivered in one callback shares a single `requestId`, so one
-  `sendResponse` answers all of it. See
+- Delegation is decided **per characteristic**, so a batch touching a delegated and a plain
+  characteristic applies the plain one's value once the batch is accepted, and discards it if the
+  delegated one is rejected. See
   [addCharacteristicWriteRequestListener](#addcharacteristicwriterequestlistener).
+- On iOS a batch of writes delivered in one callback shares a single `requestId`, so one
+  `sendResponse` answers all of it. An Android reliable-write execute is a single request and behaves
+  the same way.
 
 ### GattDescriptorConfig
 

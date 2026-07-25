@@ -320,6 +320,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ATT_ERROR_UNLIKELY_ERROR` rather than applied to the wrong attribute, and `onCharacteristicSubscribed`
   / `onCharacteristicUnsubscribed` now carry the right `serviceUuid` when a characteristic UUID appears
   in more than one service
+- A write batch touching a characteristic that delegates writes and one that does not applied *neither*
+  value, on both platforms: delegation was decided once for the whole batch. A plain characteristic
+  written in the same reliable write as a delegated one was told the write succeeded and then kept its
+  old value, and every event in the batch carried `responseNeeded: true`, so a handler answering per
+  event got `REQUEST_NOT_FOUND` on the second. Delegation is now decided per characteristic on the batch
+  paths too, matching the direct write path. The batch stays atomic: the plain characteristics' values
+  are held until it is answered with `GATT_SUCCESS` and discarded if it is rejected or left to expire,
+  and only the delegated characteristics' events carry `responseNeeded: true`
 
 ### Removed
 

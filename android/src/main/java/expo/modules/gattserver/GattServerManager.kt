@@ -256,6 +256,12 @@ class GattServerManager(
   private class PendingRequest(
     val offset: Int,
     val isRead: Boolean,
+    /**
+     * What a partially delegated execute assembled for the characteristics that did *not* opt in,
+     * withheld until the batch is accepted. The queued-write procedure is atomic, so half of it must not
+     * be committed while JavaScript may still reject the rest.
+     */
+    val deferredValues: Map<BluetoothGattCharacteristic, ByteArray> = emptyMap(),
   ) {
     // Assigned once, immediately after construction, because the expiry has to name the entry it expires.
     // Volatile because it is armed on a binder thread and read from the main looper and the caller's.
@@ -1333,7 +1339,10 @@ class GattServerManager(
     val attError: Int? = null,
     val characteristicValues: Map<BluetoothGattCharacteristic, ByteArray> = emptyMap(),
     val clientConfigurations: List<Pair<BluetoothGattDescriptor, Int>> = emptyList(),
-    val delegated: Boolean = false,
+    /** The characteristics of this execute that hand their writes to JavaScript. */
+    val delegated: Set<BluetoothGattCharacteristic> = emptySet(),
+    /** Values withheld until JavaScript accepts the execute; empty unless it is partially delegated. */
+    val deferredValues: Map<BluetoothGattCharacteristic, ByteArray> = emptyMap(),
   )
 
   /**
@@ -1365,10 +1374,13 @@ class GattServerManager(
       applyClientConfiguration(device, descriptor.characteristic, bits)
     }
 
-    // A delegated write is JavaScript's to accept or reject, so the assembled value was withheld until it
-    // answers, and one pending request stands for the whole atomic execute.
-    if (assembled.delegated) {
-      registerPendingRequest(requestId, device.address, offset = 0, isRead = false)
+    // A delegated write is JavaScript's to accept or reject, so the assembled values were withheld until
+    // it answers, and one pending request stands for the whole atomic execute.
+    if (assembled.delegated.isNotEmpty()) {
+      registerPendingRequest(
+        requestId, device.address, offset = 0, isRead = false,
+        deferredValues = assembled.deferredValues
+      )
     } else {
       gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
     }
@@ -1378,7 +1390,7 @@ class GattServerManager(
     assembled.characteristicValues.forEach { (characteristic, value) ->
       listener?.onCharacteristicWriteRequest(
         device.address, requestId, characteristic.service?.uuid?.toString() ?: "",
-        characteristic.uuid.toString(), 0, value, assembled.delegated
+        characteristic.uuid.toString(), 0, value, characteristic in assembled.delegated
       )
     }
   }
@@ -1438,9 +1450,14 @@ class GattServerManager(
         }
       }
 
-      val delegated = characteristicValues.keys.any { delegationFor(it).write }
-      if (!delegated) {
-        for ((characteristic, value) in characteristicValues) {
+      // Decided per characteristic, as the direct write path already does: one that never opted in must
+      // still have its value applied, even when a sibling in the same execute delegates.
+      val delegated = characteristicValues.keys.filterTo(LinkedHashSet()) { delegationFor(it).write }
+      val automatic = characteristicValues.filterKeys { it !in delegated }
+      // Applied straight away only when nothing in the execute is delegated. Otherwise the execute is
+      // one atomic operation that JavaScript may still reject, so these wait for its answer too.
+      if (delegated.isEmpty()) {
+        for ((characteristic, value) in automatic) {
           @Suppress("DEPRECATION")
           characteristic.value = value
         }
@@ -1450,6 +1467,7 @@ class GattServerManager(
         characteristicValues = characteristicValues,
         clientConfigurations = clientConfigurations,
         delegated = delegated,
+        deferredValues = if (delegated.isEmpty()) emptyMap() else automatic,
       )
     }
 
@@ -1479,9 +1497,15 @@ class GattServerManager(
    * Arms the expiry that answers a delegated request if JavaScript never does. Called before the event is
    * emitted, so a listener that responds synchronously still finds the request.
    */
-  private fun registerPendingRequest(requestId: Int, deviceId: String, offset: Int, isRead: Boolean) {
+  private fun registerPendingRequest(
+    requestId: Int,
+    deviceId: String,
+    offset: Int,
+    isRead: Boolean,
+    deferredValues: Map<BluetoothGattCharacteristic, ByteArray> = emptyMap(),
+  ) {
     val key = RequestKey(deviceId, requestId)
-    val pending = PendingRequest(offset, isRead)
+    val pending = PendingRequest(offset, isRead, deferredValues)
     // The expiry names the entry it was armed for, so one already dispatched onto the main looper when its
     // request was answered or displaced cannot remove — and answer — whatever took its place.
     val timeout = if (requestTimeoutMs > 0) Runnable { expireRequest(key, pending) } else null
@@ -1555,6 +1579,15 @@ class GattServerManager(
     // request unanswerable, which is the lesser fault, since the stack that refused it is gone anyway.
     if (!pendingRequests.remove(key, pending)) throw unknownRequest(deviceId, requestId)
     pending.timeout?.let { timeoutHandler.removeCallbacks(it) }
+
+    // Committed before the response goes out, so a central that reads straight after its write response
+    // sees what it wrote. Only a success commits them: any ATT error rejects the whole execute, which the
+    // queued-write procedure treats as one atomic operation.
+    if (status == BluetoothGatt.GATT_SUCCESS) {
+      for ((characteristic, value) in pending.deferredValues) {
+        storeCharacteristicValue(characteristic, value)
+      }
+    }
 
     // The offset handed to the stack is the request's own, so it always describes where `payload` sits
     // within the attribute regardless of what the caller passed.

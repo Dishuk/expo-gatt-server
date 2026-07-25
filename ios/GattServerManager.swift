@@ -310,6 +310,11 @@ class GattServerManager: NSObject {
     /// Only a read response carries a value back to the central. A write request's `value` is the
     /// written data, and CoreBluetooth does not document overwriting it as supported.
     let isRead: Bool
+    /// What a partially delegated write batch assembled for the characteristics that did *not* opt in,
+    /// withheld until the batch is accepted. Apple documents the batch as an atomic unit — "if the
+    /// execution of one of the requests would cause a failure [...] none of the requests should be
+    /// executed" — so half of it must not be committed while JavaScript may still reject the rest.
+    let deferredValues: [CharacteristicAddress: Data]
     /// The armed expiry, kept so answering or discarding the request can cancel it.
     let timeout: DispatchWorkItem?
   }
@@ -599,7 +604,10 @@ class GattServerManager: NSObject {
 
   /// Arms the expiry that answers a delegated request if JavaScript never does. Called before the event
   /// is emitted, so a listener that responds synchronously still finds the request.
-  private func registerPendingRequest(_ requestId: Int, request: CBATTRequest, isRead: Bool) {
+  private func registerPendingRequest(
+    _ requestId: Int, request: CBATTRequest, isRead: Bool,
+    deferredValues: [CharacteristicAddress: Data] = [:]
+  ) {
     var timeout: DispatchWorkItem?
     if requestTimeoutMs > 0 {
       let work = DispatchWorkItem { [weak self] in self?.expireRequest(requestId) }
@@ -608,7 +616,9 @@ class GattServerManager: NSObject {
         deadline: .now() + .milliseconds(requestTimeoutMs), execute: work
       )
     }
-    pendingRequests[requestId] = PendingRequest(request: request, isRead: isRead, timeout: timeout)
+    pendingRequests[requestId] = PendingRequest(
+      request: request, isRead: isRead, deferredValues: deferredValues, timeout: timeout
+    )
   }
 
   /// Answers a request JavaScript left unanswered, so the central's transaction completes with an
@@ -688,6 +698,14 @@ class GattServerManager: NSObject {
     let result = attErrorCode(for: status)
     if pending.isRead {
       request.value = payload
+    }
+    // Committed before the response goes out, so a central that reads straight after its write response
+    // sees what it wrote. Only a success commits them: any ATT error rejects the whole batch, which
+    // Apple documents as all-or-nothing.
+    if result == .success {
+      for (address, value) in pending.deferredValues {
+        characteristicValues[address] = value
+      }
     }
     // Deliberately not size-checked: the central continues a value longer than one `ATT_READ_RSP` with
     // `ATT_READ_BLOB_REQ`, so answering with more than fits is normal ATT. Apple's own guidance is to
@@ -1137,37 +1155,39 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     }
 
     // Apple documents that `respond(to:withResult:)` must be called exactly once per callback, passing
-    // the first request of the array, and that the batch is all-or-nothing: "if you can't fulfill an
-    // individual request, you shouldn't fulfill any of them". So a delegated batch is one pending
-    // request backed by `first`, and the first `sendResponse` for its id answers the whole batch.
+    // the first request of the array. So a batch JavaScript has to answer is one pending request backed
+    // by `first`, and the first `sendResponse` for its id answers the whole batch.
     let batchId = nextRequestId()
-    let delegated = addresses.contains { delegation(for: $0).write }
+    // Decided per characteristic, as the direct write path already does: one that never opted in must
+    // still have its value applied, even when a sibling in the same batch delegates.
+    let delegated = Set(addresses.filter { delegation(for: $0).write })
 
-    // A delegated batch may still be rejected, so the mirrored value is left untouched and the
-    // listener commits it with `updateCharacteristicValue` once it has accepted the write. Everything
-    // else is assembled before anything is applied or answered, so a fragment the attribute cannot
-    // take fails the whole batch rather than half of it.
+    // Everything is assembled before anything is applied or answered, so a fragment the attribute
+    // cannot take fails the whole batch rather than half of it.
     var assembled: [CharacteristicAddress: Data] = [:]
-    if !delegated {
-      for (request, address) in zip(requests, addresses) {
-        let current = assembled[address] ?? characteristicValues[address] ?? Data()
-        guard let merged = spliced(
-          current, offset: request.offset, part: request.value ?? Data()
-        ) else {
-          peripheral.respond(to: first, withResult: .invalidOffset)
-          return
-        }
-        assembled[address] = merged
+    for (request, address) in zip(requests, addresses) {
+      let current = assembled[address] ?? characteristicValues[address] ?? Data()
+      guard let merged = spliced(
+        current, offset: request.offset, part: request.value ?? Data()
+      ) else {
+        peripheral.respond(to: first, withResult: .invalidOffset)
+        return
       }
+      assembled[address] = merged
     }
 
-    if delegated {
-      registerPendingRequest(batchId, request: first, isRead: false)
-    } else {
-      for (address, value) in assembled {
+    // A delegated characteristic's value is JavaScript's to commit with `updateCharacteristicValue` once
+    // it has accepted the write. The rest of a partially delegated batch waits for that same answer, so
+    // the batch stays the atomic unit Apple documents: "if the execution of one of the requests would
+    // cause a failure [...] none of the requests should be executed".
+    let automatic = assembled.filter { !delegated.contains($0.key) }
+    if delegated.isEmpty {
+      for (address, value) in automatic {
         characteristicValues[address] = value
       }
       peripheral.respond(to: first, withResult: .success)
+    } else {
+      registerPendingRequest(batchId, request: first, isRead: false, deferredValues: automatic)
     }
 
     for (request, address) in zip(requests, addresses) {
@@ -1178,7 +1198,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
         characteristicUuid: request.characteristic.uuid.normalizedString,
         offset: request.offset,
         value: request.value ?? Data(),
-        responseNeeded: delegated
+        responseNeeded: delegated.contains(address)
       )
     }
   }

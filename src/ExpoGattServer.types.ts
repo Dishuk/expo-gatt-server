@@ -14,9 +14,14 @@ export interface CharacteristicDelegateConfig {
    * `requestId` and the write stays unanswered until `sendResponse` is called with `GATT_SUCCESS` or
    * an `ATT_ERROR_*` code — the only way to reject a write.
    *
+   * Decided per characteristic, so a plain characteristic written in the same batch as a delegated one
+   * still has its value applied. Because that batch is atomic, the plain characteristic's value is held
+   * until the batch is answered with `GATT_SUCCESS` and discarded if it is rejected.
+   *
    * Apple requires exactly one response per write callback, taken from the first request of the
-   * batch, and documents the batch as all-or-nothing, so on iOS every event produced by one batch
-   * shares a single `requestId` and the first `sendResponse` for it answers the whole batch.
+   * batch, so on iOS every event produced by one batch shares a single `requestId` and the first
+   * `sendResponse` for it answers the whole batch. An Android execute of a reliable write behaves the
+   * same way, since the execute is a single request.
    */
   write?: boolean;
 }
@@ -341,9 +346,10 @@ export interface CharacteristicWriteRequestEvent {
   offset: number;
   value: number[];
   /**
-   * `true` when the module is waiting for JavaScript to answer this request with `sendResponse`.
-   * Only ever `true` for a characteristic configured with `delegate.write` whose write actually
-   * carries a response; the module answers every other write itself before emitting the event.
+   * `true` only for a characteristic configured with `delegate.write` whose write actually carries a
+   * response; the module answers every other write itself before emitting the event. Decided per
+   * characteristic, so a batch touching a delegated and a plain characteristic emits one event of each
+   * and only the delegated one asks to be answered.
    */
   responseNeeded: boolean;
 }
