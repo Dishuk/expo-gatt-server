@@ -27,21 +27,44 @@ npx expo run:ios    # or run:android
 
 ## Configure Permissions
 
-### iOS
+### Config Plugin
 
-Add a Bluetooth usage description to `app.json`:
+The package ships an Expo config plugin, so the build-time configuration needs no hand-editing. Add it to `app.json`:
 
 ```json
 {
   "expo": {
-    "ios": {
-      "infoPlist": {
-        "NSBluetoothAlwaysUsageDescription": "This app uses Bluetooth to communicate with nearby devices."
-      }
-    }
+    "plugins": ["expo-gatt-server"]
   }
 }
 ```
+
+That alone writes `NSBluetoothAlwaysUsageDescription` into the iOS `Info.plist` -- without it iOS terminates the app the moment it touches CoreBluetooth. Every option is optional:
+
+```json
+{
+  "expo": {
+    "plugins": [
+      [
+        "expo-gatt-server",
+        {
+          "bluetoothAlwaysPermission": "This app uses Bluetooth to communicate with nearby devices.",
+          "bluetoothPeripheralBackgroundMode": true,
+          "requireBluetoothLeHardware": true
+        }
+      ]
+    ]
+  }
+}
+```
+
+| Option | Platform | Default | Effect |
+|--------|----------|---------|--------|
+| `bluetoothAlwaysPermission` | iOS | a generic description | Sets `NSBluetoothAlwaysUsageDescription`. `false` leaves the key alone; omitting it keeps an existing `ios.infoPlist` value |
+| `bluetoothPeripheralBackgroundMode` | iOS | `false` | Adds `bluetooth-peripheral` to `UIBackgroundModes` |
+| `requireBluetoothLeHardware` | Android | `false` | Sets `android:required` on `android.hardware.bluetooth_le`. See [Hardware Requirements](./platform-setup.md#hardware-requirements) |
+
+Run `npx expo prebuild --clean` after changing any of them.
 
 ### Android
 

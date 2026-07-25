@@ -17,6 +17,7 @@ An Expo module that turns your React Native app into a BLE GATT server (peripher
 - **Peripheral mode** -- Act as a BLE GATT server, not just a client
 - **Cross-platform** -- Unified API across iOS (CoreBluetooth) and Android (BluetoothGatt)
 - **Expo native modules** -- No manual linking, auto-configured via expo-modules
+- **Config plugin** -- Ships its own iOS permission, background mode and Android BLE requirement configuration
 - **Event-driven** -- Subscribe to connections, read/write requests, and notification delivery
 - **MTU-aware** -- Validates payload size against negotiated MTU before sending
 
@@ -25,8 +26,22 @@ An Expo module that turns your React Native app into a BLE GATT server (peripher
 ```bash
 # Install
 npx expo install expo-gatt-server
+```
 
-# Add to your app
+Add the config plugin to `app.json` -- it writes the iOS Bluetooth usage description your app cannot
+launch CoreBluetooth without, and exposes the background mode and the Android BLE hardware requirement
+as options. See [Getting Started](./docs/getting-started.md#config-plugin).
+
+```json
+{
+  "expo": {
+    "plugins": ["expo-gatt-server"]
+  }
+}
+```
+
+```bash
+# Generate the native projects
 npx expo prebuild
 ```
 

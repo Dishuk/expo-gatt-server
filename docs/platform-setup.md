@@ -23,6 +23,20 @@ iOS 15.1+. Set in the podspec and enforced at build time.
 
 Add a Bluetooth usage description. Without this, the app crashes on launch when accessing CoreBluetooth.
 
+**Config plugin** (recommended -- see [Getting Started](./getting-started.md#config-plugin)):
+
+```json
+{
+  "expo": {
+    "plugins": [
+      ["expo-gatt-server", { "bluetoothAlwaysPermission": "This app uses Bluetooth to communicate with nearby devices." }]
+    ]
+  }
+}
+```
+
+Adding the plugin with no options writes a generic description instead, so the key is never simply missing.
+
 **app.json:**
 
 ```json
@@ -37,6 +51,8 @@ Add a Bluetooth usage description. Without this, the app crashes on launch when 
 }
 ```
 
+An `ios.infoPlist` value set this way wins, as long as the plugin's `bluetoothAlwaysPermission` is left unset.
+
 **Raw Info.plist:**
 
 ```xml
@@ -49,6 +65,16 @@ The module checks `CBPeripheralManager.authorization` at runtime in `createServe
 ### Background Modes
 
 To advertise and handle requests while the app is backgrounded, enable the `bluetooth-peripheral` background mode:
+
+**Config plugin:**
+
+```json
+{
+  "expo": {
+    "plugins": [["expo-gatt-server", { "bluetoothPeripheralBackgroundMode": true }]]
+  }
+}
+```
 
 **app.json:**
 
@@ -130,7 +156,17 @@ async function requestBlePermissions() {
 
 The module declares `android.hardware.bluetooth_le` with `required="false"`, so it appears in your merged manifest without filtering your app off Google Play on devices that lack BLE hardware. Whether BLE is essential is your app's decision, not a dependency's.
 
-If your app genuinely cannot work without BLE, mark it required in your own manifest and the merger will take the stronger value:
+If your app genuinely cannot work without BLE, ask the config plugin to declare it required. The manifest merger ORs `android:required`, so the entry the plugin writes into your app's manifest takes the stronger value:
+
+```json
+{
+  "expo": {
+    "plugins": [["expo-gatt-server", { "requireBluetoothLeHardware": true }]]
+  }
+}
+```
+
+Or write it in your own manifest directly:
 
 ```xml
 <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />

@@ -10,13 +10,17 @@
     "android/src",
     "android/build.gradle",
     "android/consumer-rules.pro",
-    "expo-module.config.json"
+    "expo-module.config.json",
+    "app.plugin.js",
+    "plugin/build"
   ],
   "scripts": {
     "build": "expo-module build",
+    "build:plugin": "expo-module build plugin",
     "clean": "expo-module clean",
     "lint": "expo-module lint",
-    "test": "expo-module test"
+    "test": "expo-module test",
+    "prepublishOnly": "expo-module build plugin"
   },
   "keywords": [
     "expo",

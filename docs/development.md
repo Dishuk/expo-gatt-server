@@ -22,11 +22,13 @@ npm install
 | Command | Description |
 |---------|-------------|
 | `npm run build` | Compile TypeScript to `build/` |
+| `npm run build:plugin` | Compile the config plugin to `plugin/build/` |
 | `npm run clean` | Remove build artifacts |
 | `npm run lint` | Run ESLint |
 | `npm run test` | Run tests |
 
-All scripts delegate to `expo-module-scripts`.
+All scripts delegate to `expo-module-scripts`. `prepublishOnly` runs `build:plugin`, since `plugin/build/`
+is published but not committed.
 
 ## Project Layout
 
@@ -48,6 +50,13 @@ android/                      # Android native implementation (Kotlin)
     └── java/expo/modules/gattserver/
         ├── ExpoGattServerModule.kt
         └── GattServerManager.kt
+
+plugin/src/                   # Expo config plugin (built to plugin/build/)
+├── index.ts                  # Entry point, options and their defaults
+├── withGattServerIos.ts      # Info.plist mods
+└── withGattServerAndroid.ts  # AndroidManifest mods
+
+app.plugin.js                 # What Expo CLI looks for; re-exports plugin/build
 ```
 
 ### Key Files

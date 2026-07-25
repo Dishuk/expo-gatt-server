@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An Expo config plugin, so the package configures its own build-time requirements instead of leaving
+  every consumer to hand-edit `app.json`. Adding `"plugins": ["expo-gatt-server"]` writes
+  `NSBluetoothAlwaysUsageDescription`, without which iOS terminates the app the moment it touches
+  CoreBluetooth. Three optional properties: `bluetoothAlwaysPermission` for that description,
+  `bluetoothPeripheralBackgroundMode` to add `bluetooth-peripheral` to `UIBackgroundModes`, and
+  `requireBluetoothLeHardware` to declare `android.hardware.bluetooth_le` required — the manifest
+  merger ORs `android:required`, so this is how an app that genuinely needs BLE overrides the
+  `required="false"` the module declares to keep its consumers on Google Play. Every property defaults
+  to the previous behaviour, and an omitted `bluetoothAlwaysPermission` leaves an existing
+  `ios.infoPlist` value alone
 - `isSupported`, and lazy failure everywhere else. The native module is now resolved with
   `requireOptionalNativeModule`, so **importing the package no longer throws** on web or in Expo Go —
   `requireNativeModule` threw at import time, which took down any bundle that reached the import even
