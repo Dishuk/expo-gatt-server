@@ -141,13 +141,7 @@ class GattServerManager(
   // is touched from the caller's thread and from the binder thread that delivers the callback.
   private val notificationQueues = ConcurrentHashMap<String, NotificationQueue>()
 
-  /**
-   * One notification waiting for, or occupying, the single outstanding slot a device has.
-   *
-   * [deferredError] carries a failure that must not stop the payload going out — the MTU checks
-   * report a payload the link will truncate, and the caller is told about it once the send
-   * completes rather than instead of the send happening.
-   */
+  /** One notification waiting for, or occupying, the single outstanding slot a device has. */
   private class QueuedNotification(
     val device: BluetoothDevice,
     val characteristic: BluetoothGattCharacteristic,
@@ -155,9 +149,7 @@ class GattServerManager(
     val confirm: Boolean,
     val value: ByteArray,
     val onResult: (GattServerException?) -> Unit,
-  ) {
-    var deferredError: GattServerException? = null
-  }
+  )
 
   /** Per-device send queue. Every field is read and written under the instance's own monitor. */
   private class NotificationQueue {
@@ -440,7 +432,7 @@ class GattServerManager(
             "Notification for ${finished.characteristicUuid} was not delivered (status $status)"
           )
         } else {
-          finished.deferredError
+          null
         }
         finished.onResult(error)
       } else {
@@ -657,6 +649,9 @@ class GattServerManager(
       )
     }
 
+    // Refused before the send is even queued, so an oversized payload never reaches the stack.
+    mtuErrorFor(deviceId, value.size)?.let { throw it }
+
     val entry = QueuedNotification(device, characteristic, characteristicUuid, confirm, value, onResult)
     val queue = notificationQueues.getOrPut(deviceId) { NotificationQueue() }
     synchronized(queue) {
@@ -781,7 +776,9 @@ class GattServerManager(
   private fun dispatchNotification(deviceId: String, entry: QueuedNotification): GattServerException? {
     val server = gattServer
       ?: return GattServerException("ERR_NO_SERVER", "Server not open")
-    entry.deferredError = mtuErrorFor(deviceId, entry.value.size, "Payload")
+    // Re-checked as well as at enqueue time: the MTU can change while an entry waits its turn, and
+    // the payload must never reach the stack if it cannot be carried intact.
+    mtuErrorFor(deviceId, entry.value.size)?.let { return it }
     return notifyValue(server, entry.device, entry.characteristic, entry.confirm, entry.value)
   }
 
@@ -804,21 +801,42 @@ class GattServerManager(
   }
 
   /**
-   * Reports a payload the link cannot carry intact. The value is still transmitted — the platform
-   * truncates it — so this describes what went out rather than replacing it.
+   * Refuses a payload the link cannot carry in one notification, before anything is transmitted.
+   *
+   * The platform silently truncates an oversized notification rather than failing it — the stack
+   * logs "attribute value too long, to be truncated to N" while building the
+   * `ATT_HANDLE_VALUE_NTF` PDU — and a notification has no continuation mechanism, unlike a read
+   * that the central can finish with a Read Blob request. Sending it would therefore lose the tail
+   * with nothing to recover it.
    */
-  private fun mtuErrorFor(deviceId: String, size: Int, subject: String): MtuException? {
+  private fun mtuErrorFor(deviceId: String, size: Int): MtuException? {
     val negotiatedMtu = deviceMtu[deviceId]
     val mtu = negotiatedMtu ?: DEFAULT_ATT_MTU
     val maxPayload = mtu - ATT_NOTIFICATION_HEADER_SIZE
     if (size <= maxPayload) return null
-    return if (negotiatedMtu == null) {
-      MtuException("MTU_SMALL", "$subject size $size exceeds default MTU payload capacity of $maxPayload bytes. Client has not negotiated a larger MTU.")
+    val hint = if (negotiatedMtu == null) {
+      " The link is still at the default ATT MTU of $DEFAULT_ATT_MTU; a central that negotiates a " +
+        "larger one is reported through onMtuChanged."
     } else {
-      MtuException("PAYLOAD_EXCEEDS_MTU", "$subject size $size exceeds negotiated MTU payload capacity of $maxPayload bytes (MTU: $mtu).")
+      ""
     }
+    return MtuException(
+      "PAYLOAD_EXCEEDS_MTU",
+      "Payload size $size exceeds the $maxPayload bytes a single notification or indication can " +
+        "carry on this link (ATT MTU $mtu). Nothing was sent.$hint"
+    )
   }
 
+  /**
+   * Answers a pending read or write request.
+   *
+   * A read response is deliberately not size-checked. An `ATT_READ_RSP` carries at most
+   * `ATT_MTU - 1` octets and the central continues a longer value with `ATT_READ_BLOB_REQ`, which
+   * arrives as another read request bearing an offset — so answering with more than fits is normal
+   * ATT, not a failure. This module's own automatic read path already answers with the whole
+   * remainder from the requested offset, so rejecting it here only ever penalised delegated reads
+   * for behaving identically.
+   */
   fun sendResponse(deviceId: String, requestId: Int, status: Int, offset: Int, value: ByteArray) {
     val server = gattServer ?: throw IllegalStateException("Server not open")
     val device = connectedDevices[deviceId]
@@ -844,8 +862,6 @@ class GattServerManager(
     // Two-argument remove so a request id the framework has already reissued to another device is
     // not consumed by this call.
     pendingRequests.remove(requestId, deviceId)
-
-    mtuErrorFor(deviceId, value.size, "Response")?.let { throw it }
   }
 
   /**

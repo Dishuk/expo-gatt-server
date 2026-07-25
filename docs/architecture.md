@@ -149,12 +149,13 @@ The ATT protocol has a default MTU of 23 bytes (3-byte header + 20-byte payload)
 
 | Scenario | Behavior |
 |----------|----------|
-| Payload <= 20 bytes, no MTU negotiation | Sent normally |
-| Payload > 20 bytes, no MTU negotiation | Data is sent, then `MTU_SMALL` error is thrown |
-| Payload <= negotiated MTU - 3 | Sent normally |
-| Payload > negotiated MTU - 3 | Data is sent, then `PAYLOAD_EXCEEDS_MTU` error is thrown |
+| Notification payload <= MTU - 3 | Sent normally |
+| Notification payload > MTU - 3 | Rejected with `PAYLOAD_EXCEEDS_MTU`; **nothing is transmitted** |
+| Read response of any length | Sent as-is; the central continues a long value with a Read Blob request |
 
-The "send first, throw after" pattern ensures the central receives whatever the BLE stack can deliver, while still alerting the JavaScript layer that data may have been truncated.
+`sendNotification` validates the payload **before** transmitting. Both platforms silently truncate an oversized notification rather than failing it -- Apple documents that `updateValue` truncates a value exceeding `maximumUpdateValueLength` "to fit", and the Android stack logs "attribute value too long, to be truncated to N" while building the `ATT_HANDLE_VALUE_NTF` PDU. Because a notification has no continuation mechanism, transmitting it would lose the tail with nothing to recover it, so the send is refused instead.
+
+`sendResponse` is deliberately **not** size-checked. An `ATT_READ_RSP` carries at most `ATT_MTU - 1` octets and the central finishes a longer value with `ATT_READ_BLOB_REQ`, which arrives as another read request bearing an offset -- so answering with more than fits is normal ATT rather than a failure. The module's own automatic read path already answers with the whole remainder from the requested offset, so a size check here only penalised delegated reads for behaving identically.
 
 On iOS, the negotiated payload size is read from `central.maximumUpdateValueLength`. On Android, it is tracked via the `onMtuChanged` callback.
 

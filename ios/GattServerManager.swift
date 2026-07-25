@@ -17,8 +17,7 @@ private let defaultAttMtuPayload = defaultAttMtu - attNotificationHeaderSize
 private let maxQueuedNotifications = 64
 
 enum GattServerError: Error {
-  case mtuSmall(maxPayload: Int, payloadSize: Int)
-  case payloadExceedsMtu(maxPayload: Int, payloadSize: Int, responded: Bool)
+  case payloadExceedsMtu(maxPayload: Int, payloadSize: Int)
   case requestNotFound(requestId: Int)
   case bluetoothUnavailable(state: CBManagerState)
   case serviceRegistrationFailed(uuid: String, reason: String)
@@ -30,7 +29,6 @@ enum GattServerError: Error {
 
   var code: String {
     switch self {
-    case .mtuSmall: return "MTU_SMALL"
     case .payloadExceedsMtu: return "PAYLOAD_EXCEEDS_MTU"
     case .requestNotFound: return "REQUEST_NOT_FOUND"
     case .bluetoothUnavailable(let state):
@@ -46,11 +44,14 @@ enum GattServerError: Error {
 
   var message: String {
     switch self {
-    case .mtuSmall(let maxPayload, let payloadSize):
-      return "Payload size \(payloadSize) exceeds default MTU payload capacity of \(maxPayload) bytes. Client has not negotiated a larger MTU."
-    case .payloadExceedsMtu(let maxPayload, let payloadSize, let responded):
-      let suffix = responded ? " An error response was sent." : ""
-      return "Payload size \(payloadSize) exceeds negotiated MTU payload capacity of \(maxPayload) bytes.\(suffix)"
+    case .payloadExceedsMtu(let maxPayload, let payloadSize):
+      var message = "Payload size \(payloadSize) exceeds the \(maxPayload) bytes a single " +
+        "notification or indication can carry on this link. Nothing was sent."
+      if maxPayload <= defaultAttMtuPayload {
+        message += " The link is still at the default ATT MTU of \(defaultAttMtu); a central that " +
+          "negotiates a larger one is reported through onMtuChanged."
+      }
+      return message
     case .requestNotFound(let requestId):
       return "Request \(requestId) not found or already responded"
     case .bluetoothUnavailable(let state):
@@ -226,9 +227,6 @@ class GattServerManager: NSObject {
     let characteristic: CBMutableCharacteristic
     let central: CBCentral
     let value: Data
-    /// Reported once the payload is accepted rather than instead of accepting it: an oversized
-    /// value is still transmitted, truncated, so the caller is told what actually went out.
-    let deferredError: GattServerError?
     let completion: (Error?) -> Void
   }
 
@@ -401,12 +399,13 @@ class GattServerManager: NSObject {
       )
     }
 
+    // Checked before the payload goes anywhere near CoreBluetooth. `updateValue` documents that a
+    // value exceeding `maximumUpdateValueLength` "will be truncated to fit", and a notification has
+    // no continuation mechanism — unlike a read, which the central can finish with a Read Blob
+    // request — so transmitting it would silently lose the tail.
     let maxPayload = central.maximumUpdateValueLength
-    var deferredError: GattServerError?
-    if value.count > maxPayload {
-      deferredError = maxPayload <= defaultAttMtuPayload
-        ? .mtuSmall(maxPayload: maxPayload, payloadSize: value.count)
-        : .payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count, responded: false)
+    guard value.count <= maxPayload else {
+      throw GattServerError.payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count)
     }
 
     let entry = QueuedNotification(
@@ -415,7 +414,6 @@ class GattServerManager: NSObject {
       characteristic: characteristic,
       central: central,
       value: value,
-      deferredError: deferredError,
       completion: completion
     )
 
@@ -441,6 +439,16 @@ class GattServerManager: NSObject {
       entry.completion(GattServerError.serverStopped)
       return true
     }
+    // Re-checked here as well as at enqueue time: the link budget can shrink while an entry waits
+    // for the transmit queue, and the payload must never reach CoreBluetooth if it cannot be
+    // carried intact.
+    let maxPayload = entry.central.maximumUpdateValueLength
+    guard entry.value.count <= maxPayload else {
+      entry.completion(GattServerError.payloadExceedsMtu(
+        maxPayload: maxPayload, payloadSize: entry.value.count
+      ))
+      return true
+    }
     guard peripheral.updateValue(
       entry.value, for: entry.characteristic, onSubscribedCentrals: [entry.central]
     ) else {
@@ -451,7 +459,7 @@ class GattServerManager: NSObject {
       characteristicUuid: entry.characteristicUuid.uuidString,
       status: 0
     )
-    entry.completion(entry.deferredError)
+    entry.completion(nil)
     return true
   }
 
@@ -480,16 +488,14 @@ class GattServerManager: NSObject {
     if pending.isRead {
       request.value = value
     }
+    // A read response is deliberately not size-checked. An `ATT_READ_RSP` carries at most
+    // `ATT_MTU - 1` octets and the central continues a longer value with `ATT_READ_BLOB_REQ`, which
+    // arrives as another read request bearing an offset — so answering with more than fits is normal
+    // ATT, not a failure. Apple's own guidance is to assign the whole remainder from the request's
+    // offset and let the central "retrieve the entire value", and this module's automatic read path
+    // does exactly that, so rejecting it here would only have penalised delegated reads for
+    // behaving identically.
     peripheralManager?.respond(to: request, withResult: result)
-
-    let maxPayload = request.central.maximumUpdateValueLength
-    if value.count > maxPayload {
-      if maxPayload <= defaultAttMtuPayload {
-        throw GattServerError.mtuSmall(maxPayload: maxPayload, payloadSize: value.count)
-      } else {
-        throw GattServerError.payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count, responded: true)
-      }
-    }
   }
 
   func updateCharacteristicValue(

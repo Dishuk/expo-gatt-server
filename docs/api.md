@@ -125,7 +125,7 @@ stream against the connection instead of overrunning it.
 > reports space. Only the refused payloads are resent, in order -- an unrelated central never
 > receives an unsolicited update because another central's send was throttled.
 
-**Throws** `MTU_SMALL` if the default MTU is too small for the payload, or `PAYLOAD_EXCEEDS_MTU` if the payload exceeds the negotiated MTU. The data is sent before the error is thrown -- the error serves as a warning that the central may have received truncated data. Also throws `ERR_NOTIFY` when the stack refuses or fails the send, `ERR_NOTIFY_QUEUE_FULL` when too many sends are already waiting for the same device, and `ERR_DEVICE_DISCONNECTED` when the central goes away before a queued notification is delivered.
+**Throws** `PAYLOAD_EXCEEDS_MTU` when `value` is longer than the link can carry in one notification, checked **before** anything is transmitted -- nothing is sent and the payload is not truncated. Size payloads against [`getMtu`](#getmtu)`.maxNotificationPayload` to avoid it. Also throws `ERR_NOTIFY` when the stack refuses or fails the send, `ERR_NOTIFY_QUEUE_FULL` when too many sends are already waiting for the same device, `ERR_DEVICE_DISCONNECTED` when the central is not connected or goes away before a queued notification is delivered, and `ERR_NO_SUBSCRIBER` when it has not enabled notifications or indications on the characteristic.
 
 ---
 
@@ -151,7 +151,11 @@ Respond to a characteristic read request forwarded from the native layer.
 | `offset` | `number` | Read offset from the request event |
 | `value` | `number[]` | Response byte array |
 
-**Throws** `REQUEST_NOT_FOUND` if the request ID is invalid or already responded to. May also throw MTU-related errors.
+**Throws** `REQUEST_NOT_FOUND` if the request ID is invalid or already responded to.
+
+`value` is **not** size-checked against the MTU. An `ATT_READ_RSP` carries at most `ATT_MTU - 1`
+octets and the central finishes a longer value with a Read Blob request, which arrives as another
+read request bearing an offset -- so answering with more than fits is normal ATT, not an error.
 
 ---
 
@@ -544,8 +548,7 @@ Errors thrown by `sendNotification` and `sendResponse` include a `code` property
 
 | Code | Description |
 |------|-------------|
-| `MTU_SMALL` | Default ATT MTU (23 bytes / 20 payload) is too small for the value. The central has not negotiated a larger MTU. |
-| `PAYLOAD_EXCEEDS_MTU` | Value exceeds the negotiated MTU. Data was sent but may be truncated by the central. |
+| `PAYLOAD_EXCEEDS_MTU` | A `sendNotification` payload is longer than one notification can carry (`mtu - 3`). Checked before transmitting, so nothing was sent. The message says when the link is still at the default ATT MTU of 23. |
 | `REQUEST_NOT_FOUND` | The `requestId` does not match any pending read request. |
 | `ERR_NOTIFY` | The Bluetooth stack refused the notification, or reported it as undelivered. |
 | `ERR_NOTIFY_QUEUE_FULL` | Too many notifications are already queued for the device. Await earlier sends before queueing more. |
