@@ -796,12 +796,19 @@ When it is `true`, the write is **not applied** until JavaScript accepts it: ans
 reject the write. Leaving it unanswered completes it with `ATT_ERROR_UNLIKELY_ERROR` after
 `requestTimeoutMs`.
 
-> **What a write leaves behind differs by platform.** An automatically acknowledged write updates the
-> value a later read is answered from on iOS, but **not** on Android, where the module answers reads from
-> `BluetoothGattCharacteristic.value` and never assigns the written bytes to it. If a subsequent read
-> should serve what was written, call
-> [`updateCharacteristicValue`](#updatecharacteristicvalue) from this listener -- which is also what a
-> delegated write has to do on both platforms.
+**An automatically acknowledged write updates the value a later read is answered from**, identically on
+both platforms, so a readable characteristic serves what was written without any help from JavaScript.
+The value is *replaced*, not merged: `ATT_WRITE_REQ` carries only a handle and a value, and "the
+attribute value shall be truncated or lengthened to match the length of the Attribute Value parameter"
+(Vol 3, Part F, Section 3.4.5.1), so writing fewer bytes than the characteristic currently holds
+shortens it rather than leaving a stale tail. A write bearing a non-zero offset -- which only arises
+from the queued-write procedure -- is spliced in at that offset instead, and one starting past the end
+of the value is refused with `ATT_ERROR_INVALID_OFFSET`.
+
+A **delegated** write is the exception: nothing is stored until JavaScript accepts it, so commit the
+value yourself with [`updateCharacteristicValue`](#updatecharacteristicvalue) when you answer with
+`GATT_SUCCESS`. A characteristic configured with `delegate.write` never has a written value stored for
+it automatically, including for a Write Without Response that arrives with `responseNeeded: false`.
 
 > **iOS shares one `requestId` across a batch.** CoreBluetooth delivers writes as an array and
 > requires exactly one `respond(to:withResult:)` per callback, passing the first request, documenting
@@ -844,8 +851,9 @@ or reject until the execute says the value is real.
 > `prepareQueueFull`, but that is just the complete ATT error table -- there is no callback to return
 > it from.) CoreBluetooth handles the procedure below the app layer and surfaces whatever it decides
 > to surface through `didReceiveWriteRequests`, so there is nothing for the module to buffer and
-> nothing to configure. Long writes to an iOS peripheral work, but the fragmentation is not
-> observable and the execute cannot be rejected.
+> nothing to configure. Long writes to an iOS peripheral work, and each request's `offset` is honoured
+> when its value is stored, but the batch reaches JavaScript as one event per request rather than one
+> reassembled value per attribute, and the execute cannot be rejected.
 
 ---
 

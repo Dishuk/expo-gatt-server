@@ -749,6 +749,33 @@ class GattServerManager: NSObject {
     } as? CBMutableCharacteristic
   }
 
+  /// Whether the published database holds this characteristic under any service. Checked before a
+  /// written value is cached, because `characteristicValues` is keyed by characteristic UUID alone and
+  /// an unrecognised key would be stored somewhere no read would ever look for it.
+  private func isPublished(_ characteristicUuid: CBUUID) -> Bool {
+    addedServices.values.contains {
+      $0.characteristics?.contains { $0.uuid == characteristicUuid } ?? false
+    }
+  }
+
+  /// Assembles one written fragment into an attribute's value, or returns `nil` when `offset` is past
+  /// the current end — which the specification answers with "Invalid Offset".
+  ///
+  /// A fragment at offset 0 replaces the value rather than being spliced into it: `ATT_WRITE_REQ`
+  /// carries only a handle and a value, and "the attribute value shall be truncated or lengthened to
+  /// match the length of the Attribute Value parameter" (Core Spec Vol 3, Part F, §3.4.5.1), so a
+  /// shorter write has to shorten the attribute. A non-zero offset reaches this delegate only from the
+  /// queued-write procedure CoreBluetooth runs below the app layer, where the offset is "the offset of
+  /// the first octet where the Part Attribute Value parameter is to be written" (§3.4.6.1).
+  private func spliced(_ current: Data, offset: Int, part: Data) -> Data? {
+    guard offset > 0 else { return part }
+    guard offset <= current.count else { return nil }
+    var result = Data(current.prefix(offset))
+    result.append(part)
+    result.append(contentsOf: current.dropFirst(offset + part.count))
+    return result
+  }
+
   /// `CBCharacteristic.service` is a weak reference that a torn-down database may already have
   /// cleared, so the owning service is looked up in the published database instead.
   private func serviceUuid(containing characteristicUuid: CBUUID) -> String {
@@ -1000,31 +1027,43 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     let batchId = nextRequestId()
     let delegated = requests.contains { delegation(for: $0.characteristic).write }
 
+    // A delegated batch may still be rejected, so the mirrored value is left untouched and the
+    // listener commits it with `updateCharacteristicValue` once it has accepted the write. Everything
+    // else is assembled before anything is applied or answered, so a fragment the attribute cannot
+    // take fails the whole batch rather than half of it.
+    var assembled: [CBUUID: Data] = [:]
+    if !delegated {
+      for request in requests {
+        let charUUID = request.characteristic.uuid
+        guard isPublished(charUUID) else { continue }
+        let current = assembled[charUUID] ?? characteristicValues[charUUID] ?? Data()
+        guard let merged = spliced(
+          current, offset: request.offset, part: request.value ?? Data()
+        ) else {
+          peripheral.respond(to: first, withResult: .invalidOffset)
+          return
+        }
+        assembled[charUUID] = merged
+      }
+    }
+
     if delegated {
       registerPendingRequest(batchId, request: first, isRead: false)
     } else {
+      for (charUUID, value) in assembled {
+        characteristicValues[charUUID] = value
+      }
       peripheral.respond(to: first, withResult: .success)
     }
 
     for request in requests {
-      let serviceUuid = request.characteristic.service?.uuid.normalizedString ?? ""
-      let value = request.value ?? Data()
-
-      // A delegated batch may still be rejected, so the mirrored value is left untouched and the
-      // listener commits it with `updateCharacteristicValue` once it has accepted the write.
-      if !delegated, let charUUID = addedServices.values
-        .flatMap({ $0.characteristics ?? [] })
-        .first(where: { $0.uuid == request.characteristic.uuid })?.uuid {
-        characteristicValues[charUUID] = value
-      }
-
       delegate?.onCharacteristicWriteRequest(
         deviceId: request.central.identifier.uuidString,
         requestId: batchId,
-        serviceUuid: serviceUuid,
+        serviceUuid: request.characteristic.service?.uuid.normalizedString ?? "",
         characteristicUuid: request.characteristic.uuid.normalizedString,
         offset: request.offset,
-        value: value,
+        value: request.value ?? Data(),
         responseNeeded: delegated
       )
     }

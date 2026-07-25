@@ -210,6 +210,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- An automatically acknowledged write did not update the value a later read is answered from on
+  Android, so the same central saw its own write reflected on iOS and the stale value on Android. Both
+  platforms now store it, replacing the attribute value as `ATT_WRITE_REQ` requires — "the attribute
+  value shall be truncated or lengthened to match the length of the Attribute Value parameter" (Vol 3,
+  Part F, Section 3.4.5.1). A characteristic configured with `delegate.write` is unaffected: its value
+  still belongs to JavaScript until `updateCharacteristicValue` commits it
+- A write bearing a non-zero offset overwrote the whole cached value with just that fragment on iOS,
+  truncating the attribute to the length of the fragment. The fragment is now spliced in at its offset,
+  and one starting past the end of the value is refused with `ATT_ERROR_INVALID_OFFSET` instead of
+  being applied
 - A malformed UUID string crashed the app on iOS. `CBUUID(string:)` raises an uncatchable
   Objective-C exception for anything but a 16-bit, 32-bit or hyphenated 128-bit spelling, so every UUID
   is validated before it reaches CoreBluetooth

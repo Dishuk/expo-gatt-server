@@ -286,10 +286,12 @@ class GattServerManager(
   // instead: device address, then characteristic UUID, then the raw two-octet configuration bits.
   private val subscriptions = ConcurrentHashMap<String, ConcurrentHashMap<UUID, Int>>()
 
-  // The pre-33 `notifyCharacteristicChanged` overload reads the payload from the shared
-  // `characteristic.value` field, so the write and the call have to be atomic with respect to a send for
-  // another device that targets the same characteristic.
-  private val legacyNotifyLock = Any()
+  // `BluetoothGattCharacteristic.value` is a plain non-volatile field the framework never synchronises,
+  // and it is both the mirrored attribute value and — on the pre-33 `notifyCharacteristicChanged`
+  // overload — the payload a send reads. So every mutation goes through this monitor: it publishes the
+  // value to the binder threads that answer reads, and keeps the pre-33 assign-then-notify pair atomic
+  // against a write or another device's send targeting the same characteristic.
+  private val characteristicValueLock = Any()
 
   // Delegation is fixed for the lifetime of a server but is read from the binder threads that deliver
   // the GATT callbacks, so both maps are concurrent.
@@ -492,13 +494,25 @@ class GattServerManager(
 
       // A write without a response cannot be answered at all, so it is never delegated even when the
       // characteristic opted in — there is nothing for JavaScript to reply to.
-      val delegated = delegationFor(characteristic).write && responseNeeded
+      val delegatesWrite = delegationFor(characteristic).write
+      val delegated = delegatesWrite && responseNeeded
       Log.d(TAG, "onCharacteristicWriteRequest: device=${device.address} char=${characteristic.uuid} offset=$offset responseNeeded=$responseNeeded delegated=$delegated")
 
       if (delegated) {
         registerPendingRequest(requestId, device.address, offset, isRead = false)
-      } else if (responseNeeded) {
-        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, data)
+      } else {
+        // Stored so a later read serves what was written, as it does on iOS. Replaced rather than
+        // spliced at `offset`: an unqueued write carries no offset — `ATT_WRITE_REQ` has only a handle
+        // and a value — and "the attribute value shall be truncated or lengthened to match the length
+        // of the Attribute Value parameter" (Core Spec Vol 3, Part F, §3.4.5.1), so a shorter write
+        // shortens the attribute. An opted-in characteristic keeps its value JavaScript's to commit
+        // with updateCharacteristicValue, including for a write-without-response nothing can answer.
+        if (!delegatesWrite) {
+          storeCharacteristicValue(characteristic, data)
+        }
+        if (responseNeeded) {
+          gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, data)
+        }
       }
 
       listener?.onCharacteristicWriteRequest(
@@ -1240,9 +1254,11 @@ class GattServerManager(
     if (delegated) {
       registerPendingRequest(requestId, device.address, offset = 0, isRead = false)
     } else {
-      characteristicValues.forEach { (characteristic, value) ->
-        @Suppress("DEPRECATION")
-        characteristic.value = value
+      synchronized(characteristicValueLock) {
+        characteristicValues.forEach { (characteristic, value) ->
+          @Suppress("DEPRECATION")
+          characteristic.value = value
+        }
       }
       gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
     }
@@ -1266,6 +1282,17 @@ class GattServerManager(
     val result = current.copyOf(maxOf(current.size, offset + part.size))
     part.copyInto(result, offset)
     return result
+  }
+
+  /** The one guarded way to replace the mirrored value a read of [characteristic] is answered from. */
+  private fun storeCharacteristicValue(
+    characteristic: BluetoothGattCharacteristic,
+    value: ByteArray,
+  ) {
+    synchronized(characteristicValueLock) {
+      @Suppress("DEPRECATION")
+      characteristic.value = value
+    }
   }
 
   /**
@@ -1405,7 +1432,7 @@ class GattServerManager(
       }
       return null
     }
-    val triggered = synchronized(legacyNotifyLock) {
+    val triggered = synchronized(characteristicValueLock) {
       @Suppress("DEPRECATION")
       characteristic.value = payload
       @Suppress("DEPRECATION")
@@ -1437,8 +1464,7 @@ class GattServerManager(
         "ERR_CHARACTERISTIC_NOT_FOUND",
         "Characteristic $characteristicUuid was not found in service $serviceUuid"
       )
-    @Suppress("DEPRECATION")
-    characteristic.value = value
+    storeCharacteristicValue(characteristic, value)
   }
 
   @SuppressLint("MissingPermission")
