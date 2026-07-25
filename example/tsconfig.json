@@ -1,0 +1,10 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "expo-gatt-server": ["../src/index"],
+      "expo-gatt-server/*": ["../src/*"]
+    }
+  }
+}
