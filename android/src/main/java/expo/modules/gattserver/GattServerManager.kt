@@ -995,7 +995,12 @@ class GattServerManager(
     // The device may have gone away between the check above and the queue being registered, in which
     // case nothing would ever drain it.
     if (!connectedDevices.containsKey(deviceId)) {
-      failNotifications(deviceId, GattServerException("ERR_DEVICE_DISCONNECTED", "Device $deviceId disconnected"))
+      val error = GattServerException("ERR_DEVICE_DISCONNECTED", "Device $deviceId disconnected")
+      failNotifications(deviceId, error)
+      // Also completed straight from this entry, because every teardown removes the device before it
+      // drains the queues: the queue this entry landed in may already have been detached from the map, and
+      // the drain above would then find nothing and leave the awaiting promise pending for good.
+      if (takeQueued(queue, entry)) entry.onResult(error)
       return
     }
     pumpNotifications(deviceId)
@@ -1181,6 +1186,20 @@ class GattServerManager(
     mtuErrorFor(deviceId, entry.value.size)?.let { return it }
     return notifyValue(server, entry.device, entry.characteristic, entry.confirm, entry.value)
   }
+
+  /**
+   * Removes [entry] from [queue] if it is still there, reporting whether this call is the one that took
+   * it — so an entry a concurrent drain has already claimed is not settled a second time.
+   */
+  private fun takeQueued(queue: NotificationQueue, entry: QueuedNotification): Boolean =
+    synchronized(queue) {
+      if (queue.inFlight === entry) {
+        queue.inFlight = null
+        true
+      } else {
+        queue.waiting.remove(entry)
+      }
+    }
 
   private fun failNotifications(deviceId: String, error: GattServerException) {
     val queue = notificationQueues.remove(deviceId) ?: return
