@@ -75,6 +75,38 @@ protocol GattServerManagerDelegate: AnyObject {
   func onNotificationSent(deviceId: String, characteristicUuid: String, status: Int)
 }
 
+/// Maps a status supplied by JavaScript onto the ATT error code CoreBluetooth transmits.
+///
+/// An ATT error code is a single octet (Bluetooth Core Specification 5.4, Vol 3, Part F, Table
+/// 3.4) and `CBATTError.Code` models 0x00 through 0x11, so those map straight across and match
+/// what Android sends for the same call. The specification also defines 0x12, 0x13 and the
+/// application (0x80–0x9F) and profile (0xE0–0xFF) ranges, but CoreBluetooth has no case for them
+/// and `respond(to:withResult:)` only accepts a `CBATTError.Code`; anything unrepresentable is
+/// reported as the generic "unlikely error" rather than being downgraded to success.
+func attErrorCode(for status: Int) -> CBATTError.Code {
+  switch status {
+  case 0x00: return .success
+  case 0x01: return .invalidHandle
+  case 0x02: return .readNotPermitted
+  case 0x03: return .writeNotPermitted
+  case 0x04: return .invalidPdu
+  case 0x05: return .insufficientAuthentication
+  case 0x06: return .requestNotSupported
+  case 0x07: return .invalidOffset
+  case 0x08: return .insufficientAuthorization
+  case 0x09: return .prepareQueueFull
+  case 0x0A: return .attributeNotFound
+  case 0x0B: return .attributeNotLong
+  case 0x0C: return .insufficientEncryptionKeySize
+  case 0x0D: return .invalidAttributeValueLength
+  case 0x0E: return .unlikelyError
+  case 0x0F: return .insufficientEncryption
+  case 0x10: return .unsupportedGroupType
+  case 0x11: return .insufficientResources
+  default: return .unlikelyError
+  }
+}
+
 /// Maps `CBManagerState` onto the platform-neutral state union shared with Android.
 func normalizedBluetoothState(_ state: CBManagerState) -> String {
   switch state {
@@ -278,7 +310,7 @@ class GattServerManager: NSObject {
     }
     let request = pending.request
 
-    let result: CBATTError.Code = status == 0 ? .success : .requestNotSupported
+    let result = attErrorCode(for: status)
     if pending.isRead {
       request.value = value
     }

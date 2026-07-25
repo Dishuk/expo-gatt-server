@@ -31,7 +31,23 @@ export {
   type BluetoothStateChangedEvent,
   type GattServerEvents,
   GATT_SUCCESS,
-  GATT_FAILURE,
+  ATT_ERROR_INVALID_HANDLE,
+  ATT_ERROR_READ_NOT_PERMITTED,
+  ATT_ERROR_WRITE_NOT_PERMITTED,
+  ATT_ERROR_INVALID_PDU,
+  ATT_ERROR_INSUFFICIENT_AUTHENTICATION,
+  ATT_ERROR_REQUEST_NOT_SUPPORTED,
+  ATT_ERROR_INVALID_OFFSET,
+  ATT_ERROR_INSUFFICIENT_AUTHORIZATION,
+  ATT_ERROR_PREPARE_QUEUE_FULL,
+  ATT_ERROR_ATTRIBUTE_NOT_FOUND,
+  ATT_ERROR_ATTRIBUTE_NOT_LONG,
+  ATT_ERROR_INSUFFICIENT_ENCRYPTION_KEY_SIZE,
+  ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH,
+  ATT_ERROR_UNLIKELY_ERROR,
+  ATT_ERROR_INSUFFICIENT_ENCRYPTION,
+  ATT_ERROR_UNSUPPORTED_GROUP_TYPE,
+  ATT_ERROR_INSUFFICIENT_RESOURCES,
 } from './ExpoGattServer.types';
 
 // Accepted by CBUUID(string:) on iOS: 16-bit (4 hex digits), 32-bit (8 hex digits) or the
@@ -115,6 +131,15 @@ export async function sendResponse(
   offset: number,
   value: number[],
 ): Promise<void> {
+  // An ATT error code is a single octet, and Android narrows the status to a byte on its way into
+  // the Bluetooth stack, so a wider value would be truncated into an unrelated error rather than
+  // rejected. Catch it here instead.
+  if (!Number.isInteger(status) || status < 0 || status > 255) {
+    throw new Error(
+      `Invalid response status ${JSON.stringify(status)}. An ATT error code is a single byte, ` +
+        'so it must be an integer between 0 and 255.',
+    );
+  }
   assertValidBytes(value, 'response');
   return ExpoGattServerModule.sendResponse(deviceId, requestId, status, offset, value);
 }

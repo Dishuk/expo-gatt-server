@@ -113,7 +113,7 @@ Respond to a characteristic read request forwarded from the native layer.
 |-----------|------|-------------|
 | `deviceId` | `string` | Requesting device identifier |
 | `requestId` | `number` | Request ID from the read event |
-| `status` | `number` | GATT status code (`GATT_SUCCESS` or `GATT_FAILURE`) |
+| `status` | `number` | `GATT_SUCCESS` or an `ATT_ERROR_*` code |
 | `offset` | `number` | Read offset from the request event |
 | `value` | `number[]` | Response byte array |
 
@@ -346,10 +346,33 @@ interface NotificationSentEvent {
 
 ## Constants
 
+An ATT error code is a single octet (Bluetooth Core Specification 5.4, Vol 3, Part F, Table 3.4).
+`sendResponse` rejects anything outside `0`–`255`.
+
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `GATT_SUCCESS` | `0` | Operation completed successfully |
-| `GATT_FAILURE` | `257` | Generic failure status |
+| `GATT_SUCCESS` | `0x00` | Operation completed successfully |
+| `ATT_ERROR_INVALID_HANDLE` | `0x01` | The attribute handle given was not valid on this server |
+| `ATT_ERROR_READ_NOT_PERMITTED` | `0x02` | The attribute cannot be read |
+| `ATT_ERROR_WRITE_NOT_PERMITTED` | `0x03` | The attribute cannot be written |
+| `ATT_ERROR_INVALID_PDU` | `0x04` | The attribute PDU was invalid |
+| `ATT_ERROR_INSUFFICIENT_AUTHENTICATION` | `0x05` | Authentication is required first |
+| `ATT_ERROR_REQUEST_NOT_SUPPORTED` | `0x06` | The server does not support the request |
+| `ATT_ERROR_INVALID_OFFSET` | `0x07` | Offset was past the end of the attribute |
+| `ATT_ERROR_INSUFFICIENT_AUTHORIZATION` | `0x08` | Authorization is required first |
+| `ATT_ERROR_PREPARE_QUEUE_FULL` | `0x09` | Too many prepare writes have been queued |
+| `ATT_ERROR_ATTRIBUTE_NOT_FOUND` | `0x0a` | No attribute found in the given handle range |
+| `ATT_ERROR_ATTRIBUTE_NOT_LONG` | `0x0b` | The attribute cannot be read with a read blob request |
+| `ATT_ERROR_INSUFFICIENT_ENCRYPTION_KEY_SIZE` | `0x0c` | The link's encryption key size is too short |
+| `ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH` | `0x0d` | The value length is invalid for the operation |
+| `ATT_ERROR_UNLIKELY_ERROR` | `0x0e` | The request could not be completed |
+| `ATT_ERROR_INSUFFICIENT_ENCRYPTION` | `0x0f` | Encryption is required first |
+| `ATT_ERROR_UNSUPPORTED_GROUP_TYPE` | `0x10` | The attribute type is not a supported grouping attribute |
+| `ATT_ERROR_INSUFFICIENT_RESOURCES` | `0x11` | Insufficient resources to complete the request |
+
+Codes above `0x11` are not exposed: iOS can only transmit what `CBATTError.Code` models, which
+stops at `0x11`, so the specification's `0x12`, `0x13`, application (`0x80`–`0x9F`) and profile
+(`0xE0`–`0xFF`) ranges have no iOS representation and would arrive as Unlikely Error.
 
 ## Error Codes
 

@@ -129,5 +129,54 @@ export type GattServerEvents = {
   onBluetoothStateChanged(event: BluetoothStateChangedEvent): void;
 };
 
-export const GATT_SUCCESS = 0;
-export const GATT_FAILURE = 257;
+/**
+ * Statuses accepted by `sendResponse`.
+ *
+ * An ATT error code is a single octet — Bluetooth Core Specification 5.4, Vol 3, Part F,
+ * Section 3.4.1.1, Table 3.4 — so a wider value is not transmissible. Android narrows the status
+ * to a `uint8_t` before it reaches the Bluetooth stack, so the constant this list replaces,
+ * `GATT_FAILURE = 257` (`BluetoothGatt.GATT_FAILURE`, which is a GATT *status* rather than an ATT
+ * error code), actually went out on the wire as its low byte, `0x01` "Invalid Handle".
+ *
+ * Only 0x01–0x11 are exposed, because they are exactly the codes both platforms can transmit:
+ * iOS can only send what `CBATTError.Code` models, and that stops at 0x11. Android could also
+ * send 0x12 (Database Out Of Sync), 0x13 (Value Not Allowed), the application range 0x80–0x9F and
+ * the profile range 0xE0–0xFF, but iOS has no representation for those and would downgrade them
+ * to Unlikely Error, so they are deliberately not offered.
+ */
+export const GATT_SUCCESS = 0x00;
+
+/** The attribute handle given was not valid on this server. */
+export const ATT_ERROR_INVALID_HANDLE = 0x01;
+/** The attribute cannot be read. */
+export const ATT_ERROR_READ_NOT_PERMITTED = 0x02;
+/** The attribute cannot be written. */
+export const ATT_ERROR_WRITE_NOT_PERMITTED = 0x03;
+/** The attribute PDU was invalid. */
+export const ATT_ERROR_INVALID_PDU = 0x04;
+/** The attribute requires authentication before it can be read or written. */
+export const ATT_ERROR_INSUFFICIENT_AUTHENTICATION = 0x05;
+/** The server does not support the request received from the client. */
+export const ATT_ERROR_REQUEST_NOT_SUPPORTED = 0x06;
+/** Offset specified was past the end of the attribute. */
+export const ATT_ERROR_INVALID_OFFSET = 0x07;
+/** The attribute requires authorization before it can be read or written. */
+export const ATT_ERROR_INSUFFICIENT_AUTHORIZATION = 0x08;
+/** Too many prepare writes have been queued. */
+export const ATT_ERROR_PREPARE_QUEUE_FULL = 0x09;
+/** No attribute found within the given attribute handle range. */
+export const ATT_ERROR_ATTRIBUTE_NOT_FOUND = 0x0a;
+/** The attribute cannot be read using the read blob request. */
+export const ATT_ERROR_ATTRIBUTE_NOT_LONG = 0x0b;
+/** The encryption key size used for encrypting this link is too short. */
+export const ATT_ERROR_INSUFFICIENT_ENCRYPTION_KEY_SIZE = 0x0c;
+/** The attribute value length is invalid for the operation. */
+export const ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH = 0x0d;
+/** The request encountered an error that was unlikely, so it could not be completed. */
+export const ATT_ERROR_UNLIKELY_ERROR = 0x0e;
+/** The attribute requires encryption before it can be read or written. */
+export const ATT_ERROR_INSUFFICIENT_ENCRYPTION = 0x0f;
+/** The attribute type is not a supported grouping attribute. */
+export const ATT_ERROR_UNSUPPORTED_GROUP_TYPE = 0x10;
+/** Insufficient resources to complete the request. */
+export const ATT_ERROR_INSUFFICIENT_RESOURCES = 0x11;
