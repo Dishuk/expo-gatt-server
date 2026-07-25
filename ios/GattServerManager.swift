@@ -281,14 +281,14 @@ class GattServerManager: NSObject {
   /// central next produces activity.
   private var centralPayloadLengths: [String: Int] = [:]
 
-  private var subscribedCentrals: [String: [CBUUID: CBCentral]] = [:]
-  private var characteristicValues: [CBUUID: Data] = [:]
+  private var subscribedCentrals: [String: [CharacteristicAddress: CBCentral]] = [:]
+  // Keyed by service as well as characteristic, because GATT permits the same characteristic UUID in
+  // two services: under a UUID-only key one instance's value answered reads of the other's, and a write
+  // to either clobbered both.
+  private var characteristicValues: [CharacteristicAddress: Data] = [:]
   private var pendingRequests: [Int: PendingRequest] = [:]
   private var requestCounter = 0
   private var delegations: [CharacteristicAddress: CharacteristicDelegation] = [:]
-  // Fallback for a characteristic whose owning service cannot be identified. Only populated for
-  // characteristic UUIDs that occur exactly once in the configuration, so a hit is unambiguous.
-  private var delegationsByCharacteristic: [CBUUID: CharacteristicDelegation] = [:]
 
   /// Notifications CoreBluetooth could not accept yet, oldest first. When
   /// `updateValue(_:for:onSubscribedCentrals:)` returns `false` because the transmit queue is full,
@@ -298,7 +298,7 @@ class GattServerManager: NSObject {
 
   private struct QueuedNotification {
     let deviceId: String
-    let characteristicUuid: CBUUID
+    let address: CharacteristicAddress
     let characteristic: CBMutableCharacteristic
     let central: CBCentral
     let value: Data
@@ -317,26 +317,10 @@ class GattServerManager: NSObject {
   /// Records which characteristics hand their ATT requests to JavaScript. Call before `open`.
   func setDelegations(_ map: [CharacteristicAddress: CharacteristicDelegation]) {
     delegations = map
-    var occurrences: [CBUUID: Int] = [:]
-    for address in map.keys {
-      occurrences[address.characteristic, default: 0] += 1
-    }
-    delegationsByCharacteristic = [:]
-    for (address, delegation) in map where occurrences[address.characteristic] == 1 {
-      delegationsByCharacteristic[address.characteristic] = delegation
-    }
   }
 
-  /// `CBATTRequest.characteristic.service` is a weak reference, so an unambiguous
-  /// characteristic-UUID match is used rather than silently dropping the delegation.
-  private func delegation(for characteristic: CBCharacteristic) -> CharacteristicDelegation {
-    if let serviceUuid = characteristic.service?.uuid,
-       let exact = delegations[
-        CharacteristicAddress(service: serviceUuid, characteristic: characteristic.uuid)
-       ] {
-      return exact
-    }
-    return delegationsByCharacteristic[characteristic.uuid] ?? CharacteristicDelegation.none
+  private func delegation(for address: CharacteristicAddress) -> CharacteristicDelegation {
+    delegations[address] ?? CharacteristicDelegation.none
   }
 
   /// Opens the peripheral manager and publishes `services`. `completion` runs exactly once on the main
@@ -346,7 +330,7 @@ class GattServerManager: NSObject {
   /// `peripheralManagerDidUpdateState` fires, and services can only be added while powered on.
   func open(
     services: [CBMutableService],
-    initialValues: [CBUUID: Data] = [:],
+    initialValues: [CharacteristicAddress: Data] = [:],
     completion: @escaping (Error?) -> Void
   ) {
     serviceConfiguration = services
@@ -507,11 +491,14 @@ class GattServerManager: NSObject {
       throw GattServerError.bluetoothUnavailable(state: peripheral.state)
     }
 
-    let charUUID = CBUUID(string: characteristicUuid)
+    let address = CharacteristicAddress(
+      service: CBUUID(string: serviceUuid),
+      characteristic: CBUUID(string: characteristicUuid)
+    )
 
     guard let characteristic = findCharacteristic(
-      serviceUuid: CBUUID(string: serviceUuid),
-      characteristicUuid: charUUID
+      serviceUuid: address.service,
+      characteristicUuid: address.characteristic
     ) else {
       throw GattServerError.characteristicNotFound(
         service: serviceUuid, characteristic: characteristicUuid
@@ -531,7 +518,7 @@ class GattServerManager: NSObject {
     }
 
     guard let centrals = subscribedCentrals[deviceId],
-          let central = centrals[charUUID] else {
+          let central = centrals[address] else {
       throw GattServerError.noSubscriber(
         deviceId: deviceId, characteristic: characteristicUuid
       )
@@ -547,7 +534,7 @@ class GattServerManager: NSObject {
 
     let entry = QueuedNotification(
       deviceId: deviceId,
-      characteristicUuid: charUUID,
+      address: address,
       characteristic: characteristic,
       central: central,
       value: value,
@@ -592,7 +579,7 @@ class GattServerManager: NSObject {
     }
     delegate?.onNotificationSent(
       deviceId: entry.deviceId,
-      characteristicUuid: entry.characteristicUuid.normalizedString,
+      characteristicUuid: entry.address.characteristic.normalizedString,
       status: 0
     )
     entry.completion(nil)
@@ -733,9 +720,8 @@ class GattServerManager: NSObject {
 
   /// Replaces the mirrored value that a read of this characteristic is answered from.
   ///
-  /// The address is checked against the published database even though the cache is keyed by
-  /// characteristic UUID alone, because writing an unchecked key would succeed silently and leave the
-  /// value somewhere no read would ever look.
+  /// The address is checked against the published database first, because an unrecognised key would be
+  /// stored successfully and silently, somewhere no read would ever look.
   func updateCharacteristicValue(
     serviceUuid: String, characteristicUuid: String, value: Data
   ) throws {
@@ -745,15 +731,18 @@ class GattServerManager: NSObject {
     guard peripheral.state == .poweredOn else {
       throw GattServerError.bluetoothUnavailable(state: peripheral.state)
     }
-    let charUUID = CBUUID(string: characteristicUuid)
+    let address = CharacteristicAddress(
+      service: CBUUID(string: serviceUuid),
+      characteristic: CBUUID(string: characteristicUuid)
+    )
     guard findCharacteristic(
-      serviceUuid: CBUUID(string: serviceUuid), characteristicUuid: charUUID
+      serviceUuid: address.service, characteristicUuid: address.characteristic
     ) != nil else {
       throw GattServerError.characteristicNotFound(
         service: serviceUuid, characteristic: characteristicUuid
       )
     }
-    characteristicValues[charUUID] = value
+    characteristicValues[address] = value
   }
 
   /// Releases everything the server holds, so a later `open` starts from an empty database.
@@ -783,7 +772,6 @@ class GattServerManager: NSObject {
     characteristicValues.removeAll()
     discardPendingRequests { _ in true }
     delegations.removeAll()
-    delegationsByCharacteristic.removeAll()
     requestCounter = 0
     onStateChange = nil
 
@@ -802,13 +790,30 @@ class GattServerManager: NSObject {
     } as? CBMutableCharacteristic
   }
 
-  /// Whether the published database holds this characteristic under any service. Checked before a
-  /// written value is cached, because `characteristicValues` is keyed by characteristic UUID alone and
-  /// an unrecognised key would be stored somewhere no read would ever look for it.
-  private func isPublished(_ characteristicUuid: CBUUID) -> Bool {
-    addedServices.values.contains {
-      $0.characteristics?.contains { $0.uuid == characteristicUuid } ?? false
+  /// The service-and-characteristic address of a characteristic CoreBluetooth handed back, or `nil` when
+  /// the published database cannot name exactly one owner for it.
+  ///
+  /// Neither obvious route suffices alone: `CBCharacteristic.service` is declared `weak`, so a
+  /// torn-down database may already have cleared it, and a characteristic UUID may legally appear in two
+  /// services, so a search by UUID alone can be ambiguous. Matching the instance the database actually
+  /// holds settles both; what is left genuinely ambiguous is reported rather than guessed at.
+  private func address(of characteristic: CBCharacteristic) -> CharacteristicAddress? {
+    func address(in service: CBMutableService) -> CharacteristicAddress {
+      CharacteristicAddress(service: service.uuid, characteristic: characteristic.uuid)
     }
+    if let owner = addedServices.values.first(where: {
+      $0.characteristics?.contains(where: { $0 === characteristic }) ?? false
+    }) {
+      return address(in: owner)
+    }
+    if let serviceUuid = characteristic.service?.uuid, let owner = addedServices[serviceUuid] {
+      return address(in: owner)
+    }
+    let owners = addedServices.values.filter {
+      $0.characteristics?.contains { $0.uuid == characteristic.uuid } ?? false
+    }
+    guard owners.count == 1, let owner = owners.first else { return nil }
+    return address(in: owner)
   }
 
   /// Assembles one written fragment into an attribute's value, or returns `nil` when `offset` is past
@@ -827,14 +832,6 @@ class GattServerManager: NSObject {
     result.append(part)
     result.append(contentsOf: current.dropFirst(offset + part.count))
     return result
-  }
-
-  /// `CBCharacteristic.service` is a weak reference that a torn-down database may already have
-  /// cleared, so the owning service is looked up in the published database instead.
-  private func serviceUuid(containing characteristicUuid: CBUUID) -> String {
-    addedServices.values.first {
-      $0.characteristics?.contains { $0.uuid == characteristicUuid } ?? false
-    }?.uuid.normalizedString ?? ""
   }
 
   private func nextRequestId() -> Int {
@@ -944,15 +941,14 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     databasePublished = false
     servicesAwaitingRegistration.removeAll()
 
-    // Every subscription dies with the database, so report each one as ended before the service
-    // lookup it needs is discarded.
+    // Every subscription dies with the database, so report each one as ended.
     let ended = subscribedCentrals.map { ($0.key, Array($0.value.keys)) }
-    for (deviceId, characteristicUuids) in ended {
-      for characteristicUuid in characteristicUuids {
+    for (deviceId, addresses) in ended {
+      for address in addresses {
         delegate?.onCharacteristicUnsubscribed(
           deviceId: deviceId,
-          serviceUuid: serviceUuid(containing: characteristicUuid),
-          characteristicUuid: characteristicUuid.normalizedString
+          serviceUuid: address.service.normalizedString,
+          characteristicUuid: address.characteristic.normalizedString
         )
       }
     }
@@ -992,7 +988,12 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       return
     }
 
-    addedServices[service.uuid] = service as? CBMutableService
+    // Mirrored from the configuration this manager built rather than from the callback's `CBService`,
+    // because only the configured instance is guaranteed to carry the characteristics — and it is
+    // matching those instances that lets `address(of:)` name a characteristic's service without relying
+    // on the weak back-pointer.
+    addedServices[service.uuid] = serviceConfiguration.first { $0.uuid == service.uuid }
+      ?? service as? CBMutableService
       ?? CBMutableService(type: service.uuid, primary: service.isPrimary)
 
     if servicesAwaitingRegistration.isEmpty && !registrationFailed {
@@ -1010,12 +1011,23 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     // as the connection event: a central that subscribes to three characteristics is one connection,
     // which `noteActivity` reports once.
     let deviceId = noteActivity(from: central)
+    // An unresolvable subscription is reported but not recorded: filed under the wrong service it would
+    // make a send to another service's same-named characteristic look deliverable, and CoreBluetooth
+    // would then drop it silently.
+    guard let address = address(of: characteristic) else {
+      delegate?.onCharacteristicSubscribed(
+        deviceId: deviceId,
+        serviceUuid: "",
+        characteristicUuid: characteristic.uuid.normalizedString
+      )
+      return
+    }
     var subs = subscribedCentrals[deviceId] ?? [:]
-    subs[characteristic.uuid] = central
+    subs[address] = central
     subscribedCentrals[deviceId] = subs
     delegate?.onCharacteristicSubscribed(
       deviceId: deviceId,
-      serviceUuid: characteristic.service?.uuid.normalizedString ?? "",
+      serviceUuid: address.service.normalizedString,
       characteristicUuid: characteristic.uuid.normalizedString
     )
   }
@@ -1026,15 +1038,27 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     didUnsubscribeFrom characteristic: CBCharacteristic
   ) {
     let deviceId = central.identifier.uuidString
-    subscribedCentrals[deviceId]?.removeValue(forKey: characteristic.uuid)
+    let resolved = address(of: characteristic)
+    if let resolved = resolved {
+      subscribedCentrals[deviceId]?.removeValue(forKey: resolved)
+    } else {
+      // Dropping every same-named entry is the conservative choice for an address that cannot be named:
+      // one left behind would keep a central looking subscribed after it stopped listening.
+      subscribedCentrals[deviceId] = subscribedCentrals[deviceId]?
+        .filter { $0.key.characteristic != characteristic.uuid }
+    }
     delegate?.onCharacteristicUnsubscribed(
       deviceId: deviceId,
-      serviceUuid: characteristic.service?.uuid.normalizedString ?? "",
+      serviceUuid: resolved?.service.normalizedString ?? "",
       characteristicUuid: characteristic.uuid.normalizedString
     )
     // Nothing will ever accept these now, so fail them instead of leaking the queue.
-    failPendingNotifications(.deviceDisconnected(deviceId: deviceId)) {
-      $0.deviceId == deviceId && $0.characteristicUuid == characteristic.uuid
+    failPendingNotifications(.deviceDisconnected(deviceId: deviceId)) { entry in
+      guard entry.deviceId == deviceId else { return false }
+      guard let resolved = resolved else {
+        return entry.address.characteristic == characteristic.uuid
+      }
+      return entry.address == resolved
     }
     // CoreBluetooth delivers this same callback whether the central cleared its Client Characteristic
     // Configuration or simply went away, and offers nothing to tell the two apart, so losing the last
@@ -1051,11 +1075,18 @@ extension GattServerManager: CBPeripheralManagerDelegate {
   ) {
     noteActivity(from: request.central)
 
+    // Answered with an error rather than from a value that may belong to a same-named characteristic in
+    // another service: the only thing worse than failing a read is answering it with another attribute's
+    // contents.
+    guard let address = address(of: request.characteristic) else {
+      peripheral.respond(to: request, withResult: .unlikelyError)
+      return
+    }
+
     // An opted-in characteristic always reaches JS. A configured initial value is served from this cache
     // rather than the CBMutableCharacteristic initialiser, so without the opt-in a characteristic
     // declared with `value` would never produce a single read event.
-    if !delegation(for: request.characteristic).read,
-       let value = characteristicValues[request.characteristic.uuid] {
+    if !delegation(for: address).read, let value = characteristicValues[address] {
       let offset = request.offset
 
       // An offset past the end is answered with `CBATTError.invalidOffset`, 0x07 (Core Spec Vol 3,
@@ -1077,7 +1108,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     delegate?.onCharacteristicReadRequest(
       deviceId: request.central.identifier.uuidString,
       requestId: reqId,
-      serviceUuid: request.characteristic.service?.uuid.normalizedString ?? "",
+      serviceUuid: address.service.normalizedString,
       characteristicUuid: request.characteristic.uuid.normalizedString,
       offset: request.offset
     )
@@ -1093,47 +1124,57 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       noteActivity(from: request.central)
     }
 
+    // Resolved before anything is applied: a fragment whose owning service cannot be named would
+    // otherwise be written into a same-named characteristic of another service. The batch is an atomic
+    // unit, so one unresolvable fragment fails all of it.
+    var addresses: [CharacteristicAddress] = []
+    for request in requests {
+      guard let address = address(of: request.characteristic) else {
+        peripheral.respond(to: first, withResult: .unlikelyError)
+        return
+      }
+      addresses.append(address)
+    }
+
     // Apple documents that `respond(to:withResult:)` must be called exactly once per callback, passing
     // the first request of the array, and that the batch is all-or-nothing: "if you can't fulfill an
     // individual request, you shouldn't fulfill any of them". So a delegated batch is one pending
     // request backed by `first`, and the first `sendResponse` for its id answers the whole batch.
     let batchId = nextRequestId()
-    let delegated = requests.contains { delegation(for: $0.characteristic).write }
+    let delegated = addresses.contains { delegation(for: $0).write }
 
     // A delegated batch may still be rejected, so the mirrored value is left untouched and the
     // listener commits it with `updateCharacteristicValue` once it has accepted the write. Everything
     // else is assembled before anything is applied or answered, so a fragment the attribute cannot
     // take fails the whole batch rather than half of it.
-    var assembled: [CBUUID: Data] = [:]
+    var assembled: [CharacteristicAddress: Data] = [:]
     if !delegated {
-      for request in requests {
-        let charUUID = request.characteristic.uuid
-        guard isPublished(charUUID) else { continue }
-        let current = assembled[charUUID] ?? characteristicValues[charUUID] ?? Data()
+      for (request, address) in zip(requests, addresses) {
+        let current = assembled[address] ?? characteristicValues[address] ?? Data()
         guard let merged = spliced(
           current, offset: request.offset, part: request.value ?? Data()
         ) else {
           peripheral.respond(to: first, withResult: .invalidOffset)
           return
         }
-        assembled[charUUID] = merged
+        assembled[address] = merged
       }
     }
 
     if delegated {
       registerPendingRequest(batchId, request: first, isRead: false)
     } else {
-      for (charUUID, value) in assembled {
-        characteristicValues[charUUID] = value
+      for (address, value) in assembled {
+        characteristicValues[address] = value
       }
       peripheral.respond(to: first, withResult: .success)
     }
 
-    for request in requests {
+    for (request, address) in zip(requests, addresses) {
       delegate?.onCharacteristicWriteRequest(
         deviceId: request.central.identifier.uuidString,
         requestId: batchId,
-        serviceUuid: request.characteristic.service?.uuid.normalizedString ?? "",
+        serviceUuid: address.service.normalizedString,
         characteristicUuid: request.characteristic.uuid.normalizedString,
         offset: request.offset,
         value: request.value ?? Data(),

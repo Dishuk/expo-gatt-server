@@ -120,7 +120,7 @@ public class ExpoGattServerModule: Module {
 
       do {
         let requestTimeoutMs = try self.parseRequestTimeout(options["requestTimeoutMs"])
-        var initialValues: [CBUUID: Data] = [:]
+        var initialValues: [CharacteristicAddress: Data] = [:]
         var cbServices: [CBMutableService] = []
         for serviceConfig in services {
           cbServices.append(try self.parseServiceConfig(serviceConfig, initialValues: &initialValues))
@@ -478,7 +478,7 @@ public class ExpoGattServerModule: Module {
 
   private func parseServiceConfig(
     _ map: [String: Any],
-    initialValues: inout [CBUUID: Data]
+    initialValues: inout [CharacteristicAddress: Data]
   ) throws -> CBMutableService {
     let uuid = try parseUuid(map["uuid"], field: "service")
     let service = CBMutableService(type: uuid, primary: try parseIsPrimary(map["type"]))
@@ -487,7 +487,7 @@ public class ExpoGattServerModule: Module {
     if let charList = map["characteristics"] as? [[String: Any]] {
       for charMap in charList {
         characteristics.append(
-          try parseCharacteristicConfig(charMap, initialValues: &initialValues)
+          try parseCharacteristicConfig(charMap, service: uuid, initialValues: &initialValues)
         )
       }
     }
@@ -508,7 +508,8 @@ public class ExpoGattServerModule: Module {
 
   private func parseCharacteristicConfig(
     _ map: [String: Any],
-    initialValues: inout [CBUUID: Data]
+    service: CBUUID,
+    initialValues: inout [CharacteristicAddress: Data]
   ) throws -> CBMutableCharacteristic {
     let uuid = try parseUuid(map["uuid"], field: "characteristic")
     let properties = try parseProperties(map["properties"] as? [String])
@@ -522,7 +523,8 @@ public class ExpoGattServerModule: Module {
     // `[]` is a configured value, not an absent one: it declares a present but zero-length attribute,
     // which Android caches and auto-answers reads from.
     if let bytes = map["value"] as? [Int] {
-      initialValues[uuid] = try parseBytes(bytes, field: "characteristic")
+      initialValues[CharacteristicAddress(service: service, characteristic: uuid)] =
+        try parseBytes(bytes, field: "characteristic")
     }
 
     let characteristic = CBMutableCharacteristic(

@@ -309,6 +309,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its manager is confined to the main queue
 - Android treated an unavailable React context as "permission granted" and carried on into a
   `SecurityException`. `createServer` and `startAdvertising` now reject with `ERR_NO_CONTEXT`
+- iOS addressed a stored characteristic value by characteristic UUID alone, while Android stores it on
+  the per-service characteristic instance. GATT permits the same characteristic UUID in two services, so
+  on iOS the last configured `value` won for both instances, an `updateCharacteristicValue` for one
+  changed what a read of the other returned, and an automatically acknowledged write to one clobbered
+  the other. Stored values and subscription tracking are now keyed by service **and** characteristic on
+  iOS too, and the owning service of a characteristic CoreBluetooth hands back is resolved against the
+  published database — `CBCharacteristic.service` is a `weak` reference a torn-down database may already
+  have cleared. A read or write whose service genuinely cannot be named is answered with
+  `ATT_ERROR_UNLIKELY_ERROR` rather than applied to the wrong attribute, and `onCharacteristicSubscribed`
+  / `onCharacteristicUnsubscribed` now carry the right `serviceUuid` when a characteristic UUID appears
+  in more than one service
 
 ### Removed
 

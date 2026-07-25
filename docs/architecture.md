@@ -92,8 +92,8 @@ The module does not hold BLE state itself -- it delegates to `GattServerManager`
 | Connected devices | `[String: CBCentral]` (from observed ATT activity) | `ConcurrentHashMap<String, BluetoothDevice>` | Track which centrals are connected, and answer `getConnectedDevices` |
 | Device MTU | Read live from `central.maximumUpdateValueLength`; the last value seen is cached only to detect a change | `ConcurrentHashMap<String, Int>` | Validate payload size, answer `getMtu`, emit `onMtuChanged` |
 | Pending requests | `[Int: PendingRequest]` | `ConcurrentHashMap<Int, PendingRequest>` | Match `sendResponse` to a request, validate its device, rebase the response onto the requested offset, and expire it after `requestTimeoutMs` |
-| Characteristic values | `[CBUUID: Data]` | Set on `BluetoothGattCharacteristic.value` | Auto-respond to reads |
-| Subscribed centrals | `[String: [CBUUID: CBCentral]]` -- membership only, since CoreBluetooth does not report which bit was set | `ConcurrentHashMap<String, ConcurrentHashMap<UUID, Int>>` -- the raw two-octet CCCD value per device | Track notification subscribers, answer per-client CCCD reads on Android |
+| Characteristic values | `[CharacteristicAddress: Data]` | Set on the per-service `BluetoothGattCharacteristic` instance | Auto-respond to reads |
+| Subscribed centrals | `[String: [CharacteristicAddress: CBCentral]]` -- membership only, since CoreBluetooth does not report which bit was set | `ConcurrentHashMap<String, ConcurrentHashMap<UUID, Int>>` -- the raw two-octet CCCD value per device | Track notification subscribers, answer per-client CCCD reads on Android |
 | Delegations | `[CharacteristicAddress: CharacteristicDelegation]` | `ConcurrentHashMap<CharacteristicAddress, CharacteristicDelegation>` | Decide whether a read or write is answered natively or handed to JavaScript |
 | Notification queue | `[QueuedNotification]`, one queue for the peripheral manager's transmit queue | `ConcurrentHashMap<String, NotificationQueue>`, one per device | Keep at most one send outstanding, and resolve `sendNotification` on the platform's own callback |
 | Prepared writes | Not applicable -- CoreBluetooth does not expose them | `ConcurrentHashMap<String, MutableList<PreparedWrite>>` | Buffer a long or reliable write until its execute |
@@ -241,7 +241,7 @@ The two platforms report different halves of the same figure exactly, and derive
 | Connection event | Fires on the central's first ATT activity (subscribe, read or write) -- `CBPeripheralManagerDelegate` has no connection callback. A central that never touches an attribute is never reported | Fires on `onConnectionStateChange` |
 | Disconnection event | Inferred from the loss of the last subscription, or reported for every known central when Bluetooth leaves `poweredOn`. Generally undetectable for a read/write-only central | Fires on `onConnectionStateChange` |
 | Dropping a central | **Impossible** -- `disconnectDevice` rejects with `ERR_UNSUPPORTED` | `BluetoothGattServer.cancelConnection` |
-| Read auto-response | From the module's own value cache, keyed by characteristic UUID | From `BluetoothGattCharacteristic.value` |
+| Read auto-response | From the module's own value cache, keyed by service **and** characteristic | From `BluetoothGattCharacteristic.value`, which is already per service |
 | Write auto-response | Automatic, unless the characteristic sets `delegate.write` | Automatic, unless the characteristic sets `delegate.write` |
 | Written value cached | Yes, for an automatically acknowledged write | No -- call `updateCharacteristicValue` if a later read should serve it |
 | Prepared / long writes | Not exposed at all; CoreBluetooth handles the procedure below the app layer | Buffered per device and applied on execute |
