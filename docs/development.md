@@ -36,7 +36,8 @@ is published but not committed.
 src/                          # TypeScript source (public API)
 ├── index.ts                  # Exported functions and types
 ├── ExpoGattServerModule.ts   # Native module bridge (auto-generated reference)
-└── ExpoGattServer.types.ts   # Type definitions
+├── ExpoGattServer.types.ts   # Type definitions
+└── __tests__/                # Jest suites for the TypeScript layer
 
 ios/                          # iOS native implementation (Swift)
 ├── ExpoGattServer.podspec    # CocoaPods spec
@@ -56,13 +57,19 @@ plugin/src/                   # Expo config plugin (built to plugin/build/)
 ├── withGattServerIos.ts      # Info.plist mods
 └── withGattServerAndroid.ts  # AndroidManifest mods
 
+example/                      # Runnable harness app (depends on the repo via file:..)
+├── App.tsx                   # One button per public API call, plus an event log
+└── app.json                  # Applies the config plugin from the repo
+
 app.plugin.js                 # What Expo CLI looks for; re-exports plugin/build
+jest.config.js                # Keeps only the iOS and Android Jest projects
 ```
 
 ### Key Files
 
 | File | Role |
 |------|------|
+| `index.ts` | The shared layer: UUID normalisation, argument validation, graceful degradation when the native module is absent |
 | `ExpoGattServerModule.swift/.kt` | Expo module definition -- parses configs, checks permissions, emits events |
 | `GattServerManager.swift/.kt` | Owns the native BLE peripheral -- all Bluetooth state lives here |
 | `ExpoGattServer.types.ts` | Single source of truth for the TypeScript API surface |
@@ -74,13 +81,23 @@ BLE peripheral functionality requires physical devices or simulators with Blueto
 
 **Manual testing workflow:**
 
-1. Create an example Expo app that imports the module locally
-2. Run on a physical device (simulators have limited BLE support)
-3. Use a BLE scanner app (e.g., nRF Connect) as the central to verify:
-   - Service and characteristic discovery
-   - Read/write operations
-   - Notification delivery
-   - Connection/disconnection events
+The `example/` app is a harness with a button for every public call and a log of every event. It
+consumes the repo directly (`"expo-gatt-server": "file:.."`, with `autolinking.nativeModulesDir` pointing
+at the parent), so native changes show up after a rebuild.
+
+```bash
+cd example
+npm install
+npx expo run:android   # or run:ios
+```
+
+Then use a BLE scanner app (e.g. nRF Connect) as the central to verify:
+
+- Service, characteristic and descriptor discovery
+- Read/write operations, including long writes
+- Subscription and notification delivery
+- Connection/disconnection events, and what each platform can actually observe
+- Behaviour across a Bluetooth power cycle, which drops and re-publishes the database
 
 **Automated testing:**
 
@@ -103,9 +120,10 @@ Native layer testing requires platform-specific test harnesses.
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Run `npm run lint` and `npm run build`
-5. Test on at least one physical device
-6. Submit a pull request with a clear description of the change
+4. Run `npm run lint`, `npm run test` and `npm run build`
+5. Test on at least one physical device, on both platforms if the change is not platform-specific
+6. Update `docs/` and `CHANGELOG.md` for anything API-visible, including a platform limitation
+7. Submit a pull request with a clear description of the change
 
 ### Commit Messages
 

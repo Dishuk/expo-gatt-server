@@ -60,7 +60,12 @@ An `ios.infoPlist` value set this way wins, as long as the plugin's `bluetoothAl
 <string>This app uses Bluetooth to communicate with nearby devices.</string>
 ```
 
-The module checks `CBPeripheralManager.authorization` at runtime in `createServer`. If authorization is denied or restricted, the promise rejects.
+The module checks `CBManager.authorization` at runtime in `createServer` and `startAdvertising`. If
+authorization is denied or restricted, the promise rejects with `ERR_PERMISSION`.
+
+`getBluetoothState` deliberately does **not** instantiate a `CBPeripheralManager`, since doing so would
+trigger the Bluetooth prompt. Before `createServer` it can therefore only answer `'unauthorized'` or
+`'unknown'` -- see [getBluetoothState](./api.md#getbluetoothstate).
 
 ### Background Modes
 
@@ -97,10 +102,15 @@ To advertise and handle requests while the app is backgrounded, enable the `blue
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `createServer` rejects with permission error | Bluetooth authorization not granted | Check `NSBluetoothAlwaysUsageDescription` is set, user accepted the prompt |
-| `startAdvertising` rejects | Bluetooth not powered on | Ensure Bluetooth is enabled in Settings |
-| `sendNotification` rejects with `ERR_NO_SUBSCRIBER` | No subscribers | The central must enable notifications or indications on the characteristic first -- wait for `onCharacteristicSubscribed` |
+| `startAdvertising` rejects with `ERR_BLUETOOTH` | Bluetooth not powered on | Ensure Bluetooth is enabled in Settings. The call waits for a definitive state, so calling it straight after `createServer` is fine |
+| `createServer` or `startAdvertising` rejects with `ERR_UNSUPPORTED` | The configuration asks for something CoreBluetooth cannot express | Check the message. iOS rejects `manufacturerData`, `serviceData`, `connectable: false`, the MITM and signed permissions, the `broadcast` and `extendedProperties` properties, and any descriptor other than `0x2901` / `0x2904`. Declare those for Android only |
+| `sendNotification` rejects with `ERR_NO_SUBSCRIBER` | No subscribers | The central must enable notifications or indications on the characteristic first -- wait for `onCharacteristicSubscribed`. `requireSubscription: false` cannot override this on iOS, because `updateValue` ignores unsubscribed centrals |
 | `onDeviceConnected` not firing | `CBPeripheralManagerDelegate` has no connection callback, so iOS reports a central on its first ATT activity -- a subscribe, read or write | Expected. A central that connects but never touches an attribute is invisible to the peripheral role |
-| `onDeviceDisconnected` not firing | iOS can only infer a disconnection from the loss of the last subscription, or from Bluetooth being turned off | Expected for a central that never subscribed. See [Platform Differences](./architecture.md#platform-differences) |
+| `onDeviceDisconnected` not firing | iOS can only infer a disconnection from the loss of the last subscription, or from Bluetooth being turned off | Expected for a central that only read or wrote. See [Platform Differences](./architecture.md#platform-differences) |
+| `onDeviceDisconnected` fires while the central is still connected | The central cleared its Client Characteristic Configuration; CoreBluetooth reports that identically to going away | Expected. A later read or write re-discovers the central and reports `onDeviceConnected` again |
+| `disconnectDevice` rejects with `ERR_UNSUPPORTED` | CoreBluetooth has no peripheral-role disconnect | Expected, and unavoidable. Only the central can end the connection; see [disconnectDevice](./api.md#disconnectdevice) |
+| Advertising stops itself sooner than `timeoutMs` says | The timeout is emulated with a process-local timer on iOS | Expected if the process was suspended or restarted. Check `isAdvertising` and restart |
+| A characteristic declaring both `notify` and `indicate` sends the wrong kind | iOS never receives the `confirm` flag and chooses from the declared properties | Declare only the property you intend to use |
 
 ## Android
 
@@ -123,11 +133,23 @@ The module's `AndroidManifest.xml` declares only the permissions a GATT **periph
 
 **No location permission is declared.** Location is a *scanning* concern -- Android requires it "because, on Android 11 and lower, a Bluetooth scan could potentially be used to gather information about the location of the user" -- and this module only advertises and serves GATT, never scans. If your app also scans, declare `BLUETOOTH_SCAN` (and `ACCESS_FINE_LOCATION`, or `usesPermissionFlags="neverForLocation"`) yourself.
 
-Earlier versions declared `ACCESS_FINE_LOCATION` unconditionally, which every consuming app inherited.
-
 **Runtime permissions (Android 12+ / API 31):**
 
-`BLUETOOTH_CONNECT` and `BLUETOOTH_ADVERTISE` require runtime requests. The module checks these before `createServer` and `startAdvertising` respectively, and rejects with a descriptive error if not granted.
+`BLUETOOTH_CONNECT` and `BLUETOOTH_ADVERTISE` require runtime requests, and the module checks them
+before the calls that need them, rejecting with `ERR_PERMISSION` if not granted:
+
+| Call | Permission |
+|------|------------|
+| `createServer` | `BLUETOOTH_CONNECT` |
+| `startAdvertising` | `BLUETOOTH_ADVERTISE`, plus `BLUETOOTH_CONNECT` when `android.setAdapterName` is set |
+| `disconnectDevice` | `BLUETOOTH_CONNECT` |
+
+Below API 31 there is nothing to request: the legacy `BLUETOOTH` and `BLUETOOTH_ADMIN` permissions are
+install-time, so the checks are skipped.
+
+If the React context is unavailable when a check runs, the call rejects with `ERR_NO_CONTEXT` rather
+than assuming the permission was granted -- assuming it only defers the failure to a
+`SecurityException` from the Bluetooth stack, which surfaces as an unrelated crash.
 
 Request them in your app before calling the module:
 
@@ -180,14 +202,16 @@ import { getBluetoothState } from 'expo-gatt-server';
 const state = await getBluetoothState(); // 'unsupported' when there is no BLE adapter
 ```
 
-Earlier versions declared `required="true"`, which every consuming app inherited.
-
 ### Troubleshooting
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `createServer` rejects with permission error | `BLUETOOTH_CONNECT` not granted | Request runtime permission first (API 31+) |
-| `startAdvertising` rejects | `BLUETOOTH_ADVERTISE` not granted, or Bluetooth adapter off | Request permission and check `BluetoothAdapter.isEnabled()` |
+| `createServer` rejects with `ERR_PERMISSION` | `BLUETOOTH_CONNECT` not granted | Request runtime permission first (API 31+) |
+| `createServer` rejects with `ERR_CREATE_SERVER` saying Bluetooth is turned off | Android reports a powered-off adapter this way, where iOS uses `ERR_BLUETOOTH` | Check `getBluetoothState()` before calling, rather than branching on the code |
+| `createServer` or `disconnectDevice` rejects with `ERR_NO_CONTEXT` | No React context, so the permission could not be checked | Call after the app has finished mounting |
+| `startAdvertising` rejects with `ERR_PERMISSION` | `BLUETOOTH_ADVERTISE` not granted | Request runtime permission first (API 31+) |
+| `startAdvertising` rejects with `ERR_ADVERTISE` "Advertise data too large" | The advertisement is over its 31-byte budget | The service UUIDs, `manufacturerData` and `serviceData` share it. Prefer 16-bit service UUIDs, and move the name to the scan response with `android.includeDeviceName` |
+| The advertised name is the phone's name, not `localName` | Android has no per-advertisement local name | Expected. Opt in to `android.setAdapterName` if the exact string matters, accepting that it renames the phone system-wide |
 | MTU errors on notification | Central hasn't negotiated a larger MTU | Default MTU is 23 octets (20-byte payload). Size payloads against `getMtu(deviceId).maxNotificationPayload`, or wait for `addMtuChangedListener` to report a larger one |
 | `deviceId` is a MAC address | Expected on Android | iOS uses UUID, Android uses MAC address. Normalize in your app logic if needed |
 | App crashes on API < 31 | Legacy permissions missing | Ensure `BLUETOOTH` and `BLUETOOTH_ADMIN` are in the merged manifest (they are by default) |

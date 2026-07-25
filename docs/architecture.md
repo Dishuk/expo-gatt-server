@@ -55,9 +55,18 @@ Expo Module Bridge (ExpoGattServerModule)
 │  - Tracks connected devices, MTU, subscriptions  │
 │  - Handles GATT callbacks (read/write/notify)    │
 │  - Caches characteristic values for auto-respond │
+│  - Answers or delegates each ATT request         │
+│  - Queues notifications, one outstanding at a    │
+│    time per device                               │
+│  - Watches adapter state, re-publishes services  │
 │  - MTU validation                                │
 └─────────────────────────────────────────────────┘
 ```
+
+Above the bridge, `src/index.ts` is not a pass-through. It normalises every UUID onto its 128-bit form,
+range-checks bytes, offsets, statuses and timeouts, rejects unrecognised enum names, warns about
+advertising options iOS ignores, and degrades gracefully when the native module is absent -- so both
+platforms receive identical, already-valid input.
 
 ## Native Module Bridge
 
@@ -65,9 +74,9 @@ Expo Module Bridge (ExpoGattServerModule)
 
 | Responsibility | Details |
 |----------------|---------|
-| Config parsing | Converts JS objects to `CBMutableService` (iOS) or `BluetoothGattService` (Android) |
-| Permission checks | iOS: `CBPeripheralManager.authorization`, Android: `ContextCompat.checkSelfPermission` |
-| Async wrapping | Maps native callbacks to JS Promises via Expo's `AsyncFunction` |
+| Config parsing | Converts JS objects to `CBMutableService` (iOS) or `BluetoothGattService` (Android), and refuses what the platform cannot express |
+| Permission checks | iOS: `CBManager.authorization`, Android: `ContextCompat.checkSelfPermission` for `BLUETOOTH_CONNECT` / `BLUETOOTH_ADVERTISE` |
+| Async wrapping | Maps native callbacks to JS Promises via Expo's `AsyncFunction`, with a coded rejection per failure mode |
 | Event dispatch | Forwards native delegate/callback events to JS listeners |
 
 The module does not hold BLE state itself -- it delegates to `GattServerManager`.
@@ -80,37 +89,52 @@ The module does not hold BLE state itself -- it delegates to `GattServerManager`
 
 | State | iOS Type | Android Type | Purpose |
 |-------|----------|--------------|---------|
-| Connected devices | `[String: CBCentral]` (from observed ATT activity) | `ConcurrentHashMap<String, BluetoothDevice>` | Track which centrals are connected |
-| Device MTU | Read live from `central.maximumUpdateValueLength` | `ConcurrentHashMap<String, Int>` | Validate payload size, answer `getMtu` |
-| Pending requests | `[Int: PendingRequest]` | `ConcurrentHashMap<Int, PendingRequest>` | Match `sendResponse` to a request, validate its device, rebase the response onto the requested offset |
+| Connected devices | `[String: CBCentral]` (from observed ATT activity) | `ConcurrentHashMap<String, BluetoothDevice>` | Track which centrals are connected, and answer `getConnectedDevices` |
+| Device MTU | Read live from `central.maximumUpdateValueLength`; the last value seen is cached only to detect a change | `ConcurrentHashMap<String, Int>` | Validate payload size, answer `getMtu`, emit `onMtuChanged` |
+| Pending requests | `[Int: PendingRequest]` | `ConcurrentHashMap<Int, PendingRequest>` | Match `sendResponse` to a request, validate its device, rebase the response onto the requested offset, and expire it after `requestTimeoutMs` |
 | Characteristic values | `[CBUUID: Data]` | Set on `BluetoothGattCharacteristic.value` | Auto-respond to reads |
-| Subscribed centrals | `[String: [CBUUID: CBCentral]]` | Managed via CCCD descriptor | Track notification subscribers |
+| Subscribed centrals | `[String: [CBUUID: CBCentral]]` -- membership only, since CoreBluetooth does not report which bit was set | `ConcurrentHashMap<String, ConcurrentHashMap<UUID, Int>>` -- the raw two-octet CCCD value per device | Track notification subscribers, answer per-client CCCD reads on Android |
+| Delegations | `[CharacteristicAddress: CharacteristicDelegation]` | `ConcurrentHashMap<CharacteristicAddress, CharacteristicDelegation>` | Decide whether a read or write is answered natively or handed to JavaScript |
+| Notification queue | `[QueuedNotification]`, one queue for the peripheral manager's transmit queue | `ConcurrentHashMap<String, NotificationQueue>`, one per device | Keep at most one send outstanding, and resolve `sendNotification` on the platform's own callback |
+| Prepared writes | Not applicable -- CoreBluetooth does not expose them | `ConcurrentHashMap<String, MutableList<PreparedWrite>>` | Buffer a long or reliable write until its execute |
+| Published state | `databasePublished` plus the retained service configuration | `AtomicBoolean` plus a service factory | Answer `isServerRunning`, and rebuild the database when Bluetooth returns |
 
 ### Lifecycle
 
 ```
-open(services)
+open(services)  ──►  resolves only once every service is published
     │
     ▼
 startAdvertising()  ◄──  Central scans and finds the device
     │
     ▼
 [Central connects]  ──►  onDeviceConnected event
+    │                    (iOS: on the central's first ATT activity)
     │
-    ├── [Central reads]   ──►  Auto-respond or onCharacteristicReadRequest
-    ├── [Central writes]  ──►  onCharacteristicWriteRequest
-    ├── sendNotification  ──►  Push update to central
+    ├── [Central reads]      ──►  Auto-respond, or onCharacteristicReadRequest
+    ├── [Central writes]     ──►  Auto-acknowledge, or onCharacteristicWriteRequest
+    ├── [Central subscribes] ──►  onCharacteristicSubscribed
+    ├── sendNotification     ──►  Push update to a subscribed central
     │
     ▼
 stopAdvertising()
     │
     ▼
-stop()  ──►  Remove services, disconnect, release resources
+stop()  ──►  Unpublish services, release resources. Disconnects nobody
 ```
+
+An adapter power cycle interrupts this without ending it. Turning Bluetooth off destroys the published
+database on both platforms, so the module reports every subscription as ended and every known central
+as disconnected, and `isServerRunning` goes `false`. It retains the service configuration and
+re-publishes it on the next transition to `poweredOn` -- **advertising is not resumed**, because the
+consumer chose when to start it.
 
 ## Event Flow
 
-### Read Request (no cached value)
+Which of the two read paths and which of the two write paths a request takes is decided by the
+characteristic's `delegate` configuration and, for reads, by whether a cached value exists.
+
+### Read Request (no cached value, or `delegate.read`)
 
 ```
 Central                    Native                     JavaScript
@@ -122,6 +146,10 @@ Central                    Native                     JavaScript
   │   ◄── ATT response ─────┤                            │
 ```
 
+If `sendResponse` never comes, the module answers with `ATT_ERROR_UNLIKELY_ERROR` after
+`requestTimeoutMs` -- otherwise the central would stall until its own 30 s ATT transaction timeout,
+which then bars every further request and notification on that bearer.
+
 ### Read Request (cached value)
 
 ```
@@ -131,6 +159,32 @@ Central                    Native                     JavaScript
   │                          │  (auto-respond from cache) │
   │   ◄── ATT response ─────┤                            │
 ```
+
+### Write Request (default)
+
+```
+Central                    Native                     JavaScript
+  │                          │                            │
+  ├── Write request ─────►   │                            │
+  │   ◄── ATT response ─────┤  (auto-acknowledged)        │
+  │                          ├── onCharacteristicWriteRequest ──►
+  │                          │      responseNeeded: false │
+```
+
+### Write Request (`delegate.write`)
+
+```
+Central                    Native                     JavaScript
+  │                          │                            │
+  ├── Write request ─────►   │                            │
+  │                          ├── onCharacteristicWriteRequest ──►
+  │                          │      responseNeeded: true  │
+  │                          │   ◄── sendResponse ────────┤
+  │   ◄── ATT response ─────┤     (GATT_SUCCESS or an ATT error)
+```
+
+The value is not applied until JavaScript accepts the write, so an `ATT_ERROR_*` status rejects it
+outright. Committing the accepted value is the listener's job, via `updateCharacteristicValue`.
 
 ### Notification
 
@@ -142,6 +196,12 @@ JavaScript                 Native                     Central
   │                          │                            │
   │   ◄── onNotificationSent┤                            │
 ```
+
+At most one notification is outstanding per device, and `sendNotification`'s promise settles on the
+platform's own completion -- so awaiting it paces a stream against the link. `onNotificationSent`
+reports the same outcome as an event, with a caveat: on Android it is the platform's delivery callback
+and carries its status, while on iOS it is emitted when CoreBluetooth accepts the payload and is not
+emitted at all for a failed send.
 
 ## MTU Handling
 
@@ -176,12 +236,24 @@ The two platforms report different halves of the same figure exactly, and derive
 
 | Behavior | iOS | Android |
 |----------|-----|---------|
-| Device identifier | UUID (opaque, can rotate) | MAC address (stable) |
-| Connection event | Fires on the central's first ATT activity (subscribe, read or write) -- `CBPeripheralManagerDelegate` has no connection callback | Fires on `onConnectionStateChange` |
-| Disconnection event | Inferred from the loss of the last subscription, or reported for every known central when Bluetooth leaves `poweredOn` | Fires on `onConnectionStateChange` |
-| Write auto-response | Not automatic; JS must respond if `responseNeeded` | Automatic for `responseNeeded` requests |
-| CCCD descriptor | Managed by CoreBluetooth internally | Explicitly added by the module |
+| Device identifier | `CBCentral.identifier` UUID (opaque, can rotate) | MAC address (stable) |
+| Device name | Never available -- CoreBluetooth exposes no name for a central | `BluetoothDevice.getName()` |
+| Connection event | Fires on the central's first ATT activity (subscribe, read or write) -- `CBPeripheralManagerDelegate` has no connection callback. A central that never touches an attribute is never reported | Fires on `onConnectionStateChange` |
+| Disconnection event | Inferred from the loss of the last subscription, or reported for every known central when Bluetooth leaves `poweredOn`. Generally undetectable for a read/write-only central | Fires on `onConnectionStateChange` |
+| Dropping a central | **Impossible** -- `disconnectDevice` rejects with `ERR_UNSUPPORTED` | `BluetoothGattServer.cancelConnection` |
+| Read auto-response | From the module's own value cache, keyed by characteristic UUID | From `BluetoothGattCharacteristic.value` |
+| Write auto-response | Automatic, unless the characteristic sets `delegate.write` | Automatic, unless the characteristic sets `delegate.write` |
+| Written value cached | Yes, for an automatically acknowledged write | No -- call `updateCharacteristicValue` if a later read should serve it |
+| Prepared / long writes | Not exposed at all; CoreBluetooth handles the procedure below the app layer | Buffered per device and applied on execute |
+| `confirm` on a notification | Never reaches the platform; CoreBluetooth picks notification or indication from the declared properties | Passed to `notifyCharacteristicChanged` |
+| CCCD descriptor | Created by CoreBluetooth on publication; per-client bits are not exposed | Explicitly added by the module, which tracks the per-client bits itself |
+| Custom descriptors | Only `0x2901` and `0x2904`; anything else rejects with `ERR_UNSUPPORTED` | Any UUID except the CCCD |
 | MTU source | `central.maximumUpdateValueLength` (a payload length) | `onMtuChanged` callback (an ATT MTU) |
 | MTU change event | No callback exists; sampled on the central's next ATT activity | Delivered as it happens |
-| Bluetooth state check | `CBManagerState.poweredOn` | `BluetoothAdapter.isEnabled()` |
-| Permission model | `CBPeripheralManager.authorization` | Runtime permissions (API 31+) |
+| Advertised local name | `CBAdvertisementDataLocalNameKey`, verbatim | No per-advertisement name exists; the adapter's own name is advertised instead |
+| Advertising `timeoutMs` | Emulated by a module timer | `AdvertiseSettings.setTimeout` |
+| Bluetooth state source | `CBPeripheralManager.state`, which needs an instantiated manager | `BluetoothAdapter.getState()`, plus an `ACTION_STATE_CHANGED` receiver registered while the server is open |
+| Permission model | `CBManager.authorization` | Runtime permissions (API 31+): `BLUETOOTH_CONNECT`, `BLUETOOTH_ADVERTISE` |
+
+The [API reference](./api.md) states the consequence of each of these at the function or type it
+affects.
