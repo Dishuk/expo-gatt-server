@@ -207,9 +207,13 @@ class GattServerManager(
   private val bluetoothAdapter: BluetoothAdapter? = bluetoothManager.adapter
   @Volatile
   private var gattServer: BluetoothGattServer? = null
-  private var advertiser: BluetoothLeAdvertiser? = null
-  private var advertiseCallback: AdvertiseCallback? = null
-  private var pendingAdvertiseResult: ((String?) -> Unit)? = null
+  // The advertising callbacks are posted to the main looper — `BluetoothLeAdvertiser` wraps them in
+  // `mHandler.post` — while starts arrive on the module's queue, `stopAdvertising` on the JS thread and the
+  // adapter teardown on the receiver's. So the callback and the completion are claimed atomically: without
+  // that, a start and a stop both read the same completion and settle one Promise twice, which throws.
+  private val advertiser = AtomicReference<BluetoothLeAdvertiser?>(null)
+  private val advertiseCallback = AtomicReference<AdvertiseCallback?>(null)
+  private val pendingAdvertiseResult = AtomicReference<((String?) -> Unit)?>(null)
 
   // Both answer public queries from the caller's thread while being written from the binder threads that
   // deliver onServiceAdded, the adapter state broadcast and the advertising callbacks.
@@ -395,10 +399,9 @@ class GattServerManager(
     // The adapter taking the stack down stops advertising without any AdvertiseCallback.
     advertising.set(false)
     cancelAdvertisingTimeout()
-    advertiseCallback = null
-    advertiser = null
-    pendingAdvertiseResult?.invoke("Bluetooth was turned off")
-    pendingAdvertiseResult = null
+    advertiseCallback.set(null)
+    advertiser.set(null)
+    finishAdvertise("Bluetooth was turned off")
 
     gattServer?.close()
     gattServer = null
@@ -809,9 +812,6 @@ class GattServerManager(
       )
     }
 
-    pendingAdvertiseResult?.invoke("Advertising restarted")
-    pendingAdvertiseResult = onResult
-
     if (options.setAdapterName && options.localName != null) {
       applyAdapterName(adapter, options.localName)
     }
@@ -819,10 +819,11 @@ class GattServerManager(
     // Null only for an adapter with no multi-advertisement support, the enabled check above having ruled
     // out the other cause. No amount of retrying makes it work, so it is reported as unsupported rather
     // than as a failed advertisement.
-    advertiser = adapter.bluetoothLeAdvertiser
+    val leAdvertiser = adapter.bluetoothLeAdvertiser
       ?: throw GattServerException(
         "ERR_UNSUPPORTED", "BLE advertising is not supported on this device"
       )
+    advertiser.set(leAdvertiser)
 
     val settings = AdvertiseSettings.Builder()
       .setAdvertiseMode(options.mode)
@@ -847,14 +848,22 @@ class GattServerManager(
       .build()
 
     val callback = object : AdvertiseCallback() {
+      /**
+       * Whether this callback is still the manager's. One that is not belongs to an advertisement already
+       * stopped or superseded, and must not touch the shared advertising state or the completion the call
+       * that displaced it installed.
+       */
+      private fun current(): Boolean = advertiseCallback.get() === this
+
       override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
         Log.d(TAG, "Advertising started successfully")
+        if (!current()) return
         advertising.set(true)
         scheduleAdvertisingTimeout(options.timeoutMs)
-        pendingAdvertiseResult?.invoke(null)
-        pendingAdvertiseResult = null
+        finishAdvertise(null)
       }
       override fun onStartFailure(errorCode: Int) {
+        if (!current()) return
         advertising.set(false)
         val msg = when (errorCode) {
           ADVERTISE_FAILED_DATA_TOO_LARGE ->
@@ -867,24 +876,48 @@ class GattServerManager(
           else -> "Advertising failed (error $errorCode)"
         }
         Log.e(TAG, "Advertising failed: $msg")
-        pendingAdvertiseResult?.invoke(msg)
-        pendingAdvertiseResult = null
+        finishAdvertise(msg)
       }
     }
-    advertiseCallback = callback
+
+    // Installed only once every rejection above is out of the way, so a start that threw cannot leave a
+    // completion behind for the next stop to settle a second time.
+    pendingAdvertiseResult.getAndSet(onResult)?.invoke("Advertising restarted")
+    advertiseCallback.set(callback)
     cancelAdvertisingTimeout()
-    advertiser?.startAdvertising(settings, advData.build(), scanResponse, callback)
+    try {
+      leAdvertiser.startAdvertising(settings, advData.build(), scanResponse, callback)
+    } catch (e: Exception) {
+      // `startAdvertising` rechecks the adapter state itself and throws if it went off. The caller reports
+      // that throw, so neither the completion nor the callback may be left installed for a later stop to
+      // settle and stop a second time. compareAndSet, so a concurrent restart's own state is left alone.
+      pendingAdvertiseResult.compareAndSet(onResult, null)
+      advertiseCallback.compareAndSet(callback, null)
+      throw e
+    }
+    // The callback has to be installed before the start, because it is the only handle the platform accepts
+    // for stopping and no lock may be held across the binder call — so a stop that landed during the start
+    // took it, and is honoured here instead of leaving the radio advertising with nothing able to stop it.
+    if (advertiseCallback.get() !== callback) {
+      Log.d(TAG, "Advertising was stopped while starting — stopping the new advertisement")
+      leAdvertiser.stopAdvertising(callback)
+    }
   }
 
   @SuppressLint("MissingPermission")
   fun stopAdvertising() {
     cancelAdvertisingTimeout()
     advertising.set(false)
-    advertiseCallback?.let { advertiser?.stopAdvertising(it) }
-    advertiseCallback = null
-    pendingAdvertiseResult?.invoke("Advertising stopped")
-    pendingAdvertiseResult = null
+    // Taken rather than read: only the caller that claims the callback hands it to the platform, and a start
+    // still in flight learns from its absence that it has to stop the advertisement it just created.
+    advertiseCallback.getAndSet(null)?.let { advertiser.get()?.stopAdvertising(it) }
+    finishAdvertise("Advertising stopped")
     restoreAdapterName()
+  }
+
+  /** Settles the outstanding start exactly once, whichever thread gets there first. */
+  private fun finishAdvertise(error: String?) {
+    pendingAdvertiseResult.getAndSet(null)?.invoke(error)
   }
 
   /**
