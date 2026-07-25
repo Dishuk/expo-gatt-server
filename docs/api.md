@@ -158,14 +158,54 @@ Send a notification or indication to a connected central.
 | `confirm` | `boolean` | `false` | `true` for indication (acknowledged), `false` for notification |
 | `options.requireSubscription` | `boolean` | `true` | Refuse the send when the device has not subscribed |
 
-Rejects with `ERR_NO_SUBSCRIBER` when the target device has not enabled notifications or
-indications on the characteristic. Wait for
+#### `confirm`: notification or indication
+
+An indication is acknowledged -- the central must reply with an `ATT_HANDLE_VALUE_CFM` and "no
+further indications to this client shall occur until the confirmation has been received by the
+server" (Vol 3, Part F, Section 3.4.7.2). A notification is fire-and-forget (Section 3.4.7.1).
+
+The characteristic must declare the property that matches, or the call rejects with
+`ERR_CONFIRM_UNSUPPORTED`:
+
+| `confirm` | Required `properties` entry |
+|-----------|------------------------------|
+| `true` | `'indicate'` |
+| `false` | `'notify'` |
+
+The specification permits each transmission only when its property bit is set (Vol 3, Part G,
+Table 3.5), and a client may set the matching Client Characteristic Configuration bit "only [...] if
+the characteristic's properties have the [notify/indicate] bit set" (Table 3.11) -- so a mismatch is
+something no client could legitimately have asked for. Neither platform checks this itself:
+`BluetoothGattServer.notifyCharacteristicChanged` sends whatever `confirm` says, and CoreBluetooth
+has no `confirm` parameter to check.
+
+> **iOS never receives the flag.**
+> [`updateValue(_:for:onSubscribedCentrals:)`](https://developer.apple.com/documentation/corebluetooth/cbperipheralmanager/updatevalue(_:for:onsubscribedcentrals:))
+> takes no confirm parameter; CoreBluetooth derives notification versus indication from the declared
+> properties alone. Because the property check above is enforced on both platforms, a characteristic
+> declaring exactly one of `notify` and `indicate` behaves identically either side. A characteristic
+> declaring **both** is the one case iOS cannot honour -- Android sends what `confirm` asks for,
+> iOS sends whatever CoreBluetooth chooses. Declare only the property you intend to use if the
+> distinction matters.
+
+#### `requireSubscription`
+
+Rejects with `ERR_NO_SUBSCRIBER` when the target device has not enabled the *specific* transmission
+`confirm` selects. Wait for
 [`addCharacteristicSubscribedListener`](#addcharacteristicsubscribedlistener) before streaming.
 
-Passing `requireSubscription: false` sends anyway on Android, where the platform transmits without
-consulting the Client Characteristic Configuration descriptor. It changes nothing on iOS:
+On Android this is checked against that device's own Client Characteristic Configuration bits: bit 0
+enables notifications, bit 1 enables indications (Vol 3, Part G, Table 3.11), and "when a bit is set,
+that action shall be enabled, otherwise it will not be used" (Section 3.3.3.3). A client that enabled
+only indications is therefore no longer sent a notification. Passing `requireSubscription: false`
+sends anyway, since the platform transmits without consulting the descriptor.
+
+iOS cannot make the distinction at all -- CoreBluetooth reports a subscription without saying which
+bit the central set -- so it is checked as "subscribed at all". `false` changes nothing there:
 `updateValue(_:for:onSubscribedCentrals:)` "ignores any centrals that haven't subscribed to the
 characteristic's value", so there is no send to force and `ERR_NO_SUBSCRIBER` is still reported.
+
+It never relaxes the `confirm` property check, which applies on both platforms regardless.
 
 The mirrored characteristic value is updated whether or not the notification could be sent, so a
 subsequent read still serves the latest value.
@@ -687,4 +727,5 @@ Errors thrown by `sendNotification` and `sendResponse` include a `code` property
 | `ERR_NOTIFY_QUEUE_FULL` | Too many notifications are already queued for the device. Await earlier sends before queueing more. |
 | `ERR_DEVICE_DISCONNECTED` | The central disconnected, or unsubscribed, before a queued notification could be delivered. |
 | `ERR_CHARACTERISTIC_NOT_FOUND` | The characteristic is not part of the published GATT database. |
-| `ERR_NO_SUBSCRIBER` | The device has not enabled notifications or indications on the characteristic. |
+| `ERR_NO_SUBSCRIBER` | The device has not enabled the transmission `confirm` selects on the characteristic. |
+| `ERR_CONFIRM_UNSUPPORTED` | `confirm` asks for a transmission the characteristic does not declare the property for -- `indicate` for `true`, `notify` for `false`. |

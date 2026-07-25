@@ -196,9 +196,9 @@ public class ExpoGattServerModule: Module {
         promise.reject("ERR_NOTIFY", error.localizedDescription)
         return
       }
-      // `confirm` and `requireSubscription` have no iOS counterpart: CoreBluetooth picks
-      // notification or indication from the characteristic's declared properties, and it only ever
-      // transmits to subscribed centrals, so an unsubscribed send cannot be forced through.
+      // `requireSubscription` has no iOS counterpart: CoreBluetooth only ever transmits to
+      // subscribed centrals, so an unsubscribed send cannot be forced through. `confirm` is checked
+      // against the characteristic's declared properties, which is all CoreBluetooth leaves room for.
       DispatchQueue.main.async {
         do {
           // Resolves once CoreBluetooth has accepted the payload for transmission. A payload the
@@ -208,7 +208,8 @@ public class ExpoGattServerModule: Module {
             deviceId: deviceId,
             serviceUuid: serviceUuid,
             characteristicUuid: characteristicUuid,
-            value: data
+            value: data,
+            confirm: confirm
           ) { error in
             if let error = error as? GattServerError {
               promise.reject(error.code, error.message)

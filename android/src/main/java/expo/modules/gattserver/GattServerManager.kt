@@ -777,10 +777,11 @@ class GattServerManager(
    * one notification outstanding at a time, so anything sent while an earlier notification is
    * still in flight waits its turn instead of being discarded by the stack.
    *
-   * [requireSubscription] refuses the send when the device has not enabled notifications or
-   * indications on the characteristic. Clearing it sends anyway — the platform does not consult
-   * the CCCD before transmitting, so a caller that knows better than the descriptor keeps that
-   * option.
+   * [confirm] selects an indication over a notification, which the characteristic must declare the
+   * matching property for; [requireSubscription] additionally refuses the send when the device has
+   * not enabled that same transmission in its own CCCD. Clearing it sends anyway — the platform
+   * does not consult the CCCD before transmitting, so a caller that knows better than the
+   * descriptor keeps that option. The property check is not optional either way.
    */
   fun sendNotification(
     deviceId: String,
@@ -801,12 +802,14 @@ class GattServerManager(
     val characteristic = service.getCharacteristic(characteristicId)
       ?: throw IllegalArgumentException("Characteristic $characteristicUuid not found")
 
-    if (requireSubscription && !isSubscribed(deviceId, characteristicId)) {
+    confirmError(characteristic, confirm)?.let { throw it }
+
+    if (requireSubscription && !hasEnabled(deviceId, characteristicId, confirm)) {
+      val kind = if (confirm) "indications" else "notifications"
       throw GattServerException(
         "ERR_NO_SUBSCRIBER",
-        "Device $deviceId has not enabled notifications or indications on characteristic " +
-          "$characteristicUuid. Wait for onCharacteristicSubscribed, or pass " +
-          "requireSubscription: false to send anyway."
+        "Device $deviceId has not enabled $kind on characteristic $characteristicUuid. Wait for " +
+          "onCharacteristicSubscribed, or pass requireSubscription: false to send anyway."
       )
     }
 
@@ -858,11 +861,58 @@ class GattServerManager(
 
   /**
    * Reports whether [deviceId] has asked to receive updates for [characteristicUuid], by having
-   * set either the notification or the indication bit of its own CCCD.
+   * set either the notification or the indication bit of its own CCCD. This is the coarse question
+   * the subscribe and unsubscribe events answer; a send asks [hasEnabled] about one specific bit.
    */
-  fun isSubscribed(deviceId: String, characteristicUuid: UUID): Boolean =
+  private fun isSubscribed(deviceId: String, characteristicUuid: UUID): Boolean =
     clientConfiguration(deviceId, characteristicUuid) and
       (CCCD_NOTIFY_BIT or CCCD_INDICATE_BIT) != 0
+
+  /**
+   * Reports whether [deviceId] enabled exactly the transmission [confirm] selects — the indication
+   * bit for an indication, the notification bit for a notification.
+   *
+   * "When a bit is set, that action shall be enabled, otherwise it will not be used" (Core
+   * Specification, Vol 3, Part G, Section 3.3.3.3), so a client that enabled only indications must
+   * not be handed a notification, and vice versa. Gating on either bit sent whichever the caller
+   * asked for regardless of what the client had actually configured.
+   */
+  private fun hasEnabled(deviceId: String, characteristicUuid: UUID, confirm: Boolean): Boolean {
+    val required = if (confirm) CCCD_INDICATE_BIT else CCCD_NOTIFY_BIT
+    return clientConfiguration(deviceId, characteristicUuid) and required != 0
+  }
+
+  /**
+   * Refuses a transmission type the characteristic never declared.
+   *
+   * The Notify property "permits notifications of a Characteristic Value without acknowledgment"
+   * and Indicate "permits indications [...] with acknowledgment" (Core Specification, Vol 3,
+   * Part G, Table 3.5), and a client may set a CCCD bit "only [...] if the characteristic's
+   * properties have the [matching] bit set" (Table 3.11). Android's `notifyCharacteristicChanged`
+   * checks neither, so without this the stack would emit a PDU no client could legally have asked
+   * for.
+   */
+  private fun confirmError(
+    characteristic: BluetoothGattCharacteristic,
+    confirm: Boolean,
+  ): GattServerException? {
+    val required = if (confirm) {
+      BluetoothGattCharacteristic.PROPERTY_INDICATE
+    } else {
+      BluetoothGattCharacteristic.PROPERTY_NOTIFY
+    }
+    if (characteristic.properties and required != 0) return null
+    val message = if (confirm) {
+      "Characteristic ${characteristic.uuid} does not declare the \"indicate\" property, so it " +
+        "cannot send the acknowledged indication confirm: true asks for. Declare \"indicate\" on " +
+        "the characteristic, or send a notification with confirm: false."
+    } else {
+      "Characteristic ${characteristic.uuid} does not declare the \"notify\" property, so it " +
+        "cannot send an unacknowledged notification. Declare \"notify\" on the characteristic, or " +
+        "send an indication with confirm: true."
+    }
+    return GattServerException("ERR_CONFIRM_UNSUPPORTED", message)
+  }
 
   /**
    * Records a client's new CCCD value and reports the transition. Only the change from "receiving

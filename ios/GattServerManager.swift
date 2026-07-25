@@ -44,6 +44,7 @@ enum GattServerError: Error {
   case notifyQueueFull(limit: Int)
   case deviceDisconnected(deviceId: String)
   case noSubscriber(deviceId: String, characteristic: String)
+  case confirmUnsupported(characteristic: String, confirm: Bool)
   case advertisingOptionUnsupported(option: String, reason: String)
 
   var code: String {
@@ -60,6 +61,7 @@ enum GattServerError: Error {
     case .notifyQueueFull: return "ERR_NOTIFY_QUEUE_FULL"
     case .deviceDisconnected: return "ERR_DEVICE_DISCONNECTED"
     case .noSubscriber: return "ERR_NO_SUBSCRIBER"
+    case .confirmUnsupported: return "ERR_CONFIRM_UNSUPPORTED"
     case .advertisingOptionUnsupported: return "ERR_UNSUPPORTED"
     }
   }
@@ -107,6 +109,18 @@ enum GattServerError: Error {
       return "Device \(deviceId) has not subscribed to characteristic \(characteristic). " +
         "Wait for onCharacteristicSubscribed. CoreBluetooth only transmits to subscribed " +
         "centrals, so this cannot be overridden on iOS."
+    case .confirmUnsupported(let characteristic, let confirm):
+      // CoreBluetooth has no confirm parameter at all — `updateValue` picks notification or
+      // indication from the declared properties — so the property check is the only thing standing
+      // between the caller's intent and silently getting the other one.
+      if confirm {
+        return "Characteristic \(characteristic) does not declare the \"indicate\" property, so it " +
+          "cannot send the acknowledged indication confirm: true asks for. Declare \"indicate\" on " +
+          "the characteristic, or send a notification with confirm: false."
+      }
+      return "Characteristic \(characteristic) does not declare the \"notify\" property, so it " +
+        "cannot send an unacknowledged notification. Declare \"notify\" on the characteristic, or " +
+        "send an indication with confirm: true."
     case .advertisingOptionUnsupported(let option, let reason):
       return "iOS cannot honour the advertising option \"\(option)\": \(reason) " +
         "CBPeripheralManager.startAdvertising supports only CBAdvertisementDataLocalNameKey and " +
@@ -443,9 +457,15 @@ class GattServerManager: NSObject {
   /// A central that has not subscribed is reported as `ERR_NO_SUBSCRIBER` rather than treated as a
   /// successful send. There is no override on iOS: `updateValue(_:for:onSubscribedCentrals:)`
   /// "ignores any centrals that haven't subscribed to the characteristic's value".
+  ///
+  /// `confirm` is validated against the characteristic's declared properties and then goes no
+  /// further, because CoreBluetooth offers nowhere to put it: `updateValue` takes no such parameter
+  /// and the system derives notification versus indication from those same properties. Validating
+  /// is therefore the only way the flag can mean anything here — a characteristic declaring exactly
+  /// one of the two then behaves identically to Android.
   func sendNotification(
     deviceId: String, serviceUuid: String,
-    characteristicUuid: String, value: Data,
+    characteristicUuid: String, value: Data, confirm: Bool,
     completion: @escaping (Error?) -> Void
   ) throws {
     let charUUID = CBUUID(string: characteristicUuid)
@@ -456,6 +476,12 @@ class GattServerManager: NSObject {
     ) else {
       throw GattServerError.characteristicNotFound(
         service: serviceUuid, characteristic: characteristicUuid
+      )
+    }
+
+    guard characteristic.properties.contains(confirm ? .indicate : .notify) else {
+      throw GattServerError.confirmUnsupported(
+        characteristic: characteristicUuid, confirm: confirm
       )
     }
 

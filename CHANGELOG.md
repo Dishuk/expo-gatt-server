@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Bluetooth specification requires
 - `sendNotification` option `requireSubscription` for sending without a subscription on Android
 - Error codes `ERR_NO_SUBSCRIBER`, `ERR_NOTIFY_QUEUE_FULL`, `ERR_DEVICE_DISCONNECTED`,
-  `ERR_CHARACTERISTIC_NOT_FOUND`
+  `ERR_CHARACTERISTIC_NOT_FOUND`, `ERR_CONFIRM_UNSUPPORTED`
 - `AdvertiseConfig.android` with `includeDeviceName` and `setAdapterName`
 - `AdvertiseConfig` options `mode`, `txPowerLevel`, `timeoutMs`, `manufacturerData` and
   `serviceData`, with the types `AdvertisingMode`, `AdvertisingTxPower`, `ManufacturerDataEntry` and
@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sends behind one still in flight instead of letting the platform drop them
 - `sendNotification` rejects with `ERR_NO_SUBSCRIBER` instead of resolving when nothing is
   subscribed to the characteristic
+- **Breaking:** `sendNotification` rejects with `ERR_CONFIRM_UNSUPPORTED` when `confirm` asks for a
+  transmission the characteristic does not declare the property for, instead of sending it anyway on
+  Android and silently sending the other kind on iOS
+- **Breaking:** on Android `requireSubscription` now checks the specific Client Characteristic
+  Configuration bit `confirm` selects, so a client that enabled only indications is no longer sent a
+  notification. iOS still checks only that the central is subscribed, because CoreBluetooth does not
+  report which bit it set
 - `onNotificationSent` reports the characteristic the notification actually carried
 - iOS resends only the payload the transmit queue refused, instead of pushing cached values to every
   subscribed central

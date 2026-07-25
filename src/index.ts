@@ -216,15 +216,31 @@ export function stopAdvertising(): void {
 }
 
 /**
- * Sends a notification (or, with `confirm`, an indication) to a connected central.
+ * Sends a notification, or an indication when `confirm` is set, to a connected central.
+ *
+ * An indication is acknowledged by the central with an `ATT_HANDLE_VALUE_CFM` and only one may be
+ * outstanding at a time; a notification is fire-and-forget. The characteristic must declare the
+ * property that matches — `indicate` for `confirm: true`, `notify` for `confirm: false` — or the
+ * call rejects with `ERR_CONFIRM_UNSUPPORTED`. The Bluetooth Core Specification permits each
+ * transmission only when its property is set (Vol 3, Part G, Table 3.5), and lets a client enable
+ * the corresponding descriptor bit only then (Table 3.11), so a mismatch could never have been
+ * legitimately requested by any client.
+ *
+ * **iOS never receives the flag.** `CBPeripheralManager.updateValue(_:for:onSubscribedCentrals:)`
+ * has no confirm parameter; CoreBluetooth derives notification versus indication from the declared
+ * properties alone. Because the property check above is enforced on both platforms, a characteristic
+ * that declares exactly one of `notify` and `indicate` behaves identically either side. A
+ * characteristic that declares **both** is the one case iOS cannot honour: Android sends what
+ * `confirm` asks for, while iOS sends whatever CoreBluetooth chooses. Declare only the one you
+ * intend to use if that matters.
  *
  * The promise settles when the platform reports the notification as delivered, not when the call
  * reaches the Bluetooth stack. A device may only have one notification outstanding at a time, so
  * sends issued while an earlier one is still in flight are queued in order rather than dropped;
  * awaiting the promise is what paces a stream against the link.
  *
- * Rejects with `ERR_NO_SUBSCRIBER` when the device has not enabled notifications or indications on
- * the characteristic — a notification to nobody is a failure, not a success. See
+ * Rejects with `ERR_NO_SUBSCRIBER` when the device has not enabled the transmission on the
+ * characteristic — a notification to nobody is a failure, not a success. See
  * `options.requireSubscription` to send anyway where the platform allows it.
  */
 export async function sendNotification(

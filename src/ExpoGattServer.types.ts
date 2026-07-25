@@ -78,15 +78,24 @@ export interface CreateServerOptions {
 
 export interface SendNotificationOptions {
   /**
-   * Refuse the send with `ERR_NO_SUBSCRIBER` when the target device has not enabled notifications
-   * or indications on the characteristic. Defaults to `true`, so a notification nobody asked for
-   * is reported instead of silently going nowhere.
+   * Refuse the send with `ERR_NO_SUBSCRIBER` when the target device has not enabled the exact
+   * transmission `confirm` selects — indications for `confirm: true`, notifications for
+   * `confirm: false`. Defaults to `true`, so a notification nobody asked for is reported instead of
+   * silently going nowhere.
    *
-   * Setting it to `false` sends anyway on Android, where the platform transmits without consulting
-   * the Client Characteristic Configuration descriptor — useful for a peer whose descriptor state
-   * the app knows better than the stack does. It changes nothing on iOS:
+   * On Android this is checked against the device's own Client Characteristic Configuration bits:
+   * a client that enabled only indications is no longer sent a notification, because "when a bit is
+   * set, that action shall be enabled, otherwise it will not be used" (Bluetooth Core
+   * Specification, Vol 3, Part G, Section 3.3.3.3). Setting it to `false` sends anyway there, since
+   * the platform transmits without consulting the descriptor — useful for a peer whose descriptor
+   * state the app knows better than the stack does.
+   *
+   * iOS cannot make the distinction: CoreBluetooth reports a subscription without saying which bit
+   * the central set. It is checked as "subscribed at all", and `false` changes nothing —
    * `updateValue(_:for:onSubscribedCentrals:)` ignores centrals that have not subscribed, so there
    * is no send to force and `ERR_NO_SUBSCRIBER` is still reported.
+   *
+   * This never relaxes the `confirm` property check, which applies on both platforms regardless.
    */
   requireSubscription?: boolean;
 }
