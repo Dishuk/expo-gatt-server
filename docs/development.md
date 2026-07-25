@@ -84,7 +84,13 @@ BLE peripheral functionality requires physical devices or simulators with Blueto
 
 **Automated testing:**
 
-Unit tests for the TypeScript layer can be run with `npm run test`. Native layer testing requires platform-specific test harnesses.
+`npm run test` runs the TypeScript layer's unit tests in `src/__tests__/`, covering UUID normalisation,
+configuration validation, the ATT constants and the unsupported-platform guard. The native module is
+mocked, so they need no device and no native build. The `expo-module-scripts` preset runs every suite
+once per platform; `jest.config.js` keeps the iOS and Android projects and drops the web and node ones,
+since this package declares no web platform.
+
+Native layer testing requires platform-specific test harnesses.
 
 ## Code Style
 

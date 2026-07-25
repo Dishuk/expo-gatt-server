@@ -1,0 +1,202 @@
+import {
+  CLIENT_CHARACTERISTIC_CONFIGURATION_UUID,
+  createServer,
+  type CharacteristicPermission,
+  type CharacteristicProperty,
+  type GattCharacteristicConfig,
+  type GattServiceConfig,
+} from '../index';
+import { nativeModuleMock } from './nativeModuleMock';
+
+jest.mock('../ExpoGattServerModule', () => ({
+  __esModule: true,
+  default: require('./nativeModuleMock').nativeModuleMock,
+}));
+
+const SERVICE = '0000180d-0000-1000-8000-00805f9b34fb';
+const CHARACTERISTIC = '00002a37-0000-1000-8000-00805f9b34fb';
+
+const ALL_PROPERTIES: CharacteristicProperty[] = [
+  'read',
+  'write',
+  'writeNoResponse',
+  'notify',
+  'indicate',
+  'broadcast',
+  'signedWrite',
+  'extendedProperties',
+];
+
+const ALL_PERMISSIONS: CharacteristicPermission[] = [
+  'readable',
+  'writeable',
+  'readEncrypted',
+  'readEncryptedMitm',
+  'writeEncrypted',
+  'writeEncryptedMitm',
+  'writeSigned',
+  'writeSignedMitm',
+];
+
+function publish(characteristic: Partial<GattCharacteristicConfig>) {
+  return createServer([
+    {
+      uuid: SERVICE,
+      characteristics: [
+        {
+          uuid: CHARACTERISTIC,
+          properties: ['read'],
+          permissions: ['readable'],
+          ...characteristic,
+        },
+      ],
+    },
+  ]);
+}
+
+describe('characteristic properties', () => {
+  it('accepts every documented property name', async () => {
+    await expect(publish({ properties: ALL_PROPERTIES })).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ['a misspelling', 'notifiy'],
+    ['a plausible alternative spelling', 'writeWithoutResponse'],
+    ['the wrong case', 'Read'],
+    ['an Android constant name', 'PROPERTY_READ'],
+    ['an empty string', ''],
+  ])('rejects %s as a property', async (_label, property) => {
+    await expect(publish({ properties: [property as CharacteristicProperty] })).rejects.toThrow(
+      /Invalid characteristic property/,
+    );
+  });
+
+  it('lists the accepted names in the error', async () => {
+    await expect(publish({ properties: ['nope' as CharacteristicProperty] })).rejects.toThrow(
+      /Expected one of "read", "write", "writeNoResponse", "notify", "indicate", "broadcast", "signedWrite", "extendedProperties"/,
+    );
+  });
+
+  it.each([
+    ['a bare string', 'read'],
+    ['null', null],
+    ['undefined', undefined],
+    ['an object', {}],
+  ])('rejects %s in place of the properties array', async (_label, properties) => {
+    await expect(
+      publish({ properties: properties as CharacteristicProperty[] }),
+    ).rejects.toThrow(/Invalid characteristic property/);
+  });
+});
+
+describe('characteristic permissions', () => {
+  it('accepts every documented permission name', async () => {
+    await expect(publish({ permissions: ALL_PERMISSIONS })).resolves.toBeUndefined();
+  });
+
+  it.each([
+    ['a misspelling', 'writable'],
+    ['an Android constant name', 'PERMISSION_READ'],
+    ['a property name', 'read'],
+    ['the wrong case', 'Readable'],
+  ])('rejects %s as a permission', async (_label, permission) => {
+    await expect(publish({ permissions: [permission as CharacteristicPermission] })).rejects.toThrow(
+      /Invalid characteristic permission/,
+    );
+  });
+
+  it.each([
+    ['a bare string', 'readable'],
+    ['null', null],
+    ['undefined', undefined],
+  ])('rejects %s in place of the permissions array', async (_label, permissions) => {
+    await expect(
+      publish({ permissions: permissions as unknown as CharacteristicPermission[] }),
+    ).rejects.toThrow(/Invalid characteristic permission/);
+  });
+});
+
+describe('descriptors', () => {
+  it('rejects a manually declared CCCD in its 128-bit form', async () => {
+    await expect(
+      publish({
+        descriptors: [{ uuid: CLIENT_CHARACTERISTIC_CONFIGURATION_UUID, value: [0, 0] }],
+      }),
+    ).rejects.toThrow(/Client Characteristic Configuration descriptor/);
+  });
+
+  it.each(['2902', '2902'.toUpperCase(), '00002902', '00002902-0000-1000-8000-00805F9B34FB'])(
+    'rejects a manually declared CCCD written as %s',
+    async (uuid) => {
+      await expect(publish({ descriptors: [{ uuid, value: [0, 0] }] })).rejects.toThrow(
+        /Client Characteristic Configuration descriptor/,
+      );
+    },
+  );
+
+  it('accepts other descriptors', async () => {
+    await expect(
+      publish({ descriptors: [{ uuid: '2901', value: [0x41] }] }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects an unrecognised descriptor permission', async () => {
+    await expect(
+      publish({
+        descriptors: [
+          { uuid: '2901', value: [0x41], permissions: ['writable' as CharacteristicPermission] },
+        ],
+      }),
+    ).rejects.toThrow(/Invalid descriptor permission/);
+  });
+
+  it('accepts documented descriptor permissions', async () => {
+    await expect(
+      publish({ descriptors: [{ uuid: '2901', value: [0x41], permissions: ALL_PERMISSIONS }] }),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe('service configuration', () => {
+  it.each(['primary', 'secondary'])('accepts the %s service type', async (type) => {
+    await expect(
+      createServer([
+        { uuid: SERVICE, type: type as GattServiceConfig['type'], characteristics: [] },
+      ]),
+    ).resolves.toBeUndefined();
+  });
+
+  it.each(['Primary', 'included', ''])('rejects %s as a service type', async (type) => {
+    await expect(
+      createServer([
+        { uuid: SERVICE, type: type as GattServiceConfig['type'], characteristics: [] },
+      ]),
+    ).rejects.toThrow(/Invalid service type/);
+  });
+
+  it('treats a missing characteristics array as empty rather than failing', async () => {
+    await expect(
+      createServer([{ uuid: SERVICE } as GattServiceConfig]),
+    ).resolves.toBeUndefined();
+    expect(nativeModuleMock.createServer.mock.calls[0][0][0].characteristics).toEqual([]);
+  });
+
+  it('treats a missing services array as empty rather than failing', async () => {
+    await expect(
+      createServer(undefined as unknown as GattServiceConfig[]),
+    ).resolves.toBeUndefined();
+    expect(nativeModuleMock.createServer).toHaveBeenCalledWith([], {});
+  });
+
+  it('never reaches the native module with an invalid characteristic', async () => {
+    await expect(publish({ properties: ['nope' as CharacteristicProperty] })).rejects.toThrow();
+    expect(nativeModuleMock.createServer).not.toHaveBeenCalled();
+  });
+
+  it('omits the descriptors key entirely when none were configured', async () => {
+    await publish({});
+    expect(
+      'descriptors' in nativeModuleMock.createServer.mock.calls[0][0][0].characteristics[0],
+    ).toBe(false);
+  });
+});
