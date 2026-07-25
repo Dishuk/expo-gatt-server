@@ -257,8 +257,9 @@ a `createServer` that has not resolved yet, and from a `poweredOn` event handler
 
 A parked call is always settled: a terminal Bluetooth state rejects with `ERR_BLUETOOTH`, or
 `ERR_PERMISSION` when iOS reports Bluetooth as unauthorized; a publication that failed rejects with
-`ERR_NO_SERVER`; and [`stopServer`](#stopserver) or Bluetooth going off while the call waits rejects it
-rather than leaving it pending.
+`ERR_NO_SERVER`; [`stopServer`](#stopserver) or Bluetooth going off while the call waits rejects it
+rather than leaving it pending; and [`stopAdvertising`](#stopadvertising) cancels it with
+`ERR_ADVERTISE` rather than letting it advertise once the database arrives.
 
 Bluetooth going off settles a call the platform has already accepted, too: both platforms stop the
 advertisement themselves when the adapter goes down, and neither promises a callback saying so, so the
@@ -324,9 +325,10 @@ in which case nothing can be advertising anyway.
 
 Does **not** disconnect existing connections or remove services. A `startAdvertising` promise still
 in flight rejects with `ERR_ADVERTISE`, since the advertisement it was waiting on has been cancelled.
-A `startAdvertising` that is still waiting for the database is **not** cancelled by this, on either
-platform: it advertises once the services are published. Use [`stopServer`](#stopserver) to settle one.
-On Android this is also where the adapter name is restored if `android.setAdapterName` changed it.
+A `startAdvertising` still waiting for the database is cancelled too, with the same `ERR_ADVERTISE`, on
+both platforms: it would otherwise start advertising once the services were published, after the app
+had explicitly asked for the opposite. On Android this is also where the adapter name is restored if
+`android.setAdapterName` changed it.
 
 ---
 

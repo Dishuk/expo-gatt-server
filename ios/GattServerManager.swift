@@ -129,6 +129,13 @@ enum GattServerError: Error {
   }
 }
 
+/// The outcome an advertising call gets when something other than CoreBluetooth ends it. Deliberately
+/// not a `GattServerError`, so it surfaces as `ERR_ADVERTISE`, which is what Android reports for the
+/// same events.
+private func advertisingError(_ message: String) -> NSError {
+  NSError(domain: "ExpoGattServer", code: 0, userInfo: [NSLocalizedDescriptionKey: message])
+}
+
 /// The link budget for one central, expressed in the units the public API uses.
 struct DeviceMtu {
   /// ATT_MTU in octets.
@@ -261,6 +268,11 @@ class GattServerManager: NSObject {
   private var readinessWaiters: [(Error?) -> Void] = []
   private var advertisingCompletion: ((Error?) -> Void)?
   private var advertisingTimeout: DispatchWorkItem?
+
+  /// Bumped by every stop, so a start still waiting for the database can tell that the application asked
+  /// for the opposite while it waited.
+  private var advertisingGeneration = 0
+
   private var addedServices: [CBUUID: CBMutableService] = [:]
 
   /// How far the current round of `add(_:)` calls has got. Apple documents that "the powered off state
@@ -432,11 +444,44 @@ class GattServerManager: NSObject {
     }
   }
 
+  /// Advertises once the database is published, holding the call until then rather than refusing it, and
+  /// invokes `completion` exactly once.
+  ///
+  /// A stop that lands while the call is held rejects it with the error a stop already gives a start in
+  /// flight, so one stop means one thing: proceeding instead would put the radio on the air after the
+  /// application explicitly asked for the opposite.
+  func startAdvertising(
+    localName: String?,
+    serviceUuids: [CBUUID]?,
+    timeoutMs: Int,
+    completion: @escaping (Error?) -> Void
+  ) {
+    let generation = advertisingGeneration
+    whenDatabasePublished { [weak self] error in
+      guard let self = self else {
+        completion(GattServerError.serverStopped)
+        return
+      }
+      if let error = error {
+        completion(error)
+        return
+      }
+      guard generation == self.advertisingGeneration else {
+        completion(advertisingError("Advertising stopped"))
+        return
+      }
+      self.beginAdvertising(
+        localName: localName, serviceUuids: serviceUuids,
+        timeoutMs: timeoutMs, completion: completion
+      )
+    }
+  }
+
   /// `startAdvertising:` documents its complete set of supported keys as
   /// `CBAdvertisementDataLocalNameKey` and `CBAdvertisementDataServiceUUIDsKey`, so those are the only
   /// two built here. Every other option is rejected before this point, except `timeoutMs`, emulated
   /// below.
-  func startAdvertising(
+  private func beginAdvertising(
     localName: String?,
     serviceUuids: [CBUUID]?,
     timeoutMs: Int,
@@ -448,12 +493,7 @@ class GattServerManager: NSObject {
       completion(GattServerError.databaseNotPublished)
       return
     }
-    claimAdvertisingCompletion()?(
-      NSError(
-        domain: "ExpoGattServer", code: 0,
-        userInfo: [NSLocalizedDescriptionKey: "Advertising restarted"]
-      )
-    )
+    claimAdvertisingCompletion()?(advertisingError("Advertising restarted"))
     advertisingCompletion = completion
     var advertisementData: [String: Any] = [:]
     if let name = localName {
@@ -468,19 +508,18 @@ class GattServerManager: NSObject {
   }
 
   func stopAdvertising() {
+    // Bumped before anything else, so a start released from `whenDatabasePublished` in the meantime
+    // still sees this stop rather than reaching the radio behind it.
+    advertisingGeneration += 1
     cancelAdvertisingTimeout()
     peripheralManager?.stopAdvertising()
-    claimAdvertisingCompletion()?(
-      NSError(
-        domain: "ExpoGattServer", code: 0,
-        userInfo: [NSLocalizedDescriptionKey: "Advertising stopped"]
-      )
-    )
+    claimAdvertisingCompletion()?(advertisingError("Advertising stopped"))
   }
 
   /// Takes ownership of the pending advertising completion, so the `Promise` behind it is settled by
-  /// exactly one of `didStartAdvertising`, a restart and a stop — each of which can arrive for the same
-  /// completion, and two of which would otherwise resolve and reject the same promise.
+  /// exactly one of `didStartAdvertising`, a restart, a stop and Bluetooth going down — each of which can
+  /// arrive for the same completion, and two of which would otherwise resolve and reject the same
+  /// promise.
   private func claimAdvertisingCompletion() -> ((Error?) -> Void)? {
     defer { advertisingCompletion = nil }
     return advertisingCompletion

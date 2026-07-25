@@ -201,26 +201,18 @@ public class ExpoGattServerModule: Module {
         // Waits for the database to be published rather than sampling the state: it is `.unknown` until
         // peripheralManagerDidUpdateState fires and the publication that follows takes further
         // main-queue turns, which rejected perfectly healthy calls made straight after createServer.
-        mgr.whenDatabasePublished { readinessError in
-          if let readinessError = readinessError as? GattServerError {
-            promise.reject(readinessError.code, readinessError.message)
-            return
-          }
-          if let readinessError = readinessError {
-            promise.reject("ERR_BLUETOOTH", readinessError.localizedDescription)
-            return
-          }
-          mgr.startAdvertising(
-            localName: localName, serviceUuids: serviceUuids, timeoutMs: timeoutMs
-          ) { error in
-            if let error = error as? GattServerError {
-              // Keeps ERR_NO_SERVER, which the generic branch below would flatten into ERR_ADVERTISE.
-              promise.reject(error.code, error.message)
-            } else if let error = error {
-              promise.reject("ERR_ADVERTISE", error.localizedDescription)
-            } else {
-              promise.resolve(nil)
-            }
+        // The manager does the waiting, because only it can tell a stop from a genuine release.
+        mgr.startAdvertising(
+          localName: localName, serviceUuids: serviceUuids, timeoutMs: timeoutMs
+        ) { error in
+          if let error = error as? GattServerError {
+            // Keeps ERR_NO_SERVER and ERR_BLUETOOTH, which the generic branch below would flatten into
+            // ERR_ADVERTISE.
+            promise.reject(error.code, error.message)
+          } else if let error = error {
+            promise.reject("ERR_ADVERTISE", error.localizedDescription)
+          } else {
+            promise.resolve(nil)
           }
         }
       }

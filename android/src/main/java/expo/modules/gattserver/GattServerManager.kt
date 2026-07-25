@@ -18,6 +18,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 private const val TAG = "ExpoGattServer"
@@ -214,6 +215,11 @@ class GattServerManager(
   private val advertiser = AtomicReference<BluetoothLeAdvertiser?>(null)
   private val advertiseCallback = AtomicReference<AdvertiseCallback?>(null)
   private val pendingAdvertiseResult = AtomicReference<((GattServerException?) -> Unit)?>(null)
+
+  // Bumped by every stop, so a start still waiting for the database can tell that the application asked
+  // for the opposite while it waited. Written from the JS thread and from the receiver's binder thread,
+  // read on whichever thread releases the parked caller.
+  private val advertisingGeneration = AtomicInteger(0)
 
   // Answers public queries from the caller's thread while being written from the binder threads that
   // deliver the adapter state broadcast and the advertising callbacks.
@@ -839,7 +845,7 @@ class GattServerManager(
    * A registration still running parks the caller; an adapter that cannot serve one, or a round that
    * already failed, settles it immediately. May be invoked on the caller's thread or on the main looper.
    */
-  fun whenDatabasePublished(onReady: (error: GattServerException?) -> Unit) {
+  private fun whenDatabasePublished(onReady: (error: GattServerException?) -> Unit) {
     // Checked before the publication state, so a powered-off adapter is still reported as the Bluetooth
     // problem it is instead of parking a caller nothing is going to release.
     bluetoothUnavailable()?.let {
@@ -890,12 +896,45 @@ class GattServerManager(
     bluetoothUnavailable() ?: GattServerException("ERR_NO_SERVER", "The GATT server is not open")
 
   /**
+   * Advertises once the database is registered, holding the call until then rather than refusing it, and
+   * invokes [onResult] exactly once.
+   *
+   * A stop that lands while the call is held rejects it with the error a stop already gives a start in
+   * flight, so one stop means one thing: proceeding would put the radio on the air after the application
+   * explicitly asked for the opposite.
+   */
+  fun startAdvertising(options: AdvertiseOptions, onResult: (error: GattServerException?) -> Unit) {
+    val generation = advertisingGeneration.get()
+    whenDatabasePublished { error ->
+      if (error != null) {
+        onResult(error)
+        return@whenDatabasePublished
+      }
+      if (advertisingGeneration.get() != generation) {
+        onResult(advertisingStopped())
+        return@whenDatabasePublished
+      }
+      try {
+        beginAdvertising(options, generation, onResult)
+      } catch (e: GattServerException) {
+        onResult(e)
+      } catch (e: Exception) {
+        onResult(GattServerException("ERR_ADVERTISE", e.message ?: "Advertising failed"))
+      }
+    }
+  }
+
+  /**
    * Android has no per-advertisement local name: `AdvertiseData.Builder` offers only
    * `setIncludeDeviceName(boolean)`, and the name that includes is the adapter's own. So
    * [AdvertiseOptions.localName] is never advertised as given; only [AdvertiseOptions.setAdapterName]
    * makes the advertised name match it.
    */
-  fun startAdvertising(options: AdvertiseOptions, onResult: (error: GattServerException?) -> Unit) {
+  private fun beginAdvertising(
+    options: AdvertiseOptions,
+    generation: Int,
+    onResult: (error: GattServerException?) -> Unit,
+  ) {
     // Re-checked here as well as in `open`: the adapter can be turned off in between, and iOS reports the
     // same situation as ERR_BLUETOOTH from its own readiness check.
     val adapter = bluetoothAdapter
@@ -1005,39 +1044,56 @@ class GattServerManager(
       // `startAdvertising` rechecks the adapter state itself and throws if it went off. The caller reports
       // that throw, so neither the completion nor the callback may be left installed for a later stop to
       // settle and stop a second time. compareAndSet, so a concurrent restart's own state is left alone.
-      pendingAdvertiseResult.compareAndSet(onResult, null)
+      val ours = pendingAdvertiseResult.compareAndSet(onResult, null)
       if (advertiseCallback.compareAndSet(callback, null)) {
         // The superseded set was stopped just above, so nothing is on the air and no AdvertiseCallback
         // is coming to say so. Left set, `isAdvertising` would report an advertisement that is not
         // running until the adapter-state receiver happened to clear it.
         advertising.set(false)
       }
+      // Swallowed rather than reported when a stop settled this call first: settling it twice throws.
+      if (!ours) {
+        Log.w(TAG, "Advertising start failed after the call had already been settled", e)
+        return
+      }
       throw e
     }
     // The callback has to be installed before the start, because it is the only handle the platform accepts
     // for stopping and no lock may be held across the binder call — so a stop that landed during the start
     // took it, and is honoured here instead of leaving the radio advertising with nothing able to stop it.
-    if (advertiseCallback.get() !== callback) {
+    // The generation is tested too, because a stop that landed before the callback was installed left
+    // nothing for the identity test to find.
+    if (advertiseCallback.get() !== callback || advertisingGeneration.get() != generation) {
       Log.d(TAG, "Advertising was stopped while starting — stopping the new advertisement")
       leAdvertiser.stopAdvertising(callback)
+      // Taking the callback back is what stops a late onStartSuccess reporting this advertisement as
+      // running; a stop that took it first has already cleared the flag.
+      if (advertiseCallback.compareAndSet(callback, null)) {
+        advertising.set(false)
+      }
       // That stop may have settled the *previous* completion, if it landed before this one was
       // installed, so this call is settled here rather than left pending for good.
       if (pendingAdvertiseResult.compareAndSet(onResult, null)) {
-        onResult(GattServerException("ERR_ADVERTISE", "Advertising stopped"))
+        onResult(advertisingStopped())
       }
     }
   }
 
   @SuppressLint("MissingPermission")
   fun stopAdvertising() {
+    // Bumped before anything else, so a start released from `whenDatabasePublished` in the meantime still
+    // sees this stop rather than reaching the radio behind it.
+    advertisingGeneration.incrementAndGet()
     cancelAdvertisingTimeout()
     advertising.set(false)
     // Taken rather than read: only the caller that claims the callback hands it to the platform, and a start
     // still in flight learns from its absence that it has to stop the advertisement it just created.
     advertiseCallback.getAndSet(null)?.let { advertiser.get()?.stopAdvertising(it) }
-    finishAdvertise(GattServerException("ERR_ADVERTISE", "Advertising stopped"))
+    finishAdvertise(advertisingStopped())
     restoreAdapterName()
   }
+
+  private fun advertisingStopped() = GattServerException("ERR_ADVERTISE", "Advertising stopped")
 
   /**
    * Settles the outstanding start exactly once, whichever thread gets there first. The outcome carries a

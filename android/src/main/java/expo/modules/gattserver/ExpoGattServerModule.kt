@@ -207,24 +207,13 @@ class ExpoGattServerModule : Module() {
         )
         // Waits for the services to be registered rather than sampling the state: `createServer` and
         // the re-registration that follows a `poweredOn` event both finish asynchronously, which
-        // rejected perfectly healthy calls made straight after either. iOS parks the same way.
-        mgr.whenDatabasePublished { readinessError ->
-          if (readinessError != null) {
-            promise.reject(readinessError.code, readinessError.message, readinessError)
-            return@whenDatabasePublished
-          }
-          try {
-            mgr.startAdvertising(options) { error ->
-              if (error != null) {
-                promise.reject(error.code, error.message, error)
-              } else {
-                promise.resolve(null)
-              }
-            }
-          } catch (e: GattServerException) {
-            promise.reject(e.code, e.message, e)
-          } catch (e: Exception) {
-            promise.reject("ERR_ADVERTISE", e.message, e)
+        // rejected perfectly healthy calls made straight after either. iOS parks the same way, and on
+        // both the manager does the waiting, because only it can tell a stop from a genuine release.
+        mgr.startAdvertising(options) { error ->
+          if (error != null) {
+            promise.reject(error.code, error.message, error)
+          } else {
+            promise.resolve(null)
           }
         }
       } catch (e: GattServerException) {
