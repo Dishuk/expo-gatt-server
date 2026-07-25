@@ -283,14 +283,28 @@ extension GattServerManager: CBPeripheralManagerDelegate {
 
     switch peripheral.state {
     case .poweredOn:
+      // Apple documents that "the powered off state clears the local database; in this case you
+      // must explicitly re-add all services". `serviceConfiguration` is retained for exactly this
+      // reason, so every transition to powered on re-publishes it — the first one included.
       publishConfiguredServices(on: peripheral)
       flushReadinessWaiters(nil)
     case .unknown, .resetting:
       // Transient — a further state update is coming, so neither fail nor publish yet.
       break
     default:
+      // Any state below powered on drops the published database and disconnects every central,
+      // so discard the mirrored state rather than letting it go stale.
       let error = GattServerError.bluetoothUnavailable(state: peripheral.state)
       servicesAwaitingRegistration.removeAll()
+      addedServices.removeAll()
+
+      let disconnected = Array(subscribedCentrals.keys)
+      subscribedCentrals.removeAll()
+      pendingRequests.removeAll()
+      for deviceId in disconnected {
+        delegate?.onDeviceDisconnected(deviceId: deviceId)
+      }
+
       completeOpen(error)
       flushReadinessWaiters(error)
     }

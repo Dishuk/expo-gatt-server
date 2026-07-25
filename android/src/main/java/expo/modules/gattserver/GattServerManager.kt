@@ -82,6 +82,12 @@ class GattServerManager(
   private val pendingServices = ConcurrentLinkedQueue<BluetoothGattService>()
   private val openCompletion = AtomicReference<((String?) -> Unit)?>(null)
 
+  // The adapter being disabled invalidates the whole server, so the service configuration is
+  // retained as a factory and fresh BluetoothGattService instances are built for every
+  // registration pass. Re-adding the previously registered instances would reuse the instance IDs
+  // the framework assigned them, and the platform does not document that as supported.
+  private val serviceFactory = AtomicReference<(() -> List<BluetoothGattService>)?>(null)
+
   /** Invoked for every adapter state change while the server is open. */
   var onStateChange: ((String) -> Unit)? = null
 
@@ -93,6 +99,46 @@ class GattServerManager(
       val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
       Log.d(TAG, "Adapter state changed to $state")
       onStateChange?.invoke(normalizedBluetoothState(state))
+
+      when (state) {
+        BluetoothAdapter.STATE_OFF -> handleAdapterOff()
+        BluetoothAdapter.STATE_ON -> handleAdapterOn()
+      }
+    }
+  }
+
+  /**
+   * Disabling the adapter tears down the Bluetooth stack, which invalidates the server interface
+   * this process registered. Close it explicitly so the next power-on starts from a clean server
+   * rather than relying on undocumented survival of the old one.
+   */
+  private fun handleAdapterOff() {
+    Log.d(TAG, "Adapter off — closing GATT server")
+    pendingServices.clear()
+    finishOpen("Bluetooth was turned off before the server finished opening")
+
+    advertiseCallback = null
+    advertiser = null
+    pendingAdvertiseResult?.invoke("Bluetooth was turned off")
+    pendingAdvertiseResult = null
+
+    gattServer?.close()
+    gattServer = null
+
+    val disconnected = connectedDevices.keys.toList()
+    connectedDevices.clear()
+    deviceMtu.clear()
+    pendingRequests.clear()
+    // The server is gone, so no onConnectionStateChange callbacks will arrive for these.
+    disconnected.forEach { listener?.onDeviceDisconnected(it) }
+  }
+
+  /** Re-opens the server and re-registers the retained configuration. */
+  private fun handleAdapterOn() {
+    if (serviceFactory.get() == null) return
+    Log.d(TAG, "Adapter on — reopening GATT server and re-registering services")
+    if (!openServer()) {
+      Log.e(TAG, "Failed to reopen GATT server after the adapter was re-enabled")
     }
   }
 
@@ -216,11 +262,14 @@ class GattServerManager(
   }
 
   /**
-   * Opens the GATT server and registers [services]. [onReady] is invoked exactly once — with
-   * `null` once every service is confirmed registered, or with a message describing the first
-   * registration failure. It may be called on a binder thread.
+   * Opens the GATT server and registers the services produced by [buildServices]. [onReady] is
+   * invoked exactly once — with `null` once every service is confirmed registered, or with a
+   * message describing the first registration failure. It may be called on a binder thread.
+   *
+   * [buildServices] is retained and called again whenever the server has to be rebuilt, such as
+   * after the adapter is disabled and re-enabled, so it must return freshly constructed services.
    */
-  fun open(services: List<BluetoothGattService>, onReady: (error: String?) -> Unit) {
+  fun open(onReady: (error: String?) -> Unit, buildServices: () -> List<BluetoothGattService>) {
     val adapter = bluetoothAdapter
     if (adapter == null) {
       onReady("Bluetooth not available on this device")
@@ -232,20 +281,27 @@ class GattServerManager(
     }
 
     openCompletion.set(onReady)
+    serviceFactory.set(buildServices)
     registerStateReceiver()
 
-    val server = bluetoothManager.openGattServer(context, gattServerCallback)
-    if (server == null) {
+    if (!openServer()) {
       finishOpen("Unable to open GATT server")
-      return
     }
+  }
+
+  /** Opens a fresh [BluetoothGattServer] and starts registering the configured services. */
+  private fun openServer(): Boolean {
+    val buildServices = serviceFactory.get() ?: return false
+    val server = bluetoothManager.openGattServer(context, gattServerCallback) ?: return false
     gattServer = server
     server.clearServices()
 
+    val services = buildServices()
     pendingServices.clear()
     pendingServices.addAll(services)
     Log.d(TAG, "Server opened, registering ${services.size} service(s)")
     addNextService()
+    return true
   }
 
   /**
@@ -427,6 +483,7 @@ class GattServerManager(
   fun stop() {
     unregisterStateReceiver()
     onStateChange = null
+    serviceFactory.set(null)
     stopAdvertising()
     pendingServices.clear()
     finishOpen("Server stopped before it finished opening")
