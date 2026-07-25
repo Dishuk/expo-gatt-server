@@ -909,45 +909,58 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       // transition to powered on re-publishes it — the first one included.
       publishConfiguredServices(on: peripheral)
       flushReadinessWaiters(nil)
-    case .unknown, .resetting:
-      // Transient — a further state update is coming, so neither fail nor publish yet.
+    case .unknown:
+      // Nothing has happened yet — a further state update is coming.
       break
+    case .resetting:
+      // `CBManagerState.resetting` is 1, below `poweredOff`'s 4, so both of Apple's thresholds apply:
+      // every central has been disconnected and the local database is cleared. Only the waiters are
+      // spared, because a further state update really is coming and the re-publish that follows powering
+      // on can still satisfy them.
+      discardPublishedDatabase(reason: .bluetoothUnavailable(state: peripheral.state))
     default:
-      // Any state below powered on drops the published database and disconnects every central, so the
-      // mirrored state is discarded rather than left to go stale.
       let error = GattServerError.bluetoothUnavailable(state: peripheral.state)
-      databasePublished = false
-      servicesAwaitingRegistration.removeAll()
-
-      // Every subscription dies with the database, so report each one as ended before the service
-      // lookup it needs is discarded.
-      let ended = subscribedCentrals.map { ($0.key, Array($0.value.keys)) }
-      for (deviceId, characteristicUuids) in ended {
-        for characteristicUuid in characteristicUuids {
-          delegate?.onCharacteristicUnsubscribed(
-            deviceId: deviceId,
-            serviceUuid: serviceUuid(containing: characteristicUuid),
-            characteristicUuid: characteristicUuid.normalizedString
-          )
-        }
-      }
-      addedServices.removeAll()
-
-      // Apple documents that a state below powered on means "any connected centrals have been
-      // disconnected", so this is the one moment iOS can report a disconnection for a central that never
-      // subscribed to anything.
-      let disconnected = Array(connectedCentrals.keys)
-      connectedCentrals.removeAll()
-      centralPayloadLengths.removeAll()
-      subscribedCentrals.removeAll()
-      discardPendingRequests { _ in true }
-      failPendingNotifications(.bluetoothUnavailable(state: peripheral.state))
-      for deviceId in disconnected {
-        delegate?.onDeviceDisconnected(deviceId: deviceId)
-      }
-
+      discardPublishedDatabase(reason: error)
       completeOpen(error)
       flushReadinessWaiters(error)
+    }
+  }
+
+  /// Discards everything that only existed while the database was published, and reports every
+  /// subscription and connection as ended.
+  ///
+  /// Apple documents a state below powered on as meaning "any connected centrals have been
+  /// disconnected", and one below powered off as clearing the local database — so this runs for
+  /// `resetting` as well as `poweredOff`, `unauthorized` and `unsupported`. Requests are dropped rather
+  /// than answered, because the bearers they belong to are gone with the connections.
+  private func discardPublishedDatabase(reason: GattServerError) {
+    databasePublished = false
+    servicesAwaitingRegistration.removeAll()
+
+    // Every subscription dies with the database, so report each one as ended before the service
+    // lookup it needs is discarded.
+    let ended = subscribedCentrals.map { ($0.key, Array($0.value.keys)) }
+    for (deviceId, characteristicUuids) in ended {
+      for characteristicUuid in characteristicUuids {
+        delegate?.onCharacteristicUnsubscribed(
+          deviceId: deviceId,
+          serviceUuid: serviceUuid(containing: characteristicUuid),
+          characteristicUuid: characteristicUuid.normalizedString
+        )
+      }
+    }
+    addedServices.removeAll()
+
+    // This is the one moment iOS can report a disconnection for a central that never subscribed to
+    // anything.
+    let disconnected = Array(connectedCentrals.keys)
+    connectedCentrals.removeAll()
+    centralPayloadLengths.removeAll()
+    subscribedCentrals.removeAll()
+    discardPendingRequests { _ in true }
+    failPendingNotifications(reason)
+    for deviceId in disconnected {
+      delegate?.onDeviceDisconnected(deviceId: deviceId)
     }
   }
 

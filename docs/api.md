@@ -1012,6 +1012,12 @@ module **re-publishes the services** on the next transition to `poweredOn`, at w
 [`isServerRunning`](#isserverrunning) goes `true` again -- but **advertising is not restarted**, so
 call `startAdvertising` again yourself.
 
+**On iOS `resetting` does the same.** `CBManagerState.resetting` sorts *below* `poweredOff`, and Apple
+documents any state below it as clearing the local database and disconnecting every central, so the
+module discards the same state and emits the same events. `isServerRunning` goes `false` for the
+duration. Treat the state itself as transient exactly as before -- the services are re-published on the
+`poweredOn` that follows -- but do not assume connections or subscriptions survive it.
+
 ## Types
 
 ### GattServiceConfig
