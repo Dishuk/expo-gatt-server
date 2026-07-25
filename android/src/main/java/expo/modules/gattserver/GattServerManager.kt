@@ -97,8 +97,6 @@ class GattServerManager(
   private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
   private val deviceMtu = ConcurrentHashMap<String, Int>()
   private val pendingRequests = ConcurrentHashMap<Int, String>()
-  private var lastNotifiedCharacteristicUuid: String = ""
-
   // Android delivers one notification at a time: "When multiple notifications are to be sent, an
   // application must wait for this callback to be received before sending additional
   // notifications" (BluetoothGattServerCallback.onNotificationSent). Sends are therefore queued
@@ -345,10 +343,11 @@ class GattServerManager(
 
     override fun onNotificationSent(device: BluetoothDevice, status: Int) {
       val deviceId = device.address
-      listener?.onNotificationSent(deviceId, lastNotifiedCharacteristicUuid, status)
 
       // The outstanding slot is free again as soon as this callback arrives, so release the
-      // in-flight entry before letting the queue move on.
+      // in-flight entry before letting the queue move on. That entry is also the only thing that
+      // identifies which characteristic this callback belongs to — `onNotificationSent` reports
+      // the device but not the characteristic, and the queue holds exactly one send per device.
       val queue = notificationQueues[deviceId]
       val finished = queue?.let {
         synchronized(it) {
@@ -358,6 +357,7 @@ class GattServerManager(
         }
       }
       if (finished != null) {
+        listener?.onNotificationSent(deviceId, finished.characteristicUuid, status)
         val error = if (status != BluetoothGatt.GATT_SUCCESS) {
           GattServerException(
             "ERR_NOTIFY",
@@ -367,6 +367,11 @@ class GattServerManager(
           finished.deferredError
         }
         finished.onResult(error)
+      } else {
+        // The queue was already torn down — by a disconnect or a stop racing this callback — so
+        // the characteristic it belonged to is unknowable. Reporting a guess would be worse than
+        // reporting nothing.
+        Log.w(TAG, "onNotificationSent: no in-flight notification for device=$deviceId status=$status")
       }
       pumpNotifications(deviceId)
     }
@@ -558,8 +563,6 @@ class GattServerManager(
       ?: throw IllegalArgumentException("Service $serviceUuid not found")
     val characteristic = service.getCharacteristic(UUID.fromString(characteristicUuid))
       ?: throw IllegalArgumentException("Characteristic $characteristicUuid not found")
-
-    lastNotifiedCharacteristicUuid = characteristicUuid
 
     val entry = QueuedNotification(device, characteristic, characteristicUuid, confirm, value, onResult)
     val queue = notificationQueues.getOrPut(deviceId) { NotificationQueue() }

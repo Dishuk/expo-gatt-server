@@ -257,6 +257,9 @@ Fired after a notification or indication is delivered (or fails).
 | `event.characteristicUuid` | `string` | Notified characteristic |
 | `event.status` | `number` | `0` for success |
 
+`characteristicUuid` always identifies the characteristic this particular notification carried, so
+notifying several characteristics, or several devices, reports each one correctly.
+
 ## Types
 
 ### GattServiceConfig
