@@ -259,6 +259,9 @@ call made while the services are still registering rejects with `ERR_NO_SERVER` 
 `createServer`, or retry once [`isServerRunning`](#isserverrunning) is `true`, for behaviour that holds
 on both.
 
+Calling `startAdvertising` again **replaces** the current advertisement on both platforms rather than
+adding a second one, and settles the earlier call's promise with `ERR_ADVERTISE`.
+
 **Rejects** with:
 
 | Code | When |

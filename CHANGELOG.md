@@ -354,6 +354,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   iOS the services a failed registration did manage to publish are also unpublished again, once every
   callback of that round has arrived, rather than staying in the app's shared GATT database until the
   next `createServer`
+- Restarting advertising left the previous advertisement running on Android, because
+  `BluetoothLeAdvertiser` keys its advertising sets on the `AdvertiseCallback` instance and the module
+  installed a fresh one for every start. Two calls with different `serviceUuids` left the device
+  broadcasting both, `stopAdvertising` stopped only the most recent, and after a handful of restarts the
+  controller ran out of advertisers — reporting `ERR_ADVERTISE` "Too many advertisers" while several
+  stale advertisements were still on the air and `isAdvertising` reported `false`. The superseded
+  advertisement is now stopped before the new one starts, as iOS has always done implicitly, since a
+  `CBPeripheralManager` holds a single advertisement. A failure belonging to the superseded
+  advertisement can also no longer settle the new call's promise
 
 ### Removed
 

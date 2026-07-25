@@ -899,9 +899,17 @@ class GattServerManager(
     }
 
     // Installed only once every rejection above is out of the way, so a start that threw cannot leave a
-    // completion behind for the next stop to settle a second time.
+    // completion behind for the next stop to settle a second time. The callback is swapped first,
+    // because it is what `current()` tests: swapping the completion first leaves a window in which a
+    // failure belonging to the displaced advertisement settles the completion this call just installed.
+    val displaced = advertiseCallback.getAndSet(callback)
     pendingAdvertiseResult.getAndSet(onResult)?.invoke("Advertising restarted")
-    advertiseCallback.set(callback)
+    // `BluetoothLeAdvertiser` keys its advertising sets on callback identity — `mLegacyAdvertisers` is a
+    // map from the `AdvertiseCallback` to the set it started — so a start with a fresh callback adds a
+    // second advertisement rather than replacing the first, and the displaced one keeps broadcasting
+    // with nothing left able to stop it. Stopped before the new start, so it also frees the controller
+    // slot rather than counting towards ADVERTISE_FAILED_TOO_MANY_ADVERTISERS.
+    displaced?.let { leAdvertiser.stopAdvertising(it) }
     cancelAdvertisingTimeout()
     try {
       leAdvertiser.startAdvertising(settings, advData.build(), scanResponse, callback)
@@ -919,6 +927,9 @@ class GattServerManager(
     if (advertiseCallback.get() !== callback) {
       Log.d(TAG, "Advertising was stopped while starting — stopping the new advertisement")
       leAdvertiser.stopAdvertising(callback)
+      // That stop may have settled the *previous* completion, if it landed before this one was
+      // installed, so this call is settled here rather than left pending for good.
+      if (pendingAdvertiseResult.compareAndSet(onResult, null)) onResult("Advertising stopped")
     }
   }
 

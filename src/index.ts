@@ -364,6 +364,8 @@ function assertOneOf<T extends string>(value: unknown, allowed: T[], field: stri
  * A publication still in flight is waited for on iOS, so the call is safe before `createServer`
  * resolves and from a `poweredOn` event handler; Android rejects it with `ERR_NO_SERVER` instead, so
  * await `createServer` or retry once `isServerRunning` is `true` for behaviour that holds on both.
+ *
+ * Calling it again replaces the current advertisement rather than adding a second one.
  */
 export async function startAdvertising(config: AdvertiseConfig = {}): Promise<void> {
   // Expanding an advertised UUID costs nothing on the wire: Android encodes it as "the shortest
