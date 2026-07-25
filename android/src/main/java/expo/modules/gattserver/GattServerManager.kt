@@ -812,6 +812,18 @@ class GattServerManager(
       throw GattServerException("ERR_BLUETOOTH", BLUETOOTH_OFF_MESSAGE)
     }
 
+    // A half-built or empty database is still a database scanners can connect to and discover, and a
+    // registration that failed leaves exactly that behind. Checked after the adapter, so a powered-off
+    // one is still reported as the Bluetooth problem it is — the order iOS uses too.
+    if (!databasePublished.get()) {
+      throw GattServerException(
+        "ERR_NO_SERVER",
+        "No GATT database is published, so there is nothing to advertise. Wait for createServer to " +
+          "resolve; isServerRunning reports whether the database is still there, which a failed " +
+          "registration or Bluetooth going down undoes."
+      )
+    }
+
     if (options.setAdapterName && options.localName == null) {
       throw IllegalArgumentException(
         "android.setAdapterName was requested without a localName for the adapter to be renamed to."

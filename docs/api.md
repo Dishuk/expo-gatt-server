@@ -160,6 +160,12 @@ callback".
 | `ERR_NO_SERVER` | [`stopServer`](#stopserver) ran, or Bluetooth went off, before the database finished publishing |
 | `ERR_CREATE_SERVER` | A service failed to publish, or the configuration was malformed |
 
+A failed registration leaves **no** usable database: `isServerRunning` stays `false` and
+[`startAdvertising`](#startadvertising) rejects with `ERR_NO_SERVER`. On iOS the services that did
+publish before the failure are unpublished again once the round's remaining callbacks have arrived --
+`CBPeripheralManager` shares one GATT database per app, so leaving them there would collide with the
+next `createServer`.
+
 Invalid configuration is rejected in the shared TypeScript layer before either platform sees it, as a
 plain `Error` rather than a coded one: a malformed UUID, a byte outside `0`--`255`, an unrecognised
 service type, characteristic property or permission name, a `requestTimeoutMs` outside its range, a
@@ -236,18 +242,23 @@ Begin BLE advertisement. The device becomes visible to nearby scanners.
 | `config.android.includeDeviceName` | `boolean` | `localName !== undefined` | Include the device's own Bluetooth name in the scan response |
 | `config.android.setAdapterName` | `boolean` | `false` | Rename the device's Bluetooth adapter to `localName` |
 
-Requires a server: `startAdvertising` before `createServer` rejects with `ERR_NO_SERVER`.
+Requires a **published** database, not merely a server object: `startAdvertising` rejects with
+`ERR_NO_SERVER` before `createServer`, before its promise resolves, after a service failed to publish,
+and after Bluetooth went down and took the database with it. Advertising a half-built or empty database
+would otherwise expose it to scanners, which is worse than not advertising at all.
+[`isServerRunning`](#isserverrunning) reports the same condition, so awaiting `createServer` is all that
+is normally needed.
 
 On iOS the call **waits** for Bluetooth to reach a definitive state rather than sampling it, because
 `CBPeripheralManager.state` is `unknown` until its first callback arrives -- so calling
-`startAdvertising` immediately after `createServer` is safe. A terminal state rejects with
+`startAdvertising` immediately after awaiting `createServer` is safe. A terminal state rejects with
 `ERR_BLUETOOTH`, or `ERR_PERMISSION` when Bluetooth is unauthorized.
 
 **Rejects** with:
 
 | Code | When |
 |---|---|
-| `ERR_NO_SERVER` | No server exists -- call `createServer` first |
+| `ERR_NO_SERVER` | No server exists, or its database is not published -- `createServer` has not resolved, or a service failed to publish |
 | `ERR_PERMISSION` | Android: `BLUETOOTH_ADVERTISE` is not granted, or `BLUETOOTH_CONNECT` is not granted while `android.setAdapterName` is set (API 31+). iOS: Bluetooth is unauthorized |
 | `ERR_NO_CONTEXT` | Android only: no React context, so the permission could not be checked |
 | `ERR_UNSUPPORTED` | iOS: `manufacturerData`, `serviceData` or `connectable: false` was supplied. Android: the adapter has no BLE advertising support, which no amount of retrying changes |

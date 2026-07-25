@@ -353,6 +353,14 @@ function assertOneOf<T extends string>(value: unknown, allowed: T[], field: stri
   }
 }
 
+/**
+ * Begins advertising the published GATT database.
+ *
+ * Rejects with `ERR_NO_SERVER` unless a database is actually published — before `createServer`, before
+ * its promise resolves, after a service failed to publish, and while Bluetooth is down. Advertising a
+ * half-built or empty database would expose it to scanners, which is worse than not advertising.
+ * `isServerRunning` reports the same condition.
+ */
 export async function startAdvertising(config: AdvertiseConfig = {}): Promise<void> {
   // Expanding an advertised UUID costs nothing on the wire: Android encodes it as "the shortest
   // representation" and sizes the 31-byte budget the same way, so a 16-bit alias still goes out as

@@ -213,7 +213,10 @@ public class ExpoGattServerModule: Module {
           mgr.startAdvertising(
             localName: localName, serviceUuids: serviceUuids, timeoutMs: timeoutMs
           ) { error in
-            if let error = error {
+            if let error = error as? GattServerError {
+              // Keeps ERR_NO_SERVER, which the generic branch below would flatten into ERR_ADVERTISE.
+              promise.reject(error.code, error.message)
+            } else if let error = error {
               promise.reject("ERR_ADVERTISE", error.localizedDescription)
             } else {
               promise.resolve(nil)

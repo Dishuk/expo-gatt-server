@@ -344,6 +344,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Response. Android implements exactly that, but iOS cannot: `didReceiveWriteRequests:` delivers an ATT
   request and an ATT command through the same callback and `CBATTRequest` exposes no flag telling them
   apart. The types and the documentation now say so instead of promising it
+- **Breaking:** `startAdvertising` did not check that a database was actually published, so a
+  `createServer` that correctly reported a registration failure was followed by a `startAdvertising`
+  that succeeded and exposed a half-built or empty database to scanners. Both platforms now reject with
+  `ERR_NO_SERVER` unless the database is published — the same condition `isServerRunning` reports — so
+  advertising before `createServer` resolves now fails instead of advertising nothing. On iOS the
+  services a failed registration did manage to publish are also unpublished again, once every callback
+  of that round has arrived, rather than staying in the app's shared GATT database until the next
+  `createServer`
 
 ### Removed
 

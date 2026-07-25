@@ -34,6 +34,7 @@ enum GattServerError: Error {
   case bluetoothUnavailable(state: CBManagerState)
   case serviceRegistrationFailed(uuid: String, reason: String)
   case serverStopped
+  case databaseNotPublished
   case characteristicNotFound(service: String, characteristic: String)
   case notifyQueueFull(limit: Int)
   case deviceDisconnected(deviceId: String)
@@ -51,7 +52,7 @@ enum GattServerError: Error {
     case .bluetoothUnavailable(let state):
       return state == .unauthorized ? "ERR_PERMISSION" : "ERR_BLUETOOTH"
     case .serviceRegistrationFailed: return "ERR_CREATE_SERVER"
-    case .serverStopped: return "ERR_NO_SERVER"
+    case .serverStopped, .databaseNotPublished: return "ERR_NO_SERVER"
     case .characteristicNotFound: return "ERR_CHARACTERISTIC_NOT_FOUND"
     case .notifyQueueFull: return "ERR_NOTIFY_QUEUE_FULL"
     case .deviceDisconnected: return "ERR_DEVICE_DISCONNECTED"
@@ -91,6 +92,10 @@ enum GattServerError: Error {
       return "Failed to publish service \(uuid): \(reason)"
     case .serverStopped:
       return "Server was stopped before it finished opening"
+    case .databaseNotPublished:
+      return "No GATT database is published, so there is nothing to advertise. Wait for createServer " +
+        "to resolve; isServerRunning reports whether the database is still there, which a failed " +
+        "registration or Bluetooth going down undoes."
     case .characteristicNotFound(let service, let characteristic):
       return "Characteristic \(characteristic) was not found in service \(service)"
     case .notifyQueueFull(let limit):
@@ -405,6 +410,12 @@ class GattServerManager: NSObject {
     timeoutMs: Int,
     completion: @escaping (Error?) -> Void
   ) {
+    // A half-built or empty database is still a database CoreBluetooth will let scanners find, and a
+    // registration that failed leaves exactly that behind.
+    guard databasePublished else {
+      completion(GattServerError.databaseNotPublished)
+      return
+    }
     claimAdvertisingCompletion()?(
       NSError(
         domain: "ExpoGattServer", code: 0,
@@ -998,25 +1009,47 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     if let error = error {
       databasePublished = false
       registrationFailed = true
-      servicesAwaitingRegistration.removeAll()
       completeOpen(GattServerError.serviceRegistrationFailed(
         uuid: service.uuid.normalizedString,
         reason: error.localizedDescription
       ))
-      return
+    } else {
+      // Mirrored from the configuration this manager built rather than from the callback's `CBService`,
+      // because only the configured instance is guaranteed to carry the characteristics — and it is
+      // matching those instances that lets `address(of:)` name a characteristic's service without
+      // relying on the weak back-pointer.
+      addedServices[service.uuid] = serviceConfiguration.first { $0.uuid == service.uuid }
+        ?? service as? CBMutableService
+        ?? CBMutableService(type: service.uuid, primary: service.isPrimary)
     }
 
-    // Mirrored from the configuration this manager built rather than from the callback's `CBService`,
-    // because only the configured instance is guaranteed to carry the characteristics — and it is
-    // matching those instances that lets `address(of:)` name a characteristic's service without relying
-    // on the weak back-pointer.
-    addedServices[service.uuid] = serviceConfiguration.first { $0.uuid == service.uuid }
-      ?? service as? CBMutableService
-      ?? CBMutableService(type: service.uuid, primary: service.isPrimary)
-
-    if servicesAwaitingRegistration.isEmpty && !registrationFailed {
+    // The set is no longer cleared on failure, so the siblings still registering are waited for rather
+    // than abandoned — which is what makes the unpublish below safe to schedule.
+    guard servicesAwaitingRegistration.isEmpty else { return }
+    if registrationFailed {
+      unpublishFailedRegistration()
+    } else {
       databasePublished = true
       completeOpen(nil)
+    }
+  }
+
+  /// Takes back the services a failed registration round did manage to publish, which otherwise stay in
+  /// the process-wide GATT database until the next `createServer` calls `stop()`.
+  ///
+  /// Whether `removeAllServices` may be called from inside `peripheralManager(_:didAdd:error:)`, with
+  /// sibling `add(_:)` calls still outstanding, is documented nowhere — so neither is relied on. This
+  /// runs only once every service of the round has reported, and only on the next main-queue turn, so
+  /// the callback has returned by then. A re-publish may have been queued behind it, and owns the
+  /// database if so.
+  private func unpublishFailedRegistration() {
+    DispatchQueue.main.async { [weak self] in
+      guard let self = self else { return }
+      guard self.registrationFailed,
+            self.servicesAwaitingRegistration.isEmpty,
+            !self.databasePublished else { return }
+      self.peripheralManager?.removeAllServices()
+      self.addedServices.removeAll()
     }
   }
 
