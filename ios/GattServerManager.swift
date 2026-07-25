@@ -642,6 +642,26 @@ class GattServerManager: NSObject {
     }
   }
 
+  /// Discards matching requests after answering each one with `result`.
+  ///
+  /// Used where the central may still hold a usable ATT bearer. `respondToRequest:withResult:` "must be
+  /// called" for every read and write callback, and an unanswered request stalls that bearer until the
+  /// 30 s transaction timeout retires it permanently (Core Spec Vol 3, Part F, §3.3.3). Every response
+  /// is sent after the bookkeeping is settled, so CoreBluetooth is never called back into mid-teardown.
+  private func answerAndDiscardPendingRequests(
+    withResult result: CBATTError.Code, where predicate: (PendingRequest) -> Bool
+  ) {
+    var answered: [CBATTRequest] = []
+    for (requestId, pending) in pendingRequests where predicate(pending) {
+      pending.timeout?.cancel()
+      pendingRequests.removeValue(forKey: requestId)
+      answered.append(pending.request)
+    }
+    for request in answered {
+      peripheralManager?.respond(to: request, withResult: result)
+    }
+  }
+
   /// Answers a pending read or write request.
   ///
   /// `offset` states where `value` begins within the attribute, and the response is rebased onto the
@@ -861,11 +881,18 @@ class GattServerManager: NSObject {
 
   /// Drops every trace of `deviceId` and reports the disconnection exactly once: a device that was
   /// never seen, or has already been reported, produces nothing.
+  ///
+  /// The disconnection is inferred rather than reported, so anything the central left pending is
+  /// answered instead of dropped: it may well still be connected, and a dropped request would cost it
+  /// its ATT bearer. "Unlikely Error" is the closest code the specification offers for a valid request
+  /// the server abandoned, and is what an expiry sends too.
   private func markDisconnected(_ deviceId: String, reason: GattServerError) {
     guard connectedCentrals.removeValue(forKey: deviceId) != nil else { return }
     centralPayloadLengths.removeValue(forKey: deviceId)
     subscribedCentrals.removeValue(forKey: deviceId)
-    discardPendingRequests { $0.request.central.identifier.uuidString == deviceId }
+    answerAndDiscardPendingRequests(withResult: .unlikelyError) {
+      $0.request.central.identifier.uuidString == deviceId
+    }
     failPendingNotifications(reason) { $0.deviceId == deviceId }
     delegate?.onDeviceDisconnected(deviceId: deviceId)
   }
