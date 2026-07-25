@@ -25,7 +25,8 @@ export type ExpoGattServerPluginProps = {
    * Whether the app declares `android.hardware.bluetooth_le` as required. Defaults to `false`,
    * matching the module's own manifest, so a device without BLE hardware can still install the app.
    * Set it to `true` if the app genuinely cannot work without BLE and should be filtered off Google
-   * Play accordingly.
+   * Play accordingly. A requirement another plugin or the app config already declared is left as it
+   * is, so this only ever adds the declaration — it never relaxes one.
    *
    * @platform android
    */
