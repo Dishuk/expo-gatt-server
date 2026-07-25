@@ -1,8 +1,18 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!--
+    Only what a GATT peripheral actually needs, since every consuming app inherits these by manifest
+    merging. Advertising takes BLUETOOTH_ADMIN / BLUETOOTH_ADVERTISE and the server takes
+    BLUETOOTH / BLUETOOTH_CONNECT, per the framework's own @RequiresLegacyBluetooth*Permission
+    annotations. No location permission: that is a scanning concern, and this module never scans.
+  -->
   <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
   <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
   <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-  <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
+  <!--
+    Not required, so a dependency cannot filter its consumer off Google Play on non-BLE devices.
+    An app that genuinely cannot work without BLE overrides this with required="true".
+  -->
+  <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 </manifest>

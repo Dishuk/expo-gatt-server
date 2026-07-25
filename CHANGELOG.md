@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `android.setAdapterName` to opt back in to the rename, which is now undone when advertising stops
 - **Breaking:** Android advertises in `lowPower` mode by default, matching the platform's own
   default, instead of the hardcoded `lowLatency`. Pass `mode: 'lowLatency'` for the old behaviour
+- **Breaking:** the Android manifest no longer declares `ACCESS_FINE_LOCATION`, which a peripheral
+  does not need and every consuming app inherited. Apps that also scan must declare it themselves
+- **Breaking:** `android.hardware.bluetooth_le` is declared `required="false"`, so the module no
+  longer filters consuming apps off Google Play on non-BLE devices. Declare it `required="true"` in
+  your own manifest to restore the old behaviour
 - **Breaking:** iOS rejects `manufacturerData`, `serviceData` and `connectable: false` with
   `ERR_UNSUPPORTED` instead of ignoring them; `mode`, `txPowerLevel` and `includeTxPowerLevel` are
   still ignored there but now log a warning

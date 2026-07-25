@@ -84,17 +84,20 @@ API 24 (Android 7.0). Set in `build.gradle` via `minSdkVersion 24`.
 
 ### Permissions
 
-The module's `AndroidManifest.xml` declares all required permissions. They are merged into your app's manifest automatically.
+The module's `AndroidManifest.xml` declares only the permissions a GATT **peripheral** needs. They are merged into your app's manifest automatically, so the module deliberately declares nothing your app might not want.
 
 **Declared permissions:**
 
 | Permission | API Level | Purpose |
 |------------|-----------|---------|
-| `BLUETOOTH` | < 31 | Legacy Bluetooth access |
-| `BLUETOOTH_ADMIN` | < 31 | Legacy Bluetooth management |
+| `BLUETOOTH` | <= 30 | GATT server operations (`@RequiresLegacyBluetoothPermission`) |
+| `BLUETOOTH_ADMIN` | <= 30 | BLE advertisement (`@RequiresLegacyBluetoothAdminPermission`) |
 | `BLUETOOTH_ADVERTISE` | 31+ | BLE advertisement |
 | `BLUETOOTH_CONNECT` | 31+ | GATT server operations |
-| `ACCESS_FINE_LOCATION` | all | Required for BLE on some devices |
+
+**No location permission is declared.** Location is a *scanning* concern -- Android requires it "because, on Android 11 and lower, a Bluetooth scan could potentially be used to gather information about the location of the user" -- and this module only advertises and serves GATT, never scans. If your app also scans, declare `BLUETOOTH_SCAN` (and `ACCESS_FINE_LOCATION`, or `usesPermissionFlags="neverForLocation"`) yourself.
+
+Earlier versions declared `ACCESS_FINE_LOCATION` unconditionally, which every consuming app inherited.
 
 **Runtime permissions (Android 12+ / API 31):**
 
@@ -111,7 +114,6 @@ async function requestBlePermissions() {
   const result = await PermissionsAndroid.requestMultiple([
     PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
     PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
-    PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
   ]);
 
   const allGranted = Object.values(result).every(
@@ -126,13 +128,23 @@ async function requestBlePermissions() {
 
 ### Hardware Requirements
 
-The module declares `android.hardware.bluetooth_le` as required (`required="true"`). Devices without BLE hardware will not see your app on Google Play.
+The module declares `android.hardware.bluetooth_le` with `required="false"`, so it appears in your merged manifest without filtering your app off Google Play on devices that lack BLE hardware. Whether BLE is essential is your app's decision, not a dependency's.
 
-To support devices without BLE (with graceful degradation), override this in your app's manifest:
+If your app genuinely cannot work without BLE, mark it required in your own manifest and the merger will take the stronger value:
 
 ```xml
-<uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+<uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 ```
+
+Otherwise, check at runtime and degrade gracefully:
+
+```typescript
+// PackageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE), or:
+import { getBluetoothState } from 'expo-gatt-server';
+const state = await getBluetoothState(); // 'unsupported' when there is no BLE adapter
+```
+
+Earlier versions declared `required="true"`, which every consuming app inherited.
 
 ### Troubleshooting
 
