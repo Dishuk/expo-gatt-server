@@ -263,6 +263,11 @@ class GattServerManager: NSObject {
   /// once the re-publish that follows powering on is acknowledged.
   private var databasePublished = false
 
+  /// Whether the current round of `add(_:)` calls has already had one service rejected. The callbacks
+  /// arrive in no guaranteed order, so without this a failure followed by a success would see nothing
+  /// left awaiting registration and publish a database that is missing a service.
+  private var registrationFailed = false
+
   /// Centrals the module believes are connected, keyed by `CBCentral.identifier`.
   ///
   /// `CBPeripheralManagerDelegate` declares no connection-level callback, so membership is derived
@@ -389,6 +394,7 @@ class GattServerManager: NSObject {
 
   private func publishConfiguredServices(on peripheral: CBPeripheralManager) {
     databasePublished = false
+    registrationFailed = false
     servicesAwaitingRegistration = Set(serviceConfiguration.map { $0.uuid })
     guard !servicesAwaitingRegistration.isEmpty else {
       databasePublished = true
@@ -769,6 +775,7 @@ class GattServerManager: NSObject {
     serviceConfiguration.removeAll()
     servicesAwaitingRegistration.removeAll()
     databasePublished = false
+    registrationFailed = false
     addedServices.removeAll()
     connectedCentrals.removeAll()
     centralPayloadLengths.removeAll()
@@ -976,6 +983,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
 
     if let error = error {
       databasePublished = false
+      registrationFailed = true
       servicesAwaitingRegistration.removeAll()
       completeOpen(GattServerError.serviceRegistrationFailed(
         uuid: service.uuid.normalizedString,
@@ -987,7 +995,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     addedServices[service.uuid] = service as? CBMutableService
       ?? CBMutableService(type: service.uuid, primary: service.isPrimary)
 
-    if servicesAwaitingRegistration.isEmpty {
+    if servicesAwaitingRegistration.isEmpty && !registrationFailed {
       databasePublished = true
       completeOpen(nil)
     }
