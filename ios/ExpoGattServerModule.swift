@@ -46,9 +46,18 @@ public class ExpoGattServerModule: Module {
         self.manager?.stop()
         let mgr = GattServerManager()
         mgr.delegate = self
-        mgr.open(services: cbServices, initialValues: initialValues)
         self.manager = mgr
-        promise.resolve(nil)
+        // Resolves only once CoreBluetooth is powered on and has acknowledged every service, so a
+        // resolved promise means the server really is advertisable.
+        mgr.open(services: cbServices, initialValues: initialValues) { error in
+          if let error = error as? GattServerError {
+            promise.reject(error.code, error.message)
+          } else if let error = error {
+            promise.reject("ERR_CREATE_SERVER", error.localizedDescription)
+          } else {
+            promise.resolve(nil)
+          }
+        }
       } catch {
         promise.reject("ERR_CREATE_SERVER", error.localizedDescription)
       }

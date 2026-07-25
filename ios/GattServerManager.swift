@@ -6,12 +6,19 @@ enum GattServerError: Error {
   case mtuSmall(maxPayload: Int, payloadSize: Int)
   case payloadExceedsMtu(maxPayload: Int, payloadSize: Int, responded: Bool)
   case requestNotFound(requestId: Int)
+  case bluetoothUnavailable(state: CBManagerState)
+  case serviceRegistrationFailed(uuid: String, reason: String)
+  case serverStopped
 
   var code: String {
     switch self {
     case .mtuSmall: return "MTU_SMALL"
     case .payloadExceedsMtu: return "PAYLOAD_EXCEEDS_MTU"
     case .requestNotFound: return "REQUEST_NOT_FOUND"
+    case .bluetoothUnavailable(let state):
+      return state == .unauthorized ? "ERR_PERMISSION" : "ERR_BLUETOOTH"
+    case .serviceRegistrationFailed: return "ERR_CREATE_SERVER"
+    case .serverStopped: return "ERR_NO_SERVER"
     }
   }
 
@@ -24,6 +31,17 @@ enum GattServerError: Error {
       return "Payload size \(payloadSize) exceeds negotiated MTU payload capacity of \(maxPayload) bytes.\(suffix)"
     case .requestNotFound(let requestId):
       return "Request \(requestId) not found or already responded"
+    case .bluetoothUnavailable(let state):
+      switch state {
+      case .poweredOff: return "Bluetooth is turned off"
+      case .unauthorized: return "Bluetooth permission not granted"
+      case .unsupported: return "BLE not supported on this device"
+      default: return "Bluetooth not ready"
+      }
+    case .serviceRegistrationFailed(let uuid, let reason):
+      return "Failed to publish service \(uuid): \(reason)"
+    case .serverStopped:
+      return "Server was stopped before it finished opening"
     }
   }
 }
@@ -46,7 +64,9 @@ class GattServerManager: NSObject {
   weak var delegate: GattServerManagerDelegate?
 
   private var peripheralManager: CBPeripheralManager?
-  private var pendingServices: [CBMutableService] = []
+  private var serviceConfiguration: [CBMutableService] = []
+  private var servicesAwaitingRegistration: Set<CBUUID> = []
+  private var openCompletion: ((Error?) -> Void)?
   private var advertisingCompletion: ((Error?) -> Void)?
   private var addedServices: [CBUUID: CBMutableService] = [:]
   private var subscribedCentrals: [String: [CBUUID: CBCentral]] = [:]
@@ -54,14 +74,44 @@ class GattServerManager: NSObject {
   private var pendingRequests: [Int: CBATTRequest] = [:]
   private var requestCounter = 0
 
-  func open(services: [CBMutableService], initialValues: [CBUUID: Data] = [:]) {
-    pendingServices = services
+  /// Opens the peripheral manager and publishes `services`. `completion` runs exactly once on the
+  /// main queue — with `nil` only after every service is confirmed published, or with an error if
+  /// publishing fails or Bluetooth is unavailable.
+  ///
+  /// `CBPeripheralManager.state` is `.unknown` until `peripheralManagerDidUpdateState` fires, and
+  /// services can only be added while powered on, so the completion is necessarily deferred.
+  func open(
+    services: [CBMutableService],
+    initialValues: [CBUUID: Data] = [:],
+    completion: @escaping (Error?) -> Void
+  ) {
+    serviceConfiguration = services
     characteristicValues = initialValues
+    openCompletion = completion
     peripheralManager = CBPeripheralManager(delegate: self, queue: .main)
   }
 
   var bluetoothState: CBManagerState {
     peripheralManager?.state ?? .unknown
+  }
+
+  private func completeOpen(_ error: Error?) {
+    guard let completion = openCompletion else { return }
+    openCompletion = nil
+    completion(error)
+  }
+
+  /// Publishes every configured service and completes the pending open once CoreBluetooth has
+  /// acknowledged all of them via `peripheralManager(_:didAdd:error:)`.
+  private func publishConfiguredServices(on peripheral: CBPeripheralManager) {
+    servicesAwaitingRegistration = Set(serviceConfiguration.map { $0.uuid })
+    guard !servicesAwaitingRegistration.isEmpty else {
+      completeOpen(nil)
+      return
+    }
+    for service in serviceConfiguration {
+      peripheral.add(service)
+    }
   }
 
   func startAdvertising(localName: String?, serviceUuids: [CBUUID]?, completion: @escaping (Error?) -> Void) {
@@ -154,9 +204,12 @@ class GattServerManager: NSObject {
 
   func stop() {
     stopAdvertising()
+    completeOpen(GattServerError.serverStopped)
     for (_, service) in addedServices {
       peripheralManager?.remove(service)
     }
+    serviceConfiguration.removeAll()
+    servicesAwaitingRegistration.removeAll()
     addedServices.removeAll()
     subscribedCentrals.removeAll()
     characteristicValues.removeAll()
@@ -181,11 +234,17 @@ class GattServerManager: NSObject {
 
 extension GattServerManager: CBPeripheralManagerDelegate {
   func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
-    guard peripheral.state == .poweredOn else { return }
-    for service in pendingServices {
-      peripheral.add(service)
+    switch peripheral.state {
+    case .poweredOn:
+      publishConfiguredServices(on: peripheral)
+    case .unknown, .resetting:
+      // Transient — a further state update is coming, so neither fail nor publish yet.
+      break
+    default:
+      let error = GattServerError.bluetoothUnavailable(state: peripheral.state)
+      servicesAwaitingRegistration.removeAll()
+      completeOpen(error)
     }
-    pendingServices.removeAll()
   }
 
   func peripheralManager(_ peripheral: CBPeripheralManager, didStartAdvertising error: Error?) {
@@ -197,9 +256,22 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     _ peripheral: CBPeripheralManager,
     didAdd service: CBService, error: Error?
   ) {
-    if error == nil {
-      addedServices[service.uuid] = service as? CBMutableService
-        ?? CBMutableService(type: service.uuid, primary: service.isPrimary)
+    servicesAwaitingRegistration.remove(service.uuid)
+
+    if let error = error {
+      servicesAwaitingRegistration.removeAll()
+      completeOpen(GattServerError.serviceRegistrationFailed(
+        uuid: service.uuid.uuidString,
+        reason: error.localizedDescription
+      ))
+      return
+    }
+
+    addedServices[service.uuid] = service as? CBMutableService
+      ?? CBMutableService(type: service.uuid, primary: service.isPrimary)
+
+    if servicesAwaitingRegistration.isEmpty {
+      completeOpen(nil)
     }
   }
 
