@@ -300,6 +300,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiting for an execute response that never came. Fragments are now buffered per device and applied
   or discarded on execute, and the reassembled value is reported as one write event per attribute.
   iOS is unaffected — CoreBluetooth does not expose prepared writes to the peripheral role
+- Android could lose a write to a characteristic that a long or reliable write was committing at the same
+  moment. The execute's read-modify-write assembled the fragments onto the value the attribute held when
+  it started but only the commit was guarded, so a `updateCharacteristicValue` or a plain write landing
+  in between was overwritten by the assembly. The whole read-modify-write is now one critical section.
+  Reads of a mirrored value take the same monitor, which they previously did not, so a value written on
+  one binder thread is now guaranteed visible to the thread that answers the next read. iOS is unaffected:
+  its manager is confined to the main queue
 - Android treated an unavailable React context as "permission granted" and carried on into a
   `SecurityException`. `createServer` and `startAdvertising` now reject with `ERR_NO_CONTEXT`
 

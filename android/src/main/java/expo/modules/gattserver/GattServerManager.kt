@@ -291,12 +291,20 @@ class GattServerManager(
   // instead: device address, then characteristic UUID, then the raw two-octet configuration bits.
   private val subscriptions = ConcurrentHashMap<String, ConcurrentHashMap<UUID, Int>>()
 
-  // `BluetoothGattCharacteristic.value` is a plain non-volatile field the framework never synchronises,
-  // and it is both the mirrored attribute value and — on the pre-33 `notifyCharacteristicChanged`
-  // overload — the payload a send reads. So every mutation goes through this monitor: it publishes the
-  // value to the binder threads that answer reads, and keeps the pre-33 park-notify-restore sequence
-  // atomic against a write or another device's send targeting the same characteristic.
-  private val characteristicValueLock = Any()
+  // `BluetoothGattCharacteristic.value` and `BluetoothGattDescriptor.value` are plain non-volatile fields
+  // the framework never synchronises, and the characteristic's is also — on the pre-33
+  // `notifyCharacteristicChanged` overload — the payload a send reads. So every access goes through this
+  // monitor, reads included: one only writers took would order nothing for the binder threads that answer
+  // reads. It is also what makes a read-modify-write a single step, which the pre-33 park-notify-restore
+  // sequence and the prepared-write assembly both need.
+  //
+  // A stored value is only ever replaced, never mutated in place, so a reference read under the monitor
+  // stays usable after it is released.
+  //
+  // Nothing that can re-enter the module runs under it: `sendResponse` and every listener callback happen
+  // after it is released. The pre-33 notify is the sole exception, because the framework takes the payload
+  // from the field and there is no other way to make that pair atomic.
+  private val attributeValueLock = Any()
 
   // Delegation is fixed for the lifetime of a server but is read from the binder threads that deliver
   // the GATT callbacks, so both maps are concurrent.
@@ -447,8 +455,10 @@ class GattServerManager(
       device: BluetoothDevice, requestId: Int, offset: Int,
       characteristic: BluetoothGattCharacteristic
     ) {
-      @Suppress("DEPRECATION")
-      val value = characteristic.value
+      val value = synchronized(attributeValueLock) {
+        @Suppress("DEPRECATION")
+        characteristic.value
+      }
       // An opted-in characteristic always reaches JS, however current the mirrored value looks.
       val delegated = delegationFor(characteristic).read
 
@@ -564,8 +574,10 @@ class GattServerManager(
       }
 
       if (value != null) {
-        @Suppress("DEPRECATION")
-        descriptor.value = value
+        synchronized(attributeValueLock) {
+          @Suppress("DEPRECATION")
+          descriptor.value = value
+        }
       }
       if (responseNeeded) {
         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
@@ -582,8 +594,10 @@ class GattServerManager(
       val value = if (descriptor.uuid == CCCD_UUID) {
         cccdValue(clientConfiguration(device.address, descriptor.characteristic.uuid))
       } else {
-        @Suppress("DEPRECATION")
-        descriptor.value ?: BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+        synchronized(attributeValueLock) {
+          @Suppress("DEPRECATION")
+          descriptor.value
+        } ?: BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
       }
       Log.d(TAG, "onDescriptorReadRequest: device=${device.address} desc=${descriptor.uuid} value=${value.joinToString(",") { String.format("%02x", it) }}")
       gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
@@ -1239,11 +1253,27 @@ class GattServerManager(
   }
 
   /**
+   * What one execute assembled. Everything it could commit is already committed by the time this exists;
+   * what remains is the response, the CCCD transitions and the events — none of which may run under
+   * [attributeValueLock].
+   */
+  private class AssembledExecute(
+    /** The ATT error the execute must be answered with, or `null` when it assembled cleanly. */
+    val attError: Int? = null,
+    val characteristicValues: Map<BluetoothGattCharacteristic, ByteArray> = emptyMap(),
+    val clientConfigurations: List<Pair<BluetoothGattDescriptor, Int>> = emptyList(),
+    val delegated: Boolean = false,
+  )
+
+  /**
    * Executes [queued] as one atomic operation, in the order the parts were received. Parts are assembled
    * onto each attribute's current value first and nothing is applied until every one of them has been
    * validated, because the execute either wholly succeeds or wholly fails: a part starting past the end
    * of its attribute is answered with "Invalid Offset" and discards the entire queue (Core Spec Vol 3,
    * Part F, §3.4.6.3).
+   *
+   * [assemblePreparedWrites] does the whole read-modify-write in one critical section; the response and
+   * the events follow it, because a listener may re-enter the module.
    */
   @SuppressLint("MissingPermission")
   private fun applyPreparedWrites(
@@ -1251,77 +1281,106 @@ class GattServerManager(
     requestId: Int,
     queued: List<PreparedWrite>,
   ) {
-    // Identity-keyed, which is what is wanted: these are the very instances the published database holds,
-    // and neither class overrides equals.
-    val characteristicValues = LinkedHashMap<BluetoothGattCharacteristic, ByteArray>()
-    val descriptorValues = LinkedHashMap<BluetoothGattDescriptor, ByteArray>()
+    val assembled = assemblePreparedWrites(queued)
 
-    for (write in queued) {
-      @Suppress("DEPRECATION")
-      val current = when (write) {
-        is PreparedWrite.ToCharacteristic ->
-          characteristicValues[write.characteristic] ?: write.characteristic.value
-        is PreparedWrite.ToDescriptor ->
-          descriptorValues[write.descriptor] ?: write.descriptor.value
-      } ?: ByteArray(0)
-
-      val merged = spliceAt(current, write.offset, write.value)
-      if (merged == null) {
-        Log.w(TAG, "onExecuteWrite: offset ${write.offset} past the end of a ${current.size}-byte value, rejecting")
-        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, 0, null)
-        return
-      }
-      when (write) {
-        is PreparedWrite.ToCharacteristic -> characteristicValues[write.characteristic] = merged
-        is PreparedWrite.ToDescriptor -> descriptorValues[write.descriptor] = merged
-      }
+    assembled.attError?.let { attError ->
+      gattServer?.sendResponse(device, requestId, attError, 0, null)
+      return
     }
 
-    // The specification fixes a CCCD at two octets, so a prepared write assembling to any other length is
-    // rejected rather than parsed into a guess, exactly as a direct write would be.
-    descriptorValues.forEach { (descriptor, value) ->
-      if (descriptor.uuid == CCCD_UUID && value.size != CCCD_VALUE_LENGTH) {
-        Log.w(TAG, "onExecuteWrite: prepared CCCD write assembles to ${value.size} octets, rejecting")
-        gattServer?.sendResponse(
-          device, requestId, ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH, 0, null
-        )
-        return
-      }
+    // Left to here rather than done during the assembly, because a subscribe or unsubscribe transition
+    // reports to a listener.
+    for ((descriptor, bits) in assembled.clientConfigurations) {
+      applyClientConfiguration(device, descriptor.characteristic, bits)
     }
 
-    descriptorValues.forEach { (descriptor, value) ->
-      if (descriptor.uuid == CCCD_UUID) {
-        applyClientConfiguration(device, descriptor.characteristic, cccdBits(value))
-      } else {
-        @Suppress("DEPRECATION")
-        descriptor.value = value
-      }
-    }
-
-    // A delegated write is JavaScript's to accept or reject, so the assembled value is withheld until it
+    // A delegated write is JavaScript's to accept or reject, so the assembled value was withheld until it
     // answers, and one pending request stands for the whole atomic execute.
-    val delegated = characteristicValues.keys.any { delegationFor(it).write }
-    if (delegated) {
+    if (assembled.delegated) {
       registerPendingRequest(requestId, device.address, offset = 0, isRead = false)
     } else {
-      synchronized(characteristicValueLock) {
-        characteristicValues.forEach { (characteristic, value) ->
-          @Suppress("DEPRECATION")
-          characteristic.value = value
-        }
-      }
       gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
     }
 
     // Reported once per attribute from offset 0, rather than replaying the fragments the client happened
     // to split the value into.
-    characteristicValues.forEach { (characteristic, value) ->
+    assembled.characteristicValues.forEach { (characteristic, value) ->
       listener?.onCharacteristicWriteRequest(
         device.address, requestId, characteristic.service?.uuid?.toString() ?: "",
-        characteristic.uuid.toString(), 0, value, delegated
+        characteristic.uuid.toString(), 0, value, assembled.delegated
       )
     }
   }
+
+  /**
+   * Merges every queued part onto the value its attribute holds *now* and commits the result, the whole
+   * read-modify-write under [attributeValueLock]. Assembling outside it would merge onto a value a
+   * concurrent write or `updateCharacteristicValue` had already replaced, and the commit would then lose
+   * that write.
+   *
+   * Nothing is committed unless every part validates. A CCCD is only assembled and returned, because
+   * applying one reports to a listener.
+   */
+  private fun assemblePreparedWrites(queued: List<PreparedWrite>): AssembledExecute =
+    synchronized(attributeValueLock) {
+      // Identity-keyed, which is what is wanted: these are the very instances the published database
+      // holds, and neither class overrides equals.
+      val characteristicValues = LinkedHashMap<BluetoothGattCharacteristic, ByteArray>()
+      val descriptorValues = LinkedHashMap<BluetoothGattDescriptor, ByteArray>()
+
+      for (write in queued) {
+        @Suppress("DEPRECATION")
+        val current = when (write) {
+          is PreparedWrite.ToCharacteristic ->
+            characteristicValues[write.characteristic] ?: write.characteristic.value
+          is PreparedWrite.ToDescriptor ->
+            descriptorValues[write.descriptor] ?: write.descriptor.value
+        } ?: ByteArray(0)
+
+        val merged = spliceAt(current, write.offset, write.value)
+        if (merged == null) {
+          Log.w(TAG, "onExecuteWrite: offset ${write.offset} past the end of a ${current.size}-byte value, rejecting")
+          return@synchronized AssembledExecute(attError = BluetoothGatt.GATT_INVALID_OFFSET)
+        }
+        when (write) {
+          is PreparedWrite.ToCharacteristic -> characteristicValues[write.characteristic] = merged
+          is PreparedWrite.ToDescriptor -> descriptorValues[write.descriptor] = merged
+        }
+      }
+
+      // The specification fixes a CCCD at two octets, so a prepared write assembling to any other length
+      // is rejected rather than parsed into a guess, exactly as a direct write would be.
+      for ((descriptor, value) in descriptorValues) {
+        if (descriptor.uuid == CCCD_UUID && value.size != CCCD_VALUE_LENGTH) {
+          Log.w(TAG, "onExecuteWrite: prepared CCCD write assembles to ${value.size} octets, rejecting")
+          return@synchronized AssembledExecute(attError = ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH)
+        }
+      }
+
+      val clientConfigurations = ArrayList<Pair<BluetoothGattDescriptor, Int>>()
+      for ((descriptor, value) in descriptorValues) {
+        if (descriptor.uuid == CCCD_UUID) {
+          clientConfigurations.add(descriptor to cccdBits(value))
+        } else {
+          @Suppress("DEPRECATION")
+          descriptor.value = value
+        }
+      }
+
+      val delegated = characteristicValues.keys.any { delegationFor(it).write }
+      if (!delegated) {
+        for ((characteristic, value) in characteristicValues) {
+          @Suppress("DEPRECATION")
+          characteristic.value = value
+        }
+      }
+
+      AssembledExecute(
+        characteristicValues = characteristicValues,
+        clientConfigurations = clientConfigurations,
+        delegated = delegated,
+      )
+    }
 
   /**
    * Returns `null` for an offset beyond the current end, which the specification answers with "Invalid
@@ -1334,12 +1393,12 @@ class GattServerManager(
     return result
   }
 
-  /** The one guarded way to replace the mirrored value a read of [characteristic] is answered from. */
+  /** Replaces the mirrored value a read of [characteristic] is answered from, under the value monitor. */
   private fun storeCharacteristicValue(
     characteristic: BluetoothGattCharacteristic,
     value: ByteArray,
   ) {
-    synchronized(characteristicValueLock) {
+    synchronized(attributeValueLock) {
       @Suppress("DEPRECATION")
       characteristic.value = value
     }
@@ -1492,7 +1551,7 @@ class GattServerManager(
     // afterwards, which is what keeps a send from changing what a read returns here as it does on 33+.
     // Restoring cannot truncate the notification: the framework reads the field and hands the array over
     // binder before returning.
-    val triggered = synchronized(characteristicValueLock) {
+    val triggered = synchronized(attributeValueLock) {
       @Suppress("DEPRECATION")
       val stored = characteristic.value
       @Suppress("DEPRECATION")
