@@ -56,12 +56,36 @@ Begin BLE advertisement. The device becomes visible to nearby scanners.
 |-----------|------|---------|-------------|
 | `config.localName` | `string` | -- | Local name to advertise. **iOS only** -- see below |
 | `config.serviceUuids` | `string[]` | -- | Service UUIDs to advertise |
-| `config.includeTxPowerLevel` | `boolean` | `false` | Include TX power level |
-| `config.connectable` | `boolean` | `true` | Accept incoming connections |
+| `config.includeTxPowerLevel` | `boolean` | `false` | Include TX power level. Android only |
+| `config.connectable` | `boolean` | `true` | Accept incoming connections. `false` is Android only |
+| `config.mode` | `AdvertisingMode` | `'lowPower'` | Discovery latency against battery. Android only |
+| `config.txPowerLevel` | `AdvertisingTxPower` | `'medium'` | Radio transmit power, i.e. range. Android only |
+| `config.timeoutMs` | `number` | `0` | Stop advertising by itself after this many ms; `0` means no limit |
+| `config.manufacturerData` | `ManufacturerDataEntry[]` | `[]` | Manufacturer Specific Data. Android only |
+| `config.serviceData` | `ServiceDataEntry[]` | `[]` | Service Data. Android only |
 | `config.android.includeDeviceName` | `boolean` | `localName !== undefined` | Include the device's own Bluetooth name in the scan response |
 | `config.android.setAdapterName` | `boolean` | `false` | Rename the device's Bluetooth adapter to `localName` |
 
 **Throws** if Bluetooth is not powered on (iOS) or `BLUETOOTH_ADVERTISE` permission is missing (Android). `android.setAdapterName` additionally requires `BLUETOOTH_CONNECT` on API 31+, and rejects with `ERR_ADVERTISE` when no `localName` is supplied.
+
+#### Platform support for advertising options
+
+`CBPeripheralManager.startAdvertising` supports exactly two advertisement keys in the peripheral role -- `CBAdvertisementDataLocalNameKey` and `CBAdvertisementDataServiceUUIDsKey` -- and silently ignores everything else. This module does not pass that silence on:
+
+| Option | Android | iOS |
+|--------|---------|-----|
+| `localName` | Adapter name only -- see below | Native |
+| `serviceUuids` | Native | Native |
+| `timeoutMs` | Native (`AdvertiseSettings.setTimeout`) | **Emulated** by a module timer that calls `stopAdvertising` |
+| `mode`, `txPowerLevel`, `includeTxPowerLevel` | Native | **Ignored, with a `console.warn`** |
+| `manufacturerData`, `serviceData` | Native | **Rejected** with `ERR_UNSUPPORTED` |
+| `connectable: false` | Native | **Rejected** with `ERR_UNSUPPORTED` |
+
+The split is deliberate. `mode`, `txPowerLevel` and `includeTxPowerLevel` are hints about radio behaviour: the advertisement still means the same thing and a peer still finds it, so rejecting them would force every cross-platform app to branch on `Platform.OS` purely to tune Android battery use. `manufacturerData`, `serviceData` and `connectable: false` change what a scanner *observes* -- a central filtering on manufacturer data would never find a peripheral whose manufacturer data was quietly dropped -- so they fail loudly instead.
+
+`mode` and `txPowerLevel` now default to Android's own platform defaults (`ADVERTISE_MODE_LOW_POWER`, `ADVERTISE_TX_POWER_MEDIUM`). Earlier versions hardcoded `ADVERTISE_MODE_LOW_LATENCY`, which the platform documents as having "the highest power consumption" and as something that "should not be used for continuous background advertising". Pass `mode: 'lowLatency'` to get the old behaviour back.
+
+`serviceUuids`, `manufacturerData` and `serviceData` all go in the advertisement itself, where a passive scanner sees them, and share its 31-byte budget; the device name and TX power go in the scan response so they do not compete for it. An over-budget advertisement rejects with `ERR_ADVERTISE` ("Advertise data too large").
 
 #### The advertised local name
 
@@ -464,7 +488,48 @@ interface AdvertiseConfig {
   serviceUuids?: string[];
   includeTxPowerLevel?: boolean;
   connectable?: boolean;
+  mode?: AdvertisingMode;
+  txPowerLevel?: AdvertisingTxPower;
+  timeoutMs?: number;
+  manufacturerData?: ManufacturerDataEntry[];
+  serviceData?: ServiceDataEntry[];
   android?: AndroidAdvertiseOptions;
+}
+```
+
+### AdvertisingMode
+
+```typescript
+type AdvertisingMode = 'lowPower' | 'balanced' | 'lowLatency';
+```
+
+Platform-neutral names for `AdvertiseSettings.ADVERTISE_MODE_*`, which Android implements as advertising intervals of 1 s, 250 ms and 100 ms. Ignored on iOS.
+
+### AdvertisingTxPower
+
+```typescript
+type AdvertisingTxPower = 'ultraLow' | 'low' | 'medium' | 'high';
+```
+
+Platform-neutral names for `AdvertiseSettings.ADVERTISE_TX_POWER_*`. Ignored on iOS.
+
+### ManufacturerDataEntry
+
+```typescript
+interface ManufacturerDataEntry {
+  companyId: number;
+  data: number[];
+}
+```
+
+`companyId` is the 16-bit Bluetooth SIG Company Identifier; `0xFFFF` is reserved for development and testing.
+
+### ServiceDataEntry
+
+```typescript
+interface ServiceDataEntry {
+  uuid: string;
+  data: number[];
 }
 ```
 

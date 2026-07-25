@@ -62,64 +62,112 @@ export interface SendNotificationOptions {
 }
 
 /**
- * Advertising options that only mean something on Android, because the concept they describe has
- * no CoreBluetooth counterpart. Absent or empty, nothing about the advertisement changes.
+ * Discovery latency against battery. Android implements these as advertising intervals of 1 s, 250 ms
+ * and 100 ms; `lowLatency` is documented as having "the highest power consumption" and as something
+ * that "should not be used for continuous background advertising".
+ *
+ * Ignored on iOS, which chooses advertising intervals itself.
  */
+export type AdvertisingMode = 'lowPower' | 'balanced' | 'lowLatency';
+
+/**
+ * Radio transmit power, which sets how far the advertisement carries. Ignored on iOS, which offers
+ * no peripheral-role transmit power control.
+ */
+export type AdvertisingTxPower = 'ultraLow' | 'low' | 'medium' | 'high';
+
+/**
+ * A Manufacturer Specific Data advertisement structure. Android only; rejected on iOS with
+ * `ERR_UNSUPPORTED`.
+ */
+export interface ManufacturerDataEntry {
+  /** 16-bit Bluetooth SIG Company Identifier. `0xFFFF` is reserved for development and testing. */
+  companyId: number;
+  data: number[];
+}
+
+/** A Service Data advertisement structure. Android only; rejected on iOS with `ERR_UNSUPPORTED`. */
+export interface ServiceDataEntry {
+  /**
+   * Android documents this as the "16-bit UUID of the service the data is associated with", so a
+   * 4-hex-digit UUID is the portable choice — a 128-bit one costs 16 of the 31 available bytes.
+   */
+  uuid: string;
+  data: number[];
+}
+
+/** Options whose concept has no CoreBluetooth counterpart. Ignored on iOS. */
 export interface AndroidAdvertiseOptions {
   /**
-   * Include the device's *own* Bluetooth name in the scan response, via
-   * `AdvertiseData.Builder.setIncludeDeviceName(true)`.
-   *
-   * Defaults to `true` when `localName` is set and `false` otherwise, so a configuration that asks
-   * for a name still gets one advertised — just the device's own, not the requested string. See
-   * `localName` for why Android cannot advertise an arbitrary one.
-   *
-   * Costs the name's length plus two bytes of the scan response's 31-byte budget.
+   * Include the device's *own* Bluetooth name in the scan response. Defaults to `true` when
+   * `localName` is set, so a config that asks for a name still gets one advertised — just the
+   * device's own. Costs the name's length plus two bytes of the scan response's 31-byte budget.
    */
   includeDeviceName?: boolean;
   /**
-   * Rename the device's Bluetooth adapter to `localName`, so that the name a scanner sees is the
-   * requested one.
+   * Rename the device's Bluetooth adapter to `localName`, so a scanner sees the requested name.
    *
-   * **This changes the phone's system-wide Bluetooth name.** It is not scoped to this
-   * advertisement, this app, or this process: the new name appears in the device's own Bluetooth
-   * settings and to every peer the device talks to, over Classic as well as LE. It is the only way
-   * Android offers to control the advertised name, which is why it is exposed at all — but it is a
-   * decision for the app, not for a library, so it defaults to `false`.
+   * **This changes the phone's system-wide Bluetooth name**, not just this advertisement's: it
+   * appears in the device's own Bluetooth settings and to every peer, over Classic as well as LE. It
+   * is the only control Android offers over the advertised name, which is why it is exposed — but the
+   * choice belongs to the app, so it defaults to `false`.
    *
-   * The module records the name the device had and restores it when advertising stops
-   * (`stopAdvertising`, `stopServer`, or the module being destroyed). Restoration is best-effort:
-   * `BluetoothAdapter.setName` fails while the adapter is off, and a process killed while
-   * advertising never gets to run it, so the renamed adapter can outlive the app. Prefer
-   * `includeDeviceName` unless the exact advertised name genuinely matters.
+   * The previous name is restored on `stopAdvertising`, `stopServer` or module destruction, but only
+   * best-effort: `BluetoothAdapter.setName` fails while the adapter is off, and a killed process
+   * never runs it. Prefer `includeDeviceName` unless the exact advertised name matters.
    *
-   * Requires `BLUETOOTH_CONNECT` on API 31+, which `BluetoothAdapter.setName` enforces. Rejects
-   * with `ERR_ADVERTISE` when set without a `localName` to rename to. Ignored on iOS, which
-   * honours `localName` directly and has no such setting to change.
+   * Requires `BLUETOOTH_CONNECT` on API 31+. Rejects with `ERR_ADVERTISE` when set without a
+   * `localName`.
    */
   setAdapterName?: boolean;
 }
 
 export interface AdvertiseConfig {
   /**
-   * The local name to advertise.
+   * The local name to advertise. Honoured verbatim on iOS, as
+   * `CBAdvertisementDataLocalNameKey`.
    *
-   * **iOS honours this verbatim.** It becomes `CBAdvertisementDataLocalNameKey`, one of the two
-   * keys `CBPeripheralManager.startAdvertising` supports.
-   *
-   * **Android cannot.** The platform has no per-advertisement local name:
-   * `AdvertiseData.Builder` offers only `setIncludeDeviceName(boolean)`, and the name that flag
-   * includes is the *adapter's* — `BluetoothLeAdvertiser` sizes the field from
-   * `BluetoothAdapter.getNameLengthForAdvertise()`. There is no public API for writing an arbitrary
-   * Local Name into an advertisement. So on Android this string is not advertised; the device's own
-   * Bluetooth name is included instead (`android.includeDeviceName`), unless the app explicitly
-   * opts in to renaming the adapter with `android.setAdapterName`.
+   * **Android has no per-advertisement local name.** `AdvertiseData.Builder` offers only
+   * `setIncludeDeviceName(boolean)`, and the name that includes is the *adapter's* —
+   * `BluetoothLeAdvertiser` sizes the field from `BluetoothAdapter.getNameLengthForAdvertise()`. No
+   * public API writes an arbitrary Local Name into an advertisement. Android therefore advertises the
+   * device's own name instead (`android.includeDeviceName`), unless the app opts in to renaming the
+   * adapter with `android.setAdapterName`.
    */
   localName?: string;
   serviceUuids?: string[];
+  /** Include the radio's transmit power level in the scan response. Ignored on iOS, with a warning. */
   includeTxPowerLevel?: boolean;
+  /**
+   * Advertise as connectable, so centrals may open a connection. Defaults to `true`. `false` is
+   * rejected on iOS with `ERR_UNSUPPORTED`: `CBPeripheralManager` only implements the connectable
+   * peripheral role.
+   */
   connectable?: boolean;
-  /** Options with no cross-platform meaning. Ignored on iOS. */
+  /** Defaults to `lowPower`, matching the platform default. Ignored on iOS, with a warning. */
+  mode?: AdvertisingMode;
+  /** Defaults to `medium`, matching the platform default. Ignored on iOS, with a warning. */
+  txPowerLevel?: AdvertisingTxPower;
+  /**
+   * Stop advertising after this many milliseconds; `0`, the default, advertises until
+   * `stopAdvertising`. Must be 0–180000, the bound `AdvertiseSettings.Builder.setTimeout` enforces,
+   * applied on both platforms.
+   *
+   * iOS has no equivalent, so the module emulates it with a timer — same observable outcome, but only
+   * while the process is alive.
+   */
+  timeoutMs?: number;
+  /**
+   * Manufacturer Specific Data to advertise. Shares the advertisement's 31-byte budget with the
+   * service UUIDs, costing its data length plus four bytes per entry; an overrun rejects with
+   * `ERR_ADVERTISE`. Rejected on iOS with `ERR_UNSUPPORTED`.
+   */
+  manufacturerData?: ManufacturerDataEntry[];
+  /**
+   * Service Data to advertise. Shares the advertisement's 31-byte budget, as `manufacturerData` does.
+   * Rejected on iOS with `ERR_UNSUPPORTED`.
+   */
+  serviceData?: ServiceDataEntry[];
   android?: AndroidAdvertiseOptions;
 }
 

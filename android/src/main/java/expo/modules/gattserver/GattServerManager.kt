@@ -50,6 +50,12 @@ private const val CCCD_VALUE_LENGTH = 2
 private const val CCCD_NOTIFY_BIT = 0x0001
 private const val CCCD_INDICATE_BIT = 0x0002
 
+/**
+ * Longest duration `AdvertiseSettings.Builder.setTimeout` accepts — "May not exceed 180000
+ * milliseconds" — the Bluetooth SIG limit the platform names `LIMITED_ADVERTISING_MAX_MILLIS`.
+ */
+const val MAX_ADVERTISING_TIMEOUT_MS = 180_000
+
 /** ATT "Invalid Attribute Value Length" — Core Specification, Vol 3, Part F, Table 3.4. */
 private const val ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH = 0x0D
 
@@ -58,6 +64,46 @@ class MtuException(code: String, message: String) : GattServerException(code, me
 
 /** Identifies a characteristic within the configured GATT database. */
 data class CharacteristicAddress(val service: UUID, val characteristic: UUID)
+
+class ManufacturerData(val companyId: Int, val data: ByteArray)
+
+class ServiceData(val uuid: UUID, val data: ByteArray)
+
+/** Defaults deliberately match `AdvertiseSettings.Builder`'s own, rather than overriding them. */
+class AdvertiseOptions(
+  val localName: String? = null,
+  val serviceUuids: List<UUID> = emptyList(),
+  val includeTxPower: Boolean = false,
+  val connectable: Boolean = true,
+  val includeDeviceName: Boolean = false,
+  val setAdapterName: Boolean = false,
+  val mode: Int = AdvertiseSettings.ADVERTISE_MODE_LOW_POWER,
+  val txPowerLevel: Int = AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM,
+  val timeoutMs: Int = 0,
+  val manufacturerData: List<ManufacturerData> = emptyList(),
+  val serviceData: List<ServiceData> = emptyList(),
+)
+
+/** The platform implements these as advertising intervals of 1 s, 250 ms and 100 ms. */
+fun advertiseModeFor(name: String?): Int = when (name) {
+  null, "lowPower" -> AdvertiseSettings.ADVERTISE_MODE_LOW_POWER
+  "balanced" -> AdvertiseSettings.ADVERTISE_MODE_BALANCED
+  "lowLatency" -> AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY
+  else -> throw IllegalArgumentException(
+    "Invalid advertising mode \"$name\". Expected \"lowPower\", \"balanced\" or \"lowLatency\"."
+  )
+}
+
+fun advertiseTxPowerFor(name: String?): Int = when (name) {
+  "ultraLow" -> AdvertiseSettings.ADVERTISE_TX_POWER_ULTRA_LOW
+  "low" -> AdvertiseSettings.ADVERTISE_TX_POWER_LOW
+  null, "medium" -> AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM
+  "high" -> AdvertiseSettings.ADVERTISE_TX_POWER_HIGH
+  else -> throw IllegalArgumentException(
+    "Invalid advertising tx power level \"$name\". Expected \"ultraLow\", \"low\", \"medium\" or " +
+      "\"high\"."
+  )
+}
 
 /**
  * The link budget for one device, expressed in the units the public API uses.
@@ -131,9 +177,7 @@ class GattServerManager(
   private var advertiser: BluetoothLeAdvertiser? = null
   private var advertiseCallback: AdvertiseCallback? = null
   private var pendingAdvertiseResult: ((String?) -> Unit)? = null
-  // The adapter name the device had before this module renamed it, so the rename can be undone.
-  // `null` means the module has not renamed anything and has nothing to restore. Set from the
-  // caller's thread and read again during teardown, which may be another thread.
+  // Set from the caller's thread, read again during a teardown that may be on another.
   private val originalAdapterName = AtomicReference<String?>(null)
   private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
   private val deviceMtu = ConcurrentHashMap<String, Int>()
@@ -564,28 +608,17 @@ class GattServerManager(
   }
 
   /**
-   * Starts advertising.
-   *
-   * Android has no per-advertisement local name. `AdvertiseData.Builder` exposes only
-   * `setIncludeDeviceName(boolean)`, and the name that flag includes is the adapter's own — the
-   * platform sizes the field from `BluetoothAdapter.getNameLengthForAdvertise()`. So [localName] is
-   * not advertised as such: [includeDeviceName] advertises the name the device already has, and
-   * only [setAdapterName] makes the advertised name match [localName], by renaming the adapter —
-   * which changes the device's system-wide Bluetooth name and is therefore never done implicitly.
+   * Android has no per-advertisement local name: `AdvertiseData.Builder` offers only
+   * `setIncludeDeviceName(boolean)`, and the name that includes is the adapter's own — the platform
+   * sizes the field from `BluetoothAdapter.getNameLengthForAdvertise()`. So
+   * [AdvertiseOptions.localName] is never advertised as given; only
+   * [AdvertiseOptions.setAdapterName] makes the advertised name match it.
    */
-  fun startAdvertising(
-    localName: String?,
-    serviceUuids: List<String>?,
-    includeTxPower: Boolean,
-    connectable: Boolean,
-    includeDeviceName: Boolean,
-    setAdapterName: Boolean,
-    onResult: (error: String?) -> Unit,
-  ) {
+  fun startAdvertising(options: AdvertiseOptions, onResult: (error: String?) -> Unit) {
     val adapter = bluetoothAdapter
       ?: throw IllegalStateException("Bluetooth not available")
 
-    if (setAdapterName && localName == null) {
+    if (options.setAdapterName && options.localName == null) {
       throw IllegalArgumentException(
         "android.setAdapterName was requested without a localName for the adapter to be renamed to."
       )
@@ -594,31 +627,33 @@ class GattServerManager(
     pendingAdvertiseResult?.invoke("Advertising restarted")
     pendingAdvertiseResult = onResult
 
-    if (setAdapterName && localName != null) {
-      applyAdapterName(adapter, localName)
+    if (options.setAdapterName && options.localName != null) {
+      applyAdapterName(adapter, options.localName)
     }
 
     advertiser = adapter.bluetoothLeAdvertiser
       ?: throw IllegalStateException("BLE advertising not supported on this device")
 
     val settings = AdvertiseSettings.Builder()
-      .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-      .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
-      .setConnectable(connectable)
-      .setTimeout(0)
+      .setAdvertiseMode(options.mode)
+      .setTxPowerLevel(options.txPowerLevel)
+      .setConnectable(options.connectable)
+      .setTimeout(options.timeoutMs)
       .build()
 
+    // Anything a passive scanner has to see goes in the advertisement and shares its 31-byte budget;
+    // the name and transmit power go in the scan response so they do not compete for it.
     val advData = AdvertiseData.Builder()
       .setIncludeDeviceName(false)
       .setIncludeTxPowerLevel(false)
 
-    serviceUuids?.forEach { uuid ->
-      advData.addServiceUuid(ParcelUuid(UUID.fromString(uuid)))
-    }
+    options.serviceUuids.forEach { uuid -> advData.addServiceUuid(ParcelUuid(uuid)) }
+    options.manufacturerData.forEach { advData.addManufacturerData(it.companyId, it.data) }
+    options.serviceData.forEach { advData.addServiceData(ParcelUuid(it.uuid), it.data) }
 
     val scanResponse = AdvertiseData.Builder()
-      .setIncludeDeviceName(includeDeviceName)
-      .setIncludeTxPowerLevel(includeTxPower)
+      .setIncludeDeviceName(options.includeDeviceName)
+      .setIncludeTxPowerLevel(options.includeTxPower)
       .build()
 
     val callback = object : AdvertiseCallback() {
@@ -629,7 +664,9 @@ class GattServerManager(
       }
       override fun onStartFailure(errorCode: Int) {
         val msg = when (errorCode) {
-          ADVERTISE_FAILED_DATA_TOO_LARGE -> "Advertise data too large"
+          ADVERTISE_FAILED_DATA_TOO_LARGE ->
+            "Advertise data too large — the advertisement and the scan response are each limited " +
+              "to 31 bytes, which the service UUIDs, manufacturer data and service data share"
           ADVERTISE_FAILED_TOO_MANY_ADVERTISERS -> "Too many advertisers"
           ADVERTISE_FAILED_ALREADY_STARTED -> "Advertising already started"
           ADVERTISE_FAILED_INTERNAL_ERROR -> "Internal error"
@@ -654,38 +691,33 @@ class GattServerManager(
   }
 
   /**
-   * Renames the adapter, remembering the name it had first so [restoreAdapterName] can put it back.
-   *
    * `BluetoothAdapter.setName` changes the device's system-wide Bluetooth name, not this
    * advertisement's — it is visible in the phone's own Bluetooth settings and to every peer, over
-   * Classic as well as LE. Only ever called when the consumer explicitly asked for it.
+   * Classic as well as LE. Only ever called when the consumer explicitly asked for it, and undone by
+   * [restoreAdapterName].
    */
   private fun applyAdapterName(adapter: BluetoothAdapter, name: String) {
-    // Recorded only on the first rename, so restarting advertising repeatedly still restores the
-    // name the device actually had rather than the previous advertisement's.
+    // compareAndSet, so repeatedly restarting advertising still restores the device's own name
+    // rather than the previous advertisement's.
     val previous = adapter.name
     if (previous == null) {
-      // Documented as possible ("or null on error"), and without it there is nothing to restore to.
       Log.w(TAG, "The current adapter name is unavailable, so it cannot be restored later")
     } else {
       originalAdapterName.compareAndSet(null, previous)
     }
     if (!adapter.setName(name)) {
-      // `setName` returns false while the adapter is off, and never throws.
       Log.w(TAG, "Could not set the adapter name to \"$name\"")
     }
   }
 
-  /** Puts back the adapter name the device had before [applyAdapterName] changed it. */
   private fun restoreAdapterName() {
     val previous = originalAdapterName.get() ?: return
     val adapter = bluetoothAdapter ?: return
     if (adapter.setName(previous)) {
       originalAdapterName.compareAndSet(previous, null)
-      Log.d(TAG, "Restored the adapter name to \"$previous\"")
     } else {
-      // Kept so a later teardown can try again — `setName` fails while the adapter is off, which is
-      // exactly when a teardown is most likely to run.
+      // Retained for a later attempt: `setName` fails while the adapter is off, which is exactly
+      // when a teardown is most likely to run.
       Log.w(TAG, "Could not restore the adapter name to \"$previous\" yet")
     }
   }

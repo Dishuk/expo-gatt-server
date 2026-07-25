@@ -28,6 +28,7 @@ enum GattServerError: Error {
   case notifyQueueFull(limit: Int)
   case deviceDisconnected(deviceId: String)
   case noSubscriber(deviceId: String, characteristic: String)
+  case advertisingOptionUnsupported(option: String, reason: String)
 
   var code: String {
     switch self {
@@ -43,6 +44,7 @@ enum GattServerError: Error {
     case .notifyQueueFull: return "ERR_NOTIFY_QUEUE_FULL"
     case .deviceDisconnected: return "ERR_DEVICE_DISCONNECTED"
     case .noSubscriber: return "ERR_NO_SUBSCRIBER"
+    case .advertisingOptionUnsupported: return "ERR_UNSUPPORTED"
     }
   }
 
@@ -89,6 +91,10 @@ enum GattServerError: Error {
       return "Device \(deviceId) has not subscribed to characteristic \(characteristic). " +
         "Wait for onCharacteristicSubscribed. CoreBluetooth only transmits to subscribed " +
         "centrals, so this cannot be overridden on iOS."
+    case .advertisingOptionUnsupported(let option, let reason):
+      return "iOS cannot honour the advertising option \"\(option)\": \(reason) " +
+        "CBPeripheralManager.startAdvertising supports only CBAdvertisementDataLocalNameKey and " +
+        "CBAdvertisementDataServiceUUIDsKey."
     }
   }
 }
@@ -197,6 +203,8 @@ class GattServerManager: NSObject {
   private var openCompletion: ((Error?) -> Void)?
   private var readinessWaiters: [(Error?) -> Void] = []
   private var advertisingCompletion: ((Error?) -> Void)?
+  /// Only ever touched on the main queue.
+  private var advertisingTimeout: DispatchWorkItem?
   private var addedServices: [CBUUID: CBMutableService] = [:]
 
   /// Centrals the module believes are connected, keyed by `CBCentral.identifier`.
@@ -342,7 +350,16 @@ class GattServerManager: NSObject {
     }
   }
 
-  func startAdvertising(localName: String?, serviceUuids: [CBUUID]?, completion: @escaping (Error?) -> Void) {
+  /// `startAdvertising:` documents its complete set of supported keys as
+  /// `CBAdvertisementDataLocalNameKey` and `CBAdvertisementDataServiceUUIDsKey`, so those are the
+  /// only two built here. Every other option is rejected before it reaches this point, except
+  /// `timeoutMs`, which is emulated.
+  func startAdvertising(
+    localName: String?,
+    serviceUuids: [CBUUID]?,
+    timeoutMs: Int,
+    completion: @escaping (Error?) -> Void
+  ) {
     if let pending = advertisingCompletion {
       advertisingCompletion = nil
       pending(NSError(domain: "ExpoGattServer", code: 0, userInfo: [NSLocalizedDescriptionKey: "Advertising restarted"]))
@@ -355,15 +372,38 @@ class GattServerManager: NSObject {
     if let uuids = serviceUuids, !uuids.isEmpty {
       advertisementData[CBAdvertisementDataServiceUUIDsKey] = uuids
     }
+    cancelAdvertisingTimeout()
     peripheralManager?.startAdvertising(advertisementData)
+    scheduleAdvertisingTimeout(timeoutMs)
   }
 
   func stopAdvertising() {
+    cancelAdvertisingTimeout()
     peripheralManager?.stopAdvertising()
     if let pending = advertisingCompletion {
       advertisingCompletion = nil
       pending(NSError(domain: "ExpoGattServer", code: 0, userInfo: [NSLocalizedDescriptionKey: "Advertising stopped"]))
     }
+  }
+
+  /// Emulates `AdvertiseSettings.setTimeout`, which CoreBluetooth has no equivalent for. Android
+  /// simply stops advertising at the limit, with no error and no callback, so that is what this
+  /// reproduces.
+  private func scheduleAdvertisingTimeout(_ timeoutMs: Int) {
+    guard timeoutMs > 0 else { return }
+    let work = DispatchWorkItem { [weak self] in
+      guard let self = self else { return }
+      // Cleared first, so `stopAdvertising` does not try to cancel the item running it.
+      self.advertisingTimeout = nil
+      self.stopAdvertising()
+    }
+    advertisingTimeout = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(timeoutMs), execute: work)
+  }
+
+  private func cancelAdvertisingTimeout() {
+    advertisingTimeout?.cancel()
+    advertisingTimeout = nil
   }
 
   /// Sends one notification and reports the outcome through `completion` — with `nil` once

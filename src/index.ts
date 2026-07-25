@@ -1,9 +1,11 @@
-import type { EventSubscription } from 'expo-modules-core';
+import { Platform, type EventSubscription } from 'expo-modules-core';
 
 import ExpoGattServerModule from './ExpoGattServerModule';
 import type {
   GattServiceConfig,
   AdvertiseConfig,
+  AdvertisingMode,
+  AdvertisingTxPower,
   SendNotificationOptions,
   DeviceConnectedEvent,
   DeviceDisconnectedEvent,
@@ -26,6 +28,10 @@ export {
   type CharacteristicDelegateConfig,
   type AdvertiseConfig,
   type AndroidAdvertiseOptions,
+  type AdvertisingMode,
+  type AdvertisingTxPower,
+  type ManufacturerDataEntry,
+  type ServiceDataEntry,
   type SendNotificationOptions,
   type CharacteristicProperty,
   type CharacteristicPermission,
@@ -105,9 +111,80 @@ export async function createServer(services: GattServiceConfig[]): Promise<void>
   return ExpoGattServerModule.createServer(services);
 }
 
+/**
+ * The longest duration `AdvertiseSettings.Builder.setTimeout` accepts. Applied on both platforms, so
+ * one configuration behaves the same either side.
+ */
+const MAX_ADVERTISING_TIMEOUT_MS = 180_000;
+
+const ADVERTISING_MODES: AdvertisingMode[] = ['lowPower', 'balanced', 'lowLatency'];
+const ADVERTISING_TX_POWERS: AdvertisingTxPower[] = ['ultraLow', 'low', 'medium', 'high'];
+
+function assertOneOf<T extends string>(value: unknown, allowed: T[], field: string): void {
+  if (!allowed.includes(value as T)) {
+    throw new Error(
+      `Invalid ${field} ${JSON.stringify(value)}. Expected one of ${allowed
+        .map((option) => JSON.stringify(option))
+        .join(', ')}.`,
+    );
+  }
+}
+
 export async function startAdvertising(config: AdvertiseConfig = {}): Promise<void> {
   for (const uuid of config.serviceUuids ?? []) {
     assertValidUuid(uuid, 'service');
+  }
+  if (config.mode !== undefined) {
+    assertOneOf(config.mode, ADVERTISING_MODES, 'advertising mode');
+  }
+  if (config.txPowerLevel !== undefined) {
+    assertOneOf(config.txPowerLevel, ADVERTISING_TX_POWERS, 'advertising tx power level');
+  }
+  if (config.timeoutMs !== undefined) {
+    if (
+      !Number.isInteger(config.timeoutMs) ||
+      config.timeoutMs < 0 ||
+      config.timeoutMs > MAX_ADVERTISING_TIMEOUT_MS
+    ) {
+      throw new Error(
+        `Invalid advertising timeout ${JSON.stringify(config.timeoutMs)}. Expected an integer ` +
+          `between 0 and ${MAX_ADVERTISING_TIMEOUT_MS} milliseconds, where 0 means no time limit.`,
+      );
+    }
+  }
+  for (const entry of config.manufacturerData ?? []) {
+    // 16-bit field, so a wider value cannot be transmitted; Android only rejects negative ids.
+    if (!Number.isInteger(entry?.companyId) || entry.companyId < 0 || entry.companyId > 0xffff) {
+      throw new Error(
+        `Invalid manufacturer company id ${JSON.stringify(entry?.companyId)}. A Bluetooth SIG ` +
+          'Company Identifier is a 16-bit value, so it must be an integer between 0 and 65535.',
+      );
+    }
+    assertValidBytes(entry.data, 'manufacturer');
+  }
+  for (const entry of config.serviceData ?? []) {
+    assertValidUuid(entry?.uuid, 'service data');
+    assertValidBytes(entry.data, 'service data');
+  }
+  if (Platform.OS === 'ios') {
+    // Warned about rather than rejected: these only tune the radio, so failing the call would force
+    // a platform branch on every caller. The options iOS cannot express at all reject natively.
+    const ignored = (
+      [
+        ['mode', config.mode],
+        ['txPowerLevel', config.txPowerLevel],
+        ['includeTxPowerLevel', config.includeTxPowerLevel],
+      ] as const
+    )
+      .filter(([, value]) => value !== undefined)
+      .map(([key]) => key);
+    if (ignored.length > 0) {
+      console.warn(
+        `[expo-gatt-server] startAdvertising: iOS ignores ${ignored.join(', ')}. ` +
+          'CBPeripheralManager.startAdvertising supports only CBAdvertisementDataLocalNameKey and ' +
+          'CBAdvertisementDataServiceUUIDsKey, so there is nowhere to put them.',
+      );
+    }
   }
   return ExpoGattServerModule.startAdvertising(config);
 }

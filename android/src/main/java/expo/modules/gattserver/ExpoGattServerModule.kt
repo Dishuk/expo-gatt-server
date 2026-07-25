@@ -112,14 +112,13 @@ class ExpoGattServerModule : Module() {
       val localName = config["localName"] as? String
       val androidOptions = config["android"] as? Map<*, *>
       val setAdapterName = androidOptions?.get("setAdapterName") as? Boolean ?: false
-      // A configuration that asks for a name still gets one advertised by default — the device's
-      // own, since Android has no per-advertisement local name to put the requested string in.
+      // A config that asks for a name still gets one advertised — the device's own, since Android
+      // has nowhere to put the requested string.
       val includeDeviceName =
         androidOptions?.get("includeDeviceName") as? Boolean ?: (localName != null)
 
-      // Renaming the adapter goes through `BluetoothAdapter.setName`, which enforces
-      // BLUETOOTH_CONNECT on API 31+. Checked here so the opt-in fails with a permission error
-      // rather than a SecurityException from the Bluetooth stack.
+      // `BluetoothAdapter.setName` enforces BLUETOOTH_CONNECT on API 31+; checked here so the opt-in
+      // fails with a permission error rather than a SecurityException from the Bluetooth stack.
       if (setAdapterName && missingPermission(android.Manifest.permission.BLUETOOTH_CONNECT)) {
         promise.reject(
           "ERR_PERMISSION",
@@ -130,13 +129,23 @@ class ExpoGattServerModule : Module() {
       }
 
       try {
-        val serviceUuids = (config["serviceUuids"] as? List<*>)?.mapNotNull { it as? String }
-        val includeTxPower = config["includeTxPowerLevel"] as? Boolean ?: false
-        val connectable = config["connectable"] as? Boolean ?: true
-        mgr.startAdvertising(
-          localName, serviceUuids, includeTxPower, connectable,
-          includeDeviceName, setAdapterName
-        ) { error ->
+        val options = AdvertiseOptions(
+          localName = localName,
+          serviceUuids = (config["serviceUuids"] as? List<*>)
+            ?.mapNotNull { it as? String }
+            ?.map { UUID.fromString(it) }
+            ?: emptyList(),
+          includeTxPower = config["includeTxPowerLevel"] as? Boolean ?: false,
+          connectable = config["connectable"] as? Boolean ?: true,
+          includeDeviceName = includeDeviceName,
+          setAdapterName = setAdapterName,
+          mode = advertiseModeFor(config["mode"] as? String),
+          txPowerLevel = advertiseTxPowerFor(config["txPowerLevel"] as? String),
+          timeoutMs = parseAdvertisingTimeout(config["timeoutMs"]),
+          manufacturerData = parseManufacturerData(config["manufacturerData"]),
+          serviceData = parseServiceData(config["serviceData"]),
+        )
+        mgr.startAdvertising(options) { error ->
           if (error != null) {
             promise.reject("ERR_ADVERTISE", error, null)
           } else {
@@ -324,6 +333,56 @@ class ExpoGattServerModule : Module() {
       bytes[index] = intValue.toByte()
     }
     return bytes
+  }
+
+  /**
+   * Checked before `AdvertiseSettings.Builder.setTimeout` sees it, whose own message
+   * ("timeoutMillis invalid") does not say which option was wrong.
+   */
+  private fun parseAdvertisingTimeout(value: Any?): Int {
+    if (value == null) return 0
+    val number = value as? Number
+    val millis = number?.toInt()
+    if (number == null || millis == null || number.toDouble() != millis.toDouble() ||
+      millis < 0 || millis > MAX_ADVERTISING_TIMEOUT_MS
+    ) {
+      throw IllegalArgumentException(
+        "Invalid advertising timeout $value. Expected an integer between 0 and " +
+          "$MAX_ADVERTISING_TIMEOUT_MS milliseconds, where 0 means no time limit."
+      )
+    }
+    return millis
+  }
+
+  private fun parseManufacturerData(value: Any?): List<ManufacturerData> {
+    val list = value as? List<*> ?: return emptyList()
+    return list.mapNotNull { item ->
+      val map = item as? Map<*, *> ?: return@mapNotNull null
+      val number = map["companyId"] as? Number
+      val companyId = number?.toInt()
+      // 16-bit field, so a wider value is not transmissible; `addManufacturerData` only rejects
+      // negative ids.
+      if (number == null || companyId == null || number.toDouble() != companyId.toDouble() ||
+        companyId !in 0..0xFFFF
+      ) {
+        throw IllegalArgumentException(
+          "Invalid manufacturer company id ${map["companyId"]}. A Bluetooth SIG Company " +
+            "Identifier is a 16-bit value, so it must be an integer between 0 and 65535."
+        )
+      }
+      val data = (map["data"] as? List<*>) ?: emptyList<Any>()
+      ManufacturerData(companyId, toByteArray(data, "manufacturer"))
+    }
+  }
+
+  private fun parseServiceData(value: Any?): List<ServiceData> {
+    val list = value as? List<*> ?: return emptyList()
+    return list.mapNotNull { item ->
+      val map = item as? Map<*, *> ?: return@mapNotNull null
+      val uuid = UUID.fromString(map["uuid"] as String)
+      val data = (map["data"] as? List<*>) ?: emptyList<Any>()
+      ServiceData(uuid, toByteArray(data, "service data"))
+    }
   }
 
   /**

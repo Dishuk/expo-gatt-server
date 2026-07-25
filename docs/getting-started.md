@@ -128,10 +128,17 @@ await startAdvertising({
 |--------|------|---------|-------------|
 | `localName` | `string` | -- | Local name to advertise. Honoured on iOS only -- Android has no per-advertisement local name |
 | `serviceUuids` | `string[]` | -- | Service UUIDs to include in advertisement |
-| `includeTxPowerLevel` | `boolean` | `false` | Include TX power in advertisement data |
-| `connectable` | `boolean` | `true` | Whether the device accepts connections |
+| `includeTxPowerLevel` | `boolean` | `false` | Include TX power in advertisement data. Android only |
+| `connectable` | `boolean` | `true` | Whether the device accepts connections. `false` is Android only |
+| `mode` | `'lowPower' \| 'balanced' \| 'lowLatency'` | `'lowPower'` | Discovery latency against battery. Android only |
+| `txPowerLevel` | `'ultraLow' \| 'low' \| 'medium' \| 'high'` | `'medium'` | Advertising range. Android only |
+| `timeoutMs` | `number` | `0` | Stop advertising after this many ms; `0` means no limit |
+| `manufacturerData` | `{ companyId, data }[]` | `[]` | Manufacturer Specific Data. Android only |
+| `serviceData` | `{ uuid, data }[]` | `[]` | Service Data. Android only |
 | `android.includeDeviceName` | `boolean` | `localName !== undefined` | Advertise the device's own Bluetooth name |
 | `android.setAdapterName` | `boolean` | `false` | Rename the phone's system-wide Bluetooth name to `localName` |
+
+iOS supports only two advertisement keys in the peripheral role, so the options marked "Android only" cannot be expressed there. `manufacturerData`, `serviceData` and `connectable: false` are **rejected** on iOS rather than dropped, because a scanner filtering on them would never find the peripheral; `mode`, `txPowerLevel` and `includeTxPowerLevel` are accepted and warned about, since they only tune the radio. See [Platform support for advertising options](./api.md#platform-support-for-advertising-options).
 
 On Android, `localName` cannot be advertised as given: the platform only offers "include the adapter's name". By default the device's existing name is advertised instead. Set `android.setAdapterName` to opt in to renaming the adapter, which the module reverses when advertising stops. See [the API reference](./api.md#the-advertised-local-name) for the details and caveats.
 

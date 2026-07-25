@@ -128,12 +128,18 @@ public class ExpoGattServerModule: Module {
       let localName = config["localName"] as? String
       let serviceUuids: [CBUUID]?
       do {
+        try self.rejectUnsupportedAdvertisingOptions(config)
         serviceUuids = try (config["serviceUuids"] as? [String])?
           .map { try self.parseUuid($0, field: "service") }
+      } catch let error as GattServerError {
+        promise.reject(error.code, error.message)
+        return
       } catch {
         promise.reject("ERR_ADVERTISE", error.localizedDescription)
         return
       }
+      // Already range-checked in JavaScript against the same bound Android enforces.
+      let timeoutMs = (config["timeoutMs"] as? NSNumber)?.intValue ?? 0
 
       // Waits for a definitive powered-on state instead of sampling it. A synchronous read is
       // `.unknown` until peripheralManagerDidUpdateState fires, which used to reject perfectly
@@ -147,7 +153,9 @@ public class ExpoGattServerModule: Module {
           promise.reject("ERR_BLUETOOTH", readinessError.localizedDescription)
           return
         }
-        mgr.startAdvertising(localName: localName, serviceUuids: serviceUuids) { error in
+        mgr.startAdvertising(
+          localName: localName, serviceUuids: serviceUuids, timeoutMs: timeoutMs
+        ) { error in
           if let error = error {
             promise.reject("ERR_ADVERTISE", error.localizedDescription)
           } else {
@@ -273,6 +281,33 @@ public class ExpoGattServerModule: Module {
     OnDestroy {
       self.manager?.stop()
       self.manager = nil
+    }
+  }
+
+  /// `CBPeripheralManager.startAdvertising` silently ignores every key but the local name and
+  /// service UUIDs. Only the options that change what a scanner *observes* are rejected here, since
+  /// dropping those yields a peripheral that appears to advertise yet can never be found by a
+  /// central filtering on them. `mode`, `txPowerLevel` and `includeTxPowerLevel` are merely radio
+  /// hints, so they are warned about in JavaScript instead — rejecting them would force every
+  /// cross-platform caller to branch on the platform just to tune Android's battery use.
+  private func rejectUnsupportedAdvertisingOptions(_ config: [String: Any]) throws {
+    if let entries = config["manufacturerData"] as? [[String: Any]], !entries.isEmpty {
+      throw GattServerError.advertisingOptionUnsupported(
+        option: "manufacturerData",
+        reason: "there is no peripheral-role key for Manufacturer Specific Data."
+      )
+    }
+    if let entries = config["serviceData"] as? [[String: Any]], !entries.isEmpty {
+      throw GattServerError.advertisingOptionUnsupported(
+        option: "serviceData",
+        reason: "there is no peripheral-role key for Service Data."
+      )
+    }
+    if let connectable = config["connectable"] as? Bool, !connectable {
+      throw GattServerError.advertisingOptionUnsupported(
+        option: "connectable",
+        reason: "CBPeripheralManager only ever advertises a connectable peripheral."
+      )
     }
   }
 

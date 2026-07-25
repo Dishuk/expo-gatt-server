@@ -17,12 +17,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Error codes `ERR_NO_SUBSCRIBER`, `ERR_NOTIFY_QUEUE_FULL`, `ERR_DEVICE_DISCONNECTED`,
   `ERR_CHARACTERISTIC_NOT_FOUND`
 - `AdvertiseConfig.android` with `includeDeviceName` and `setAdapterName`
+- `AdvertiseConfig` options `mode`, `txPowerLevel`, `timeoutMs`, `manufacturerData` and
+  `serviceData`, with the types `AdvertisingMode`, `AdvertisingTxPower`, `ManufacturerDataEntry` and
+  `ServiceDataEntry`
+- Error code `ERR_UNSUPPORTED`, for advertising options iOS cannot express
 
 ### Changed
 
 - **Breaking:** Android no longer renames the device's Bluetooth adapter when `localName` is set.
   Android has no per-advertisement local name, so the device's own name is advertised instead. Set
   `android.setAdapterName` to opt back in to the rename, which is now undone when advertising stops
+- **Breaking:** Android advertises in `lowPower` mode by default, matching the platform's own
+  default, instead of the hardcoded `lowLatency`. Pass `mode: 'lowLatency'` for the old behaviour
+- **Breaking:** iOS rejects `manufacturerData`, `serviceData` and `connectable: false` with
+  `ERR_UNSUPPORTED` instead of ignoring them; `mode`, `txPowerLevel` and `includeTxPowerLevel` are
+  still ignored there but now log a warning
 
 - `sendNotification` resolves when the platform reports the notification as delivered, and queues
   sends behind one still in flight instead of letting the platform drop them
