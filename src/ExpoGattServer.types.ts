@@ -46,6 +46,21 @@ export interface GattServiceConfig {
   characteristics: GattCharacteristicConfig[];
 }
 
+export interface SendNotificationOptions {
+  /**
+   * Refuse the send with `ERR_NO_SUBSCRIBER` when the target device has not enabled notifications
+   * or indications on the characteristic. Defaults to `true`, so a notification nobody asked for
+   * is reported instead of silently going nowhere.
+   *
+   * Setting it to `false` sends anyway on Android, where the platform transmits without consulting
+   * the Client Characteristic Configuration descriptor — useful for a peer whose descriptor state
+   * the app knows better than the stack does. It changes nothing on iOS:
+   * `updateValue(_:for:onSubscribedCentrals:)` ignores centrals that have not subscribed, so there
+   * is no send to force and `ERR_NO_SUBSCRIBER` is still reported.
+   */
+  requireSubscription?: boolean;
+}
+
 export interface AdvertiseConfig {
   localName?: string;
   serviceUuids?: string[];

@@ -72,7 +72,7 @@ To advertise and handle requests while the app is backgrounded, enable the `blue
 |---------|-------|-----|
 | `createServer` rejects with permission error | Bluetooth authorization not granted | Check `NSBluetoothAlwaysUsageDescription` is set, user accepted the prompt |
 | `startAdvertising` rejects | Bluetooth not powered on | Ensure Bluetooth is enabled in Settings |
-| Notifications fail silently | No subscribers | The central must subscribe to the characteristic's CCCD before receiving notifications |
+| `sendNotification` rejects with `ERR_NO_SUBSCRIBER` | No subscribers | The central must enable notifications or indications on the characteristic first -- wait for `onCharacteristicSubscribed` |
 | `onDeviceConnected` not firing | iOS fires this on first subscription, not raw connection | This is expected behavior -- wait for the central to subscribe |
 
 ## Android

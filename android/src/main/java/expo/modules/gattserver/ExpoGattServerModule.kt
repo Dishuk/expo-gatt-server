@@ -119,6 +119,7 @@ class ExpoGattServerModule : Module() {
       characteristicUuid: String,
       value: List<Int>,
       confirm: Boolean,
+      requireSubscription: Boolean,
       promise: Promise ->
       val mgr = manager ?: run {
         promise.reject("ERR_NO_SERVER", "Server not created", null)
@@ -128,7 +129,9 @@ class ExpoGattServerModule : Module() {
         val bytes = toByteArray(value, "notification")
         // Resolves once the platform has confirmed the notification was delivered, so a caller
         // that awaits it can pace itself against the link instead of overrunning it.
-        mgr.sendNotification(deviceId, serviceUuid, characteristicUuid, bytes, confirm) { error ->
+        mgr.sendNotification(
+          deviceId, serviceUuid, characteristicUuid, bytes, confirm, requireSubscription
+        ) { error ->
           if (error != null) {
             promise.reject(error.code, error.message, error)
           } else {

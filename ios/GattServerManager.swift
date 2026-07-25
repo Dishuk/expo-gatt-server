@@ -2,10 +2,11 @@ import CoreBluetooth
 
 private let defaultAttMtuPayload = 20 // ATT_MTU 23 - 3 header bytes
 
-/// Upper bound on notifications parked while the CoreBluetooth transmit queue is full. Without a
-/// bound a producer that outruns the link would grow the queue forever; exceeding it fails the
+/// Upper bound on notifications parked while the CoreBluetooth transmit queue is full. That queue
+/// belongs to the peripheral manager rather than to any one central, so the bound is shared too.
+/// Without it a producer that outruns the link would grow the queue forever; exceeding it fails the
 /// call rather than dropping a payload silently.
-private let maxQueuedNotificationsPerDevice = 64
+private let maxQueuedNotifications = 64
 
 enum GattServerError: Error {
   case mtuSmall(maxPayload: Int, payloadSize: Int)
@@ -15,8 +16,9 @@ enum GattServerError: Error {
   case serviceRegistrationFailed(uuid: String, reason: String)
   case serverStopped
   case characteristicNotFound(service: String, characteristic: String)
-  case notifyQueueFull(deviceId: String, limit: Int)
+  case notifyQueueFull(limit: Int)
   case deviceDisconnected(deviceId: String)
+  case noSubscriber(deviceId: String, characteristic: String)
 
   var code: String {
     switch self {
@@ -30,6 +32,7 @@ enum GattServerError: Error {
     case .characteristicNotFound: return "ERR_CHARACTERISTIC_NOT_FOUND"
     case .notifyQueueFull: return "ERR_NOTIFY_QUEUE_FULL"
     case .deviceDisconnected: return "ERR_DEVICE_DISCONNECTED"
+    case .noSubscriber: return "ERR_NO_SUBSCRIBER"
     }
   }
 
@@ -55,11 +58,17 @@ enum GattServerError: Error {
       return "Server was stopped before it finished opening"
     case .characteristicNotFound(let service, let characteristic):
       return "Characteristic \(characteristic) was not found in service \(service)"
-    case .notifyQueueFull(let deviceId, let limit):
-      return "Device \(deviceId) already has \(limit) notifications waiting to be sent. " +
+    case .notifyQueueFull(let limit):
+      return "\(limit) notifications are already waiting for the transmit queue to drain. " +
         "Wait for earlier sends to resolve before queueing more."
     case .deviceDisconnected(let deviceId):
       return "Device \(deviceId) disconnected"
+    case .noSubscriber(let deviceId, let characteristic):
+      // CoreBluetooth "ignores any centrals that haven't subscribed to the characteristic's
+      // value", so there is nothing to override on iOS — the send genuinely cannot happen.
+      return "Device \(deviceId) has not subscribed to characteristic \(characteristic). " +
+        "Wait for onCharacteristicSubscribed. CoreBluetooth only transmits to subscribed " +
+        "centrals, so this cannot be overridden on iOS."
     }
   }
 }
@@ -313,6 +322,10 @@ class GattServerManager: NSObject {
   /// A payload the transmit queue cannot take is retained and resent, in order, when the manager
   /// reports it is ready again. Nothing else is resent: an unrelated central never receives an
   /// unsolicited update because another central's send was throttled.
+  ///
+  /// A central that has not subscribed is reported as `ERR_NO_SUBSCRIBER` rather than treated as a
+  /// successful send. There is no override on iOS: `updateValue(_:for:onSubscribedCentrals:)`
+  /// "ignores any centrals that haven't subscribed to the characteristic's value".
   func sendNotification(
     deviceId: String, serviceUuid: String,
     characteristicUuid: String, value: Data,
@@ -329,14 +342,16 @@ class GattServerManager: NSObject {
       )
     }
 
+    // The mirrored value is updated either way, so a read still serves the latest value even when
+    // no one is listening for it.
+    characteristicValues[charUUID] = value
+
     guard let centrals = subscribedCentrals[deviceId],
           let central = centrals[charUUID] else {
-      characteristicValues[charUUID] = value
-      completion(nil)
-      return
+      throw GattServerError.noSubscriber(
+        deviceId: deviceId, characteristic: characteristicUuid
+      )
     }
-
-    characteristicValues[charUUID] = value
 
     let maxPayload = central.maximumUpdateValueLength
     var deferredError: GattServerError?
@@ -359,10 +374,8 @@ class GattServerManager: NSObject {
     // Anything already waiting has to go out first, or a later payload would overtake an earlier
     // one on the same characteristic.
     guard pendingNotifications.isEmpty else {
-      guard pendingNotifications.count < maxQueuedNotificationsPerDevice else {
-        throw GattServerError.notifyQueueFull(
-          deviceId: deviceId, limit: maxQueuedNotificationsPerDevice
-        )
+      guard pendingNotifications.count < maxQueuedNotifications else {
+        throw GattServerError.notifyQueueFull(limit: maxQueuedNotifications)
       }
       pendingNotifications.append(entry)
       return

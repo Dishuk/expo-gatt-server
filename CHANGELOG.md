@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `onCharacteristicSubscribed` / `onCharacteristicUnsubscribed` events, with
+  `addCharacteristicSubscribedListener` and `addCharacteristicUnsubscribedListener`
+- Per-device, per-characteristic Client Characteristic Configuration tracking on Android, as the
+  Bluetooth specification requires
+- `sendNotification` option `requireSubscription` for sending without a subscription on Android
+- Error codes `ERR_NO_SUBSCRIBER`, `ERR_NOTIFY_QUEUE_FULL`, `ERR_DEVICE_DISCONNECTED`,
+  `ERR_CHARACTERISTIC_NOT_FOUND`
+
+### Changed
+
+- `sendNotification` resolves when the platform reports the notification as delivered, and queues
+  sends behind one still in flight instead of letting the platform drop them
+- `sendNotification` rejects with `ERR_NO_SUBSCRIBER` instead of resolving when nothing is
+  subscribed to the characteristic
+- `onNotificationSent` reports the characteristic the notification actually carried
+- iOS resends only the payload the transmit queue refused, instead of pushing cached values to every
+  subscribed central
+
 ## [0.1.0] - 2025-05-23
 
 ### Added

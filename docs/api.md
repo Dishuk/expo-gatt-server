@@ -80,6 +80,7 @@ sendNotification(
   characteristicUuid: string,
   value: number[],
   confirm?: boolean,
+  options?: SendNotificationOptions,
 ): Promise<void>
 ```
 
@@ -92,6 +93,19 @@ Send a notification or indication to a connected central.
 | `characteristicUuid` | `string` | -- | Characteristic to update |
 | `value` | `number[]` | -- | Byte array payload |
 | `confirm` | `boolean` | `false` | `true` for indication (acknowledged), `false` for notification |
+| `options.requireSubscription` | `boolean` | `true` | Refuse the send when the device has not subscribed |
+
+Rejects with `ERR_NO_SUBSCRIBER` when the target device has not enabled notifications or
+indications on the characteristic. Wait for
+[`addCharacteristicSubscribedListener`](#addcharacteristicsubscribedlistener) before streaming.
+
+Passing `requireSubscription: false` sends anyway on Android, where the platform transmits without
+consulting the Client Characteristic Configuration descriptor. It changes nothing on iOS:
+`updateValue(_:for:onSubscribedCentrals:)` "ignores any centrals that haven't subscribed to the
+characteristic's value", so there is no send to force and `ERR_NO_SUBSCRIBER` is still reported.
+
+The mirrored characteristic value is updated whether or not the notification could be sent, so a
+subsequent read still serves the latest value.
 
 The returned promise resolves once the platform reports the notification as delivered, not when the
 call is handed to the Bluetooth stack. Calls made while an earlier notification for the same device
@@ -466,3 +480,4 @@ Errors thrown by `sendNotification` and `sendResponse` include a `code` property
 | `ERR_NOTIFY_QUEUE_FULL` | Too many notifications are already queued for the device. Await earlier sends before queueing more. |
 | `ERR_DEVICE_DISCONNECTED` | The central disconnected, or unsubscribed, before a queued notification could be delivered. |
 | `ERR_CHARACTERISTIC_NOT_FOUND` | The characteristic is not part of the published GATT database. |
+| `ERR_NO_SUBSCRIBER` | The device has not enabled notifications or indications on the characteristic. |

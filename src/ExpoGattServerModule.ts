@@ -17,6 +17,7 @@ declare class ExpoGattServerModuleType extends NativeModule<GattServerEvents> {
     characteristicUuid: string,
     value: number[],
     confirm: boolean,
+    requireSubscription: boolean,
   ): Promise<void>;
   sendResponse(
     deviceId: string,

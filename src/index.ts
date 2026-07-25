@@ -4,6 +4,7 @@ import ExpoGattServerModule from './ExpoGattServerModule';
 import type {
   GattServiceConfig,
   AdvertiseConfig,
+  SendNotificationOptions,
   DeviceConnectedEvent,
   DeviceDisconnectedEvent,
   CharacteristicReadRequestEvent,
@@ -22,6 +23,7 @@ export {
   type GattCharacteristicConfig,
   type CharacteristicDelegateConfig,
   type AdvertiseConfig,
+  type SendNotificationOptions,
   type CharacteristicProperty,
   type CharacteristicPermission,
   type DeviceConnectedEvent,
@@ -116,6 +118,10 @@ export function stopAdvertising(): void {
  * reaches the Bluetooth stack. A device may only have one notification outstanding at a time, so
  * sends issued while an earlier one is still in flight are queued in order rather than dropped;
  * awaiting the promise is what paces a stream against the link.
+ *
+ * Rejects with `ERR_NO_SUBSCRIBER` when the device has not enabled notifications or indications on
+ * the characteristic — a notification to nobody is a failure, not a success. See
+ * `options.requireSubscription` to send anyway where the platform allows it.
  */
 export async function sendNotification(
   deviceId: string,
@@ -123,6 +129,7 @@ export async function sendNotification(
   characteristicUuid: string,
   value: number[],
   confirm: boolean = false,
+  options: SendNotificationOptions = {},
 ): Promise<void> {
   assertValidUuid(serviceUuid, 'service');
   assertValidUuid(characteristicUuid, 'characteristic');
@@ -133,6 +140,7 @@ export async function sendNotification(
     characteristicUuid,
     value,
     confirm,
+    options.requireSubscription ?? true,
   );
 }
 

@@ -142,6 +142,7 @@ public class ExpoGattServerModule: Module {
       characteristicUuid: String,
       value: [Int],
       confirm: Bool,
+      requireSubscription: Bool,
       promise: Promise
     ) in
       guard let mgr = self.manager else {
@@ -157,6 +158,9 @@ public class ExpoGattServerModule: Module {
         promise.reject("ERR_NOTIFY", error.localizedDescription)
         return
       }
+      // `confirm` and `requireSubscription` have no iOS counterpart: CoreBluetooth picks
+      // notification or indication from the characteristic's declared properties, and it only ever
+      // transmits to subscribed centrals, so an unsubscribed send cannot be forced through.
       DispatchQueue.main.async {
         do {
           // Resolves once CoreBluetooth has accepted the payload for transmission. A payload the

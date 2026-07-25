@@ -602,6 +602,11 @@ class GattServerManager(
    * The call no longer completes as soon as the payload is handed to the stack: a device may have
    * one notification outstanding at a time, so anything sent while an earlier notification is
    * still in flight waits its turn instead of being discarded by the stack.
+   *
+   * [requireSubscription] refuses the send when the device has not enabled notifications or
+   * indications on the characteristic. Clearing it sends anyway — the platform does not consult
+   * the CCCD before transmitting, so a caller that knows better than the descriptor keeps that
+   * option.
    */
   fun sendNotification(
     deviceId: String,
@@ -609,6 +614,7 @@ class GattServerManager(
     characteristicUuid: String,
     value: ByteArray,
     confirm: Boolean,
+    requireSubscription: Boolean,
     onResult: (GattServerException?) -> Unit,
   ) {
     val server = gattServer ?: throw IllegalStateException("Server not open")
@@ -617,8 +623,18 @@ class GattServerManager(
 
     val service = server.getService(UUID.fromString(serviceUuid))
       ?: throw IllegalArgumentException("Service $serviceUuid not found")
-    val characteristic = service.getCharacteristic(UUID.fromString(characteristicUuid))
+    val characteristicId = UUID.fromString(characteristicUuid)
+    val characteristic = service.getCharacteristic(characteristicId)
       ?: throw IllegalArgumentException("Characteristic $characteristicUuid not found")
+
+    if (requireSubscription && !isSubscribed(deviceId, characteristicId)) {
+      throw GattServerException(
+        "ERR_NO_SUBSCRIBER",
+        "Device $deviceId has not enabled notifications or indications on characteristic " +
+          "$characteristicUuid. Wait for onCharacteristicSubscribed, or pass " +
+          "requireSubscription: false to send anyway."
+      )
+    }
 
     val entry = QueuedNotification(device, characteristic, characteristicUuid, confirm, value, onResult)
     val queue = notificationQueues.getOrPut(deviceId) { NotificationQueue() }
