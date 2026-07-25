@@ -6,6 +6,17 @@
  */
 export interface CharacteristicDelegateConfig {
   /**
+   * Always emit `onCharacteristicReadRequest` and wait for `sendResponse`, even when the
+   * characteristic already has a value to serve.
+   *
+   * Without this the module answers a read from the last known value as soon as one exists — and
+   * one exists as soon as `value` is configured, `updateCharacteristicValue` is called, or (on
+   * iOS) a write lands — so the event stops firing permanently. Computed or dynamic reads need
+   * this flag. A configured `value` is still used for notifications, it just no longer answers
+   * reads.
+   */
+  read?: boolean;
+  /**
    * Do not acknowledge writes automatically. `onCharacteristicWriteRequest` is emitted with a
    * live `requestId` and the write stays unanswered until `sendResponse` is called with
    * `GATT_SUCCESS` or one of the `ATT_ERROR_*` codes — the only way to reject a write.

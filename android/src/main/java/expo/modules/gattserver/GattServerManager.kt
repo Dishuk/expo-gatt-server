@@ -33,6 +33,7 @@ data class CharacteristicAddress(val service: UUID, val characteristic: UUID)
  * to `false`, which keeps the module answering the request itself.
  */
 data class CharacteristicDelegation(
+  val read: Boolean = false,
   val write: Boolean = false,
 ) {
   companion object {
@@ -222,8 +223,10 @@ class GattServerManager(
     ) {
       @Suppress("DEPRECATION")
       val value = characteristic.value
+      // An opted-in characteristic always reaches JS, however current the mirrored value looks.
+      val delegated = delegationFor(characteristic).read
 
-      if (value != null && offset <= value.size) {
+      if (!delegated && value != null && offset <= value.size) {
         val responseValue = if (offset < value.size) {
           value.copyOfRange(offset, value.size)
         } else {

@@ -306,6 +306,7 @@ public class ExpoGattServerModule: Module {
       for charMap in charList {
         guard let delegateMap = charMap["delegate"] as? [String: Any] else { continue }
         let delegation = CharacteristicDelegation(
+          read: delegateMap["read"] as? Bool ?? false,
           write: delegateMap["write"] as? Bool ?? false
         )
         if delegation == CharacteristicDelegation.none { continue }

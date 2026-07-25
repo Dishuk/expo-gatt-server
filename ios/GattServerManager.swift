@@ -55,6 +55,7 @@ struct CharacteristicAddress: Hashable {
 /// Per-characteristic opt-in delegation of ATT request handling to JavaScript. Every flag defaults
 /// to `false`, which keeps the module answering the request itself.
 struct CharacteristicDelegation: Equatable {
+  var read = false
   var write = false
 
   static let none = CharacteristicDelegation()
@@ -431,7 +432,11 @@ extension GattServerManager: CBPeripheralManagerDelegate {
 
     let serviceUuid = request.characteristic.service?.uuid.uuidString ?? ""
 
-    if let value = characteristicValues[request.characteristic.uuid] {
+    // An opted-in characteristic always reaches JS. A configured initial value is served from this
+    // cache rather than the CBMutableCharacteristic initialiser, so without the opt-in a
+    // characteristic declared with `value` would never produce a single read event.
+    if !delegation(for: request.characteristic).read,
+       let value = characteristicValues[request.characteristic.uuid] {
       let offset = request.offset
       if offset <= value.count {
         request.value = offset < value.count ? value.subdata(in: offset..<value.count) : Data()

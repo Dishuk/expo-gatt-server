@@ -264,6 +264,7 @@ class ExpoGattServerModule : Module() {
         val charMap = item as? Map<*, *> ?: continue
         val delegate = charMap["delegate"] as? Map<*, *> ?: continue
         val delegation = CharacteristicDelegation(
+          read = delegate["read"] as? Boolean ?: false,
           write = delegate["write"] as? Boolean ?: false,
         )
         if (delegation == CharacteristicDelegation.none) continue
