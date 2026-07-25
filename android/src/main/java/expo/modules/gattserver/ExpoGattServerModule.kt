@@ -1,6 +1,7 @@
 package expo.modules.gattserver
 
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothGattService
 import android.content.pm.PackageManager
 import android.os.Build
@@ -460,7 +461,7 @@ class ExpoGattServerModule : Module() {
 
   private fun parseServiceConfig(map: Map<String, Any?>): BluetoothGattService {
     val uuid = UUID.fromString(map["uuid"] as String)
-    val service = BluetoothGattService(uuid, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+    val service = BluetoothGattService(uuid, parseServiceType(map["type"] as? String))
 
     val characteristics = (map["characteristics"] as? List<*>) ?: emptyList<Any>()
     for (item in characteristics) {
@@ -470,6 +471,14 @@ class ExpoGattServerModule : Module() {
     return service
   }
 
+  private fun parseServiceType(name: String?): Int = when (name) {
+    null, "primary" -> BluetoothGattService.SERVICE_TYPE_PRIMARY
+    "secondary" -> BluetoothGattService.SERVICE_TYPE_SECONDARY
+    else -> throw IllegalArgumentException(
+      "Invalid service type \"$name\". Expected \"primary\" or \"secondary\"."
+    )
+  }
+
   private fun parseCharacteristicConfig(map: Map<*, *>): BluetoothGattCharacteristic {
     val uuid = UUID.fromString(map["uuid"] as String)
     val properties = parseProperties(map["properties"] as? List<*>)
@@ -477,12 +486,16 @@ class ExpoGattServerModule : Module() {
     val characteristic = BluetoothGattCharacteristic(uuid, properties, permissions)
 
     if (properties and (BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0) {
-      val cccd = android.bluetooth.BluetoothGattDescriptor(
+      val cccd = BluetoothGattDescriptor(
         CCCD_UUID,
-        android.bluetooth.BluetoothGattDescriptor.PERMISSION_READ or
-          android.bluetooth.BluetoothGattDescriptor.PERMISSION_WRITE
+        BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
       )
       characteristic.addDescriptor(cccd)
+    }
+
+    for (item in (map["descriptors"] as? List<*>) ?: emptyList<Any>()) {
+      val descriptorMap = item as? Map<*, *> ?: continue
+      characteristic.addDescriptor(parseDescriptorConfig(descriptorMap))
     }
 
     val initialValue = (map["value"] as? List<*>)?.let { toByteArray(it, "characteristic") }
@@ -494,26 +507,65 @@ class ExpoGattServerModule : Module() {
     return characteristic
   }
 
+  /**
+   * The CCCD is rejected here as well as in JavaScript, because a second instance of it would be
+   * published alongside the module's own and shadow the per-client subscription tracking that
+   * answers it.
+   */
+  private fun parseDescriptorConfig(map: Map<*, *>): BluetoothGattDescriptor {
+    val uuid = UUID.fromString(map["uuid"] as String)
+    if (uuid == CCCD_UUID) {
+      throw IllegalArgumentException(
+        "Descriptor $uuid is the Client Characteristic Configuration descriptor, which the module " +
+          "publishes itself for every characteristic declaring \"notify\" or \"indicate\"."
+      )
+    }
+    // `BluetoothGattDescriptor.PERMISSION_*` and `BluetoothGattCharacteristic.PERMISSION_*` are
+    // declared with identical values, so one parser serves both attribute kinds.
+    val permissions = (map["permissions"] as? List<*>)
+      ?.let { parsePermissions(it) }
+      ?: BluetoothGattDescriptor.PERMISSION_READ
+    val descriptor = BluetoothGattDescriptor(uuid, permissions)
+    @Suppress("DEPRECATION")
+    descriptor.value = toByteArray((map["value"] as? List<*>) ?: emptyList<Any>(), "descriptor")
+    return descriptor
+  }
+
   private fun parseProperties(list: List<*>?): Int {
     var props = 0
     list?.forEach {
-      when (it as? String) {
-        "read" -> props = props or BluetoothGattCharacteristic.PROPERTY_READ
-        "write" -> props = props or BluetoothGattCharacteristic.PROPERTY_WRITE
-        "writeNoResponse" -> props = props or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE
-        "notify" -> props = props or BluetoothGattCharacteristic.PROPERTY_NOTIFY
-        "indicate" -> props = props or BluetoothGattCharacteristic.PROPERTY_INDICATE
+      props = props or when (it as? String) {
+        "read" -> BluetoothGattCharacteristic.PROPERTY_READ
+        "write" -> BluetoothGattCharacteristic.PROPERTY_WRITE
+        "writeNoResponse" -> BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE
+        "notify" -> BluetoothGattCharacteristic.PROPERTY_NOTIFY
+        "indicate" -> BluetoothGattCharacteristic.PROPERTY_INDICATE
+        "broadcast" -> BluetoothGattCharacteristic.PROPERTY_BROADCAST
+        "signedWrite" -> BluetoothGattCharacteristic.PROPERTY_SIGNED_WRITE
+        "extendedProperties" -> BluetoothGattCharacteristic.PROPERTY_EXTENDED_PROPS
+        else -> throw IllegalArgumentException("Invalid characteristic property \"$it\".")
       }
     }
     return props
   }
 
+  /**
+   * An unrecognised name throws rather than being skipped: dropping a permission silently publishes
+   * an attribute less protected than the configuration asked for.
+   */
   private fun parsePermissions(list: List<*>?): Int {
     var perms = 0
     list?.forEach {
-      when (it as? String) {
-        "readable" -> perms = perms or BluetoothGattCharacteristic.PERMISSION_READ
-        "writeable" -> perms = perms or BluetoothGattCharacteristic.PERMISSION_WRITE
+      perms = perms or when (it as? String) {
+        "readable" -> BluetoothGattCharacteristic.PERMISSION_READ
+        "writeable" -> BluetoothGattCharacteristic.PERMISSION_WRITE
+        "readEncrypted" -> BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED
+        "readEncryptedMitm" -> BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED_MITM
+        "writeEncrypted" -> BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED
+        "writeEncryptedMitm" -> BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED_MITM
+        "writeSigned" -> BluetoothGattCharacteristic.PERMISSION_WRITE_SIGNED
+        "writeSignedMitm" -> BluetoothGattCharacteristic.PERMISSION_WRITE_SIGNED_MITM
+        else -> throw IllegalArgumentException("Invalid permission \"$it\".")
       }
     }
     return perms

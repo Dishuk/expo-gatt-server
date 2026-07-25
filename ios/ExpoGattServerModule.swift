@@ -114,6 +114,10 @@ public class ExpoGattServerModule: Module {
             promise.resolve(nil)
           }
         }
+      } catch let error as GattServerError {
+        // Keeps a specific code such as ERR_UNSUPPORTED, which the generic catch below would
+        // otherwise flatten into ERR_CREATE_SERVER.
+        promise.reject(error.code, error.message)
       } catch {
         promise.reject("ERR_CREATE_SERVER", error.localizedDescription)
       }
@@ -437,7 +441,7 @@ public class ExpoGattServerModule: Module {
     initialValues: inout [CBUUID: Data]
   ) throws -> CBMutableService {
     let uuid = try parseUuid(map["uuid"], field: "service")
-    let service = CBMutableService(type: uuid, primary: true)
+    let service = CBMutableService(type: uuid, primary: try parseIsPrimary(map["type"]))
 
     var characteristics: [CBMutableCharacteristic] = []
     if let charList = map["characteristics"] as? [[String: Any]] {
@@ -451,13 +455,24 @@ public class ExpoGattServerModule: Module {
     return service
   }
 
+  private func parseIsPrimary(_ value: Any?) throws -> Bool {
+    switch value as? String {
+    case nil, "primary": return true
+    case "secondary": return false
+    default:
+      throw GattArgumentError(
+        message: "Invalid service type \"\(value ?? "nil")\". Expected \"primary\" or \"secondary\"."
+      )
+    }
+  }
+
   private func parseCharacteristicConfig(
     _ map: [String: Any],
     initialValues: inout [CBUUID: Data]
   ) throws -> CBMutableCharacteristic {
     let uuid = try parseUuid(map["uuid"], field: "characteristic")
-    let properties = parseProperties(map["properties"] as? [String])
-    let permissions = parsePermissions(map["permissions"] as? [String])
+    let properties = try parseProperties(map["properties"] as? [String])
+    let permissions = try parsePermissions(map["permissions"] as? [String])
 
     // A CBMutableCharacteristic created with a non-nil value is forced read-only by
     // CoreBluetooth, and adding it with any other properties/permissions raises
@@ -468,36 +483,103 @@ public class ExpoGattServerModule: Module {
       initialValues[uuid] = try parseBytes(bytes, field: "characteristic")
     }
 
-    return CBMutableCharacteristic(
+    let characteristic = CBMutableCharacteristic(
       type: uuid,
       properties: properties,
       value: nil,
       permissions: permissions
     )
+
+    if let descriptorList = map["descriptors"] as? [[String: Any]], !descriptorList.isEmpty {
+      characteristic.descriptors = try descriptorList.map { try parseDescriptorConfig($0) }
+    }
+
+    return characteristic
   }
 
-  private func parseProperties(_ list: [String]?) -> CBCharacteristicProperties {
+  /// `CBMutableDescriptor` is documented as supporting "only the `Characteristic User Description`
+  /// and `Characteristic Presentation Format` descriptors", and the Client Characteristic
+  /// Configuration and Characteristic Extended Properties descriptors as being "created
+  /// automatically upon publication of the parent service". Anything else is refused rather than
+  /// handed to CoreBluetooth, which would reject the whole service at publication time.
+  private func parseDescriptorConfig(_ map: [String: Any]) throws -> CBMutableDescriptor {
+    let uuid = try parseUuid(map["uuid"], field: "descriptor")
+    let bytes = try parseBytes(map["value"] as? [Int] ?? [], field: "descriptor")
+
+    switch uuid {
+    case CBUUID(string: CBUUIDCharacteristicUserDescriptionString):
+      // Apple models this descriptor's value as an NSString, so the configured bytes are the UTF-8
+      // encoding of it; anything else has no representation to publish.
+      guard let text = String(data: bytes, encoding: .utf8) else {
+        throw GattServerError.configurationUnsupported(
+          option: "descriptor \(uuid.uuidString)",
+          reason: "the Characteristic User Description value is an NSString on iOS, and these " +
+            "bytes are not valid UTF-8."
+        )
+      }
+      return CBMutableDescriptor(type: uuid, value: text)
+    case CBUUID(string: CBUUIDCharacteristicFormatString):
+      return CBMutableDescriptor(type: uuid, value: bytes)
+    default:
+      throw GattServerError.configurationUnsupported(
+        option: "descriptor \(uuid.uuidString)",
+        reason: "CBMutableDescriptor supports only the Characteristic User Description " +
+          "(\(CBUUIDCharacteristicUserDescriptionString)) and Characteristic Presentation Format " +
+          "(\(CBUUIDCharacteristicFormatString)) descriptors. Android publishes any descriptor, so " +
+          "this one has to be declared for Android only."
+      )
+    }
+  }
+
+  /// Apple annotates `CBCharacteristicPropertyBroadcast` and
+  /// `CBCharacteristicPropertyExtendedProperties` as "Not allowed for local characteristics", so
+  /// both are refused here instead of being set and rejected at publication time.
+  private func parseProperties(_ list: [String]?) throws -> CBCharacteristicProperties {
     var props: CBCharacteristicProperties = []
-    list?.forEach { str in
+    for str in list ?? [] {
       switch str {
       case "read": props.insert(.read)
       case "write": props.insert(.write)
       case "writeNoResponse": props.insert(.writeWithoutResponse)
       case "notify": props.insert(.notify)
       case "indicate": props.insert(.indicate)
-      default: break
+      case "signedWrite": props.insert(.authenticatedSignedWrites)
+      case "broadcast", "extendedProperties":
+        throw GattServerError.configurationUnsupported(
+          option: "characteristic property \"\(str)\"",
+          reason: "CoreBluetooth documents the matching CBCharacteristicProperties member as not " +
+            "allowed for local characteristics. Declare it for Android only."
+        )
+      default:
+        throw GattArgumentError(message: "Invalid characteristic property \"\(str)\".")
       }
     }
     return props
   }
 
-  private func parsePermissions(_ list: [String]?) -> CBAttributePermissions {
+  /// `CBAttributePermissions` has exactly four members, so Android's MITM and signed variants have
+  /// nothing to map onto. Every near equivalent is *weaker* than what was asked for — an MITM
+  /// variant requires authenticated pairing rather than any encrypted link, and a signed variant
+  /// requires a signature over an unencrypted one — so they are refused rather than approximated
+  /// into a less protected attribute than the configuration declared.
+  private func parsePermissions(_ list: [String]?) throws -> CBAttributePermissions {
     var perms: CBAttributePermissions = []
-    list?.forEach { str in
+    for str in list ?? [] {
       switch str {
       case "readable": perms.insert(.readable)
       case "writeable": perms.insert(.writeable)
-      default: break
+      case "readEncrypted": perms.insert(.readEncryptionRequired)
+      case "writeEncrypted": perms.insert(.writeEncryptionRequired)
+      case "readEncryptedMitm", "writeEncryptedMitm", "writeSigned", "writeSignedMitm":
+        throw GattServerError.configurationUnsupported(
+          option: "permission \"\(str)\"",
+          reason: "CBAttributePermissions offers only readable, writeable, " +
+            "readEncryptionRequired and writeEncryptionRequired, and approximating this one would " +
+            "publish a less protected attribute than was asked for. Use \"readEncrypted\" or " +
+            "\"writeEncrypted\" for a portable encrypted attribute."
+        )
+      default:
+        throw GattArgumentError(message: "Invalid permission \"\(str)\".")
       }
     }
     return perms

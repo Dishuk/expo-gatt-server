@@ -564,9 +564,25 @@ turned off and the published database is dropped.
 ```typescript
 interface GattServiceConfig {
   uuid: string;
+  type?: GattServiceType;
   characteristics: GattCharacteristicConfig[];
 }
 ```
+
+### GattServiceType
+
+```typescript
+type GattServiceType = 'primary' | 'secondary';
+```
+
+Defaults to `primary`. Maps onto `BluetoothGattService.SERVICE_TYPE_SECONDARY` and
+`CBMutableService(type:primary: false)`.
+
+A secondary service "is a service that is included from another service" (Core Specification,
+Vol 3, Part G, Section 3.1). This module publishes every configured service at the top level and
+offers no way to include one service from another, so a `secondary` service **will not be found by
+a central doing primary service discovery**. It is exposed because both platforms can express the
+type, not because a standalone secondary service is useful.
 
 ### GattCharacteristicConfig
 
@@ -576,20 +592,117 @@ interface GattCharacteristicConfig {
   properties: CharacteristicProperty[];
   permissions: CharacteristicPermission[];
   value?: number[];
+  descriptors?: GattDescriptorConfig[];
+  delegate?: CharacteristicDelegateConfig;
 }
 ```
+
+### GattDescriptorConfig
+
+```typescript
+interface GattDescriptorConfig {
+  uuid: string;
+  value: number[];
+  permissions?: CharacteristicPermission[];
+}
+```
+
+Descriptors published alongside the Client Characteristic Configuration descriptor the module adds
+itself.
+
+`value` is required because iOS documents a descriptor value as "required and cannot be updated
+dynamically once the parent service has been published"; requiring it everywhere keeps one
+configuration portable. `permissions` defaults to `['readable']` and is **ignored on iOS** —
+`CBMutableDescriptor` has no permissions parameter, so CoreBluetooth derives them from the
+descriptor type.
+
+| Descriptor | Android | iOS |
+|---|---|---|
+| `0x2901` Characteristic User Description | published | published; the bytes are decoded as UTF-8 because Apple models this value as an `NSString`, and invalid UTF-8 rejects with `ERR_UNSUPPORTED` |
+| `0x2904` Characteristic Presentation Format | published | published, bytes verbatim |
+| `0x2902` Client Characteristic Configuration | **rejected** | **rejected** |
+| anything else (e.g. `0x2900`, `0x2903`) | published | **rejected** with `ERR_UNSUPPORTED` |
+
+`CBMutableDescriptor` is documented as supporting "only the `Characteristic User Description` and
+`Characteristic Presentation Format` descriptors", with the Client Characteristic Configuration and
+Characteristic Extended Properties descriptors "created automatically upon publication of the parent
+service". Declaring any other UUID is therefore refused on iOS rather than handed to CoreBluetooth,
+which would fail the whole service at publication time. Declare such a descriptor for Android only.
+
+The CCCD is rejected on both platforms: the module publishes it for every characteristic declaring
+`notify` or `indicate`, and answers reads and writes of it from its own per-device subscription
+tracking, because the specification gives "each client its own instantiation" of that descriptor
+while the platforms hand out a single shared object. A manually declared one would shadow that.
 
 ### CharacteristicProperty
 
 ```typescript
-type CharacteristicProperty = 'read' | 'write' | 'writeNoResponse' | 'notify' | 'indicate';
+type CharacteristicProperty =
+  | 'read'
+  | 'write'
+  | 'writeNoResponse'
+  | 'notify'
+  | 'indicate'
+  | 'broadcast'
+  | 'signedWrite'
+  | 'extendedProperties';
 ```
+
+| Property | Android | iOS |
+|---|---|---|
+| `read` | `PROPERTY_READ` | `.read` |
+| `write` | `PROPERTY_WRITE` | `.write` |
+| `writeNoResponse` | `PROPERTY_WRITE_NO_RESPONSE` | `.writeWithoutResponse` |
+| `notify` | `PROPERTY_NOTIFY` | `.notify` |
+| `indicate` | `PROPERTY_INDICATE` | `.indicate` |
+| `signedWrite` | `PROPERTY_SIGNED_WRITE` | `.authenticatedSignedWrites` |
+| `broadcast` | `PROPERTY_BROADCAST` | **rejected** with `ERR_UNSUPPORTED` |
+| `extendedProperties` | `PROPERTY_EXTENDED_PROPS` | **rejected** with `ERR_UNSUPPORTED` |
+
+Apple annotates both `CBCharacteristicPropertyBroadcast` and
+`CBCharacteristicPropertyExtendedProperties` as "Not allowed for local characteristics", so neither
+can be set on a published peripheral. They are still offered because Android does set the bits, and
+a peripheral targeting Android alone can legitimately want them — declare them for Android only.
+
+An unrecognised name now throws instead of being ignored.
 
 ### CharacteristicPermission
 
 ```typescript
-type CharacteristicPermission = 'readable' | 'writeable';
+type CharacteristicPermission =
+  | 'readable'
+  | 'writeable'
+  | 'readEncrypted'
+  | 'readEncryptedMitm'
+  | 'writeEncrypted'
+  | 'writeEncryptedMitm'
+  | 'writeSigned'
+  | 'writeSignedMitm';
 ```
+
+| Permission | Android | iOS |
+|---|---|---|
+| `readable` | `PERMISSION_READ` | `.readable` |
+| `writeable` | `PERMISSION_WRITE` | `.writeable` |
+| `readEncrypted` | `PERMISSION_READ_ENCRYPTED` | `.readEncryptionRequired` |
+| `writeEncrypted` | `PERMISSION_WRITE_ENCRYPTED` | `.writeEncryptionRequired` |
+| `readEncryptedMitm` | `PERMISSION_READ_ENCRYPTED_MITM` | **rejected** with `ERR_UNSUPPORTED` |
+| `writeEncryptedMitm` | `PERMISSION_WRITE_ENCRYPTED_MITM` | **rejected** with `ERR_UNSUPPORTED` |
+| `writeSigned` | `PERMISSION_WRITE_SIGNED` | **rejected** with `ERR_UNSUPPORTED` |
+| `writeSignedMitm` | `PERMISSION_WRITE_SIGNED_MITM` | **rejected** with `ERR_UNSUPPORTED` |
+
+`CBAttributePermissions` has exactly four members — `readable`, `writeable`,
+`readEncryptionRequired`, `writeEncryptionRequired` — so there is no 1:1 mapping for Android's
+eight. The four rejected variants are **not approximated**, because every near equivalent is weaker
+than what was asked for: an MITM variant requires authenticated pairing rather than merely an
+encrypted link, and a signed variant requires a signature over an unencrypted one. Mapping either
+onto `.readEncryptionRequired`/`.writeEncryptionRequired` — or worse, onto plain
+`.readable`/`.writeable` — would publish an attribute less protected than the app declared, without
+saying so. Failing the call is the safer outcome, and the error names `readEncrypted` /
+`writeEncrypted` as the portable choice.
+
+An unrecognised name now throws instead of being ignored, so a typo can no longer silently drop a
+permission.
 
 ### AdvertiseConfig
 

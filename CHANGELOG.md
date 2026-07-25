@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encrypted and authenticated `CharacteristicPermission` variants — `readEncrypted`,
+  `readEncryptedMitm`, `writeEncrypted`, `writeEncryptedMitm`, `writeSigned`, `writeSignedMitm`.
+  Previously only `readable` and `writeable` existed, so anything built on this package was
+  necessarily an unauthenticated peripheral. `CBAttributePermissions` has only four members, so the
+  MITM and signed variants reject on iOS with `ERR_UNSUPPORTED` rather than being approximated into a
+  weaker guarantee than was asked for
+- `CharacteristicProperty` values `broadcast`, `signedWrite` and `extendedProperties`. Apple
+  documents `broadcast` and `extendedProperties` as not allowed for local characteristics, so both
+  reject on iOS with `ERR_UNSUPPORTED`
+- `GattServiceConfig.type`, with the type `GattServiceType`, for publishing a secondary service
+- `GattCharacteristicConfig.descriptors`, with the type `GattDescriptorConfig`, for declaring
+  descriptors beyond the automatic Client Characteristic Configuration descriptor. iOS accepts only
+  0x2901 and 0x2904, the two `CBMutableDescriptor` supports; the CCCD is rejected on both platforms
+  because the module publishes and answers it itself
+- The constant `CLIENT_CHARACTERISTIC_CONFIGURATION_UUID`
 - `createServer` option `requestTimeoutMs`, with the type `CreateServerOptions` and the constants
   `ATT_TRANSACTION_TIMEOUT_MS` and `DEFAULT_REQUEST_TIMEOUT_MS`. A delegated request that JavaScript
   never answers is now completed with `ATT_ERROR_UNLIKELY_ERROR` after 10 s by default, instead of
@@ -29,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** an unrecognised characteristic property or permission name now throws instead of
+  being silently ignored. A typo used to publish an attribute with one fewer permission than the
+  configuration asked for, with no indication
 - **Breaking:** Android no longer renames the device's Bluetooth adapter when `localName` is set.
   Android has no per-advertisement local name, so the device's own name is advertised instead. Set
   `android.setAdapterName` to opt back in to the rename, which is now undone when advertising stops

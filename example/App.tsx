@@ -31,16 +31,21 @@ import {
 
 const SERVICE_UUID = '0000180d-0000-1000-8000-00805f9b34fb';
 const CHARACTERISTIC_UUID = '00002a37-0000-1000-8000-00805f9b34fb';
+const USER_DESCRIPTION_UUID = '00002901-0000-1000-8000-00805f9b34fb';
+
+const utf8 = (text: string): number[] => Array.from(new TextEncoder().encode(text));
 
 const SERVICES: GattServiceConfig[] = [
   {
     uuid: SERVICE_UUID,
+    type: 'primary',
     characteristics: [
       {
         uuid: CHARACTERISTIC_UUID,
         properties: ['read', 'write', 'notify'],
         permissions: ['readable', 'writeable'],
         value: [0, 60],
+        descriptors: [{ uuid: USER_DESCRIPTION_UUID, value: utf8('Heart Rate Measurement') }],
       },
     ],
   },

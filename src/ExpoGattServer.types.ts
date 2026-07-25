@@ -34,15 +34,119 @@ export interface GattCharacteristicConfig {
   properties: CharacteristicProperty[];
   permissions: CharacteristicPermission[];
   value?: number[];
+  /**
+   * Descriptors to publish alongside the characteristic, beyond the Client Characteristic
+   * Configuration descriptor the module adds itself. See `GattDescriptorConfig` for the
+   * descriptor types each platform can express.
+   */
+  descriptors?: GattDescriptorConfig[];
   /** Opt out of the module's automatic responses for this characteristic. */
   delegate?: CharacteristicDelegateConfig;
 }
 
-export type CharacteristicProperty = 'read' | 'write' | 'writeNoResponse' | 'notify' | 'indicate';
-export type CharacteristicPermission = 'readable' | 'writeable';
+/**
+ * Client Characteristic Configuration descriptor (Bluetooth Core Specification, Vol 3, Part G,
+ * Section 3.3.3.3), in the 128-bit form both platforms compare against.
+ *
+ * The module publishes this descriptor itself for every characteristic declaring `notify` or
+ * `indicate`, and owns its value: the specification gives each client its own instantiation, so the
+ * per-client configuration bits are tracked per device rather than in the single descriptor object
+ * the platform hands out. Declaring it in `descriptors` is therefore rejected — see
+ * `GattDescriptorConfig`.
+ */
+export const CLIENT_CHARACTERISTIC_CONFIGURATION_UUID = '00002902-0000-1000-8000-00805f9b34fb';
+
+/**
+ * A descriptor to publish on a characteristic.
+ *
+ * **iOS accepts only two descriptor types.** `CBMutableDescriptor` is documented as supporting
+ * "only the `Characteristic User Description` and `Characteristic Presentation Format`
+ * descriptors" — 0x2901 and 0x2904 — so any other UUID is rejected there with `ERR_UNSUPPORTED`.
+ * Android publishes whatever it is given.
+ *
+ * Declaring `CLIENT_CHARACTERISTIC_CONFIGURATION_UUID` is rejected on both platforms: the module
+ * adds it automatically and answers it per client.
+ */
+export interface GattDescriptorConfig {
+  uuid: string;
+  /**
+   * Required, because iOS documents a descriptor's value as "required and cannot be updated
+   * dynamically once the parent service has been published". Requiring it on both platforms keeps
+   * one configuration portable.
+   *
+   * For 0x2901 the bytes are decoded as UTF-8 on iOS, which models that descriptor's value as an
+   * `NSString`; invalid UTF-8 is rejected. Every other supported descriptor takes the bytes
+   * verbatim.
+   */
+  value: number[];
+  /**
+   * Android only. `CBMutableDescriptor` has no permissions parameter — CoreBluetooth decides them
+   * from the descriptor type — so this is ignored on iOS. Defaults to `['readable']`, which is what
+   * the metadata descriptors iOS also supports need.
+   */
+  permissions?: CharacteristicPermission[];
+}
+
+/**
+ * Characteristic properties, as declared in the characteristic's declaration (Bluetooth Core
+ * Specification, Vol 3, Part G, Table 3.5).
+ *
+ * `broadcast` and `extendedProperties` are **rejected on iOS**: Apple annotates both
+ * `CBCharacteristicPropertyBroadcast` and `CBCharacteristicPropertyExtendedProperties` as "Not
+ * allowed for local characteristics". They are offered because Android's
+ * `PROPERTY_BROADCAST` and `PROPERTY_EXTENDED_PROPS` do set the bits, and a peripheral targeting
+ * Android alone can legitimately want them.
+ */
+export type CharacteristicProperty =
+  | 'read'
+  | 'write'
+  | 'writeNoResponse'
+  | 'notify'
+  | 'indicate'
+  | 'broadcast'
+  | 'signedWrite'
+  | 'extendedProperties';
+
+/**
+ * Access requirements for an attribute value.
+ *
+ * `readable` and `writeable` map 1:1 onto both platforms. `readEncrypted` and `writeEncrypted` map
+ * onto `CBAttributePermissionsReadEncryptionRequired` and
+ * `CBAttributePermissionsWriteEncryptionRequired`, which Apple documents as "trusted devices".
+ *
+ * **The MITM and signed variants are rejected on iOS** with `ERR_UNSUPPORTED`.
+ * `CBAttributePermissions` has exactly four members, so there is nothing to map them to, and the
+ * nearest approximations all *weaken* what was asked for: an MITM variant demands authenticated
+ * pairing rather than any encrypted link, and a signed variant demands a signature over an
+ * unencrypted one. Silently downgrading either would publish an attribute less protected than the
+ * app declared, which is worse than refusing to publish it — so the call fails and names the
+ * portable alternative instead.
+ */
+export type CharacteristicPermission =
+  | 'readable'
+  | 'writeable'
+  | 'readEncrypted'
+  | 'readEncryptedMitm'
+  | 'writeEncrypted'
+  | 'writeEncryptedMitm'
+  | 'writeSigned'
+  | 'writeSignedMitm';
+
+/**
+ * A secondary service "is a service that is included from another service" (Bluetooth Core
+ * Specification, Vol 3, Part G, Section 3.1) and is not intended to be discovered on its own. This
+ * module publishes each configured service at the top level and exposes no way to include one
+ * service from another, so a `secondary` service is published but will not be found by a central
+ * doing primary service discovery. It is offered because both platforms can express the type —
+ * `BluetoothGattService.SERVICE_TYPE_SECONDARY` and `CBMutableService(type:primary:)` — and a peer
+ * that already knows the handle can still use it.
+ */
+export type GattServiceType = 'primary' | 'secondary';
 
 export interface GattServiceConfig {
   uuid: string;
+  /** Defaults to `primary`. */
+  type?: GattServiceType;
   characteristics: GattCharacteristicConfig[];
 }
 

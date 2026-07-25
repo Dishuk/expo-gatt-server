@@ -94,11 +94,26 @@ const services: GattServiceConfig[] = [
 | `writeNoResponse` | Central can write without acknowledgment |
 | `notify` | Server can push updates (no confirmation) |
 | `indicate` | Server can push updates (with confirmation) |
+| `signedWrite` | Central can write with a signature over an unencrypted link |
+| `broadcast` | Value may be broadcast. **Android only** |
+| `extendedProperties` | Further properties live in the extended properties descriptor. **Android only** |
 
 | Permission | Meaning |
 |------------|---------|
 | `readable` | Characteristic value can be read |
 | `writeable` | Characteristic value can be written |
+| `readEncrypted` | Readable only over an encrypted link |
+| `writeEncrypted` | Writeable only over an encrypted link |
+| `readEncryptedMitm` | Readable only with MITM protection. **Android only** |
+| `writeEncryptedMitm` | Writeable only with MITM protection. **Android only** |
+| `writeSigned` | Writeable with a signature. **Android only** |
+| `writeSignedMitm` | Writeable with a signature and MITM protection. **Android only** |
+
+The Android-only values reject on iOS with `ERR_UNSUPPORTED` rather than being approximated into a
+weaker guarantee -- `CBAttributePermissions` has only four members and Apple documents `broadcast`
+and `extendedProperties` as not allowed for local characteristics. See
+[Properties and permissions in the API reference](./api.md#characteristicproperty) for the full
+per-platform mapping and the reasoning.
 
 > **Note:** Characteristics with `notify` or `indicate` should not have an initial `value`. The native layer requires a nil/null initial value to allow dynamic updates.
 

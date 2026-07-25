@@ -46,6 +46,7 @@ enum GattServerError: Error {
   case noSubscriber(deviceId: String, characteristic: String)
   case confirmUnsupported(characteristic: String, confirm: Bool)
   case advertisingOptionUnsupported(option: String, reason: String)
+  case configurationUnsupported(option: String, reason: String)
 
   var code: String {
     switch self {
@@ -62,7 +63,7 @@ enum GattServerError: Error {
     case .deviceDisconnected: return "ERR_DEVICE_DISCONNECTED"
     case .noSubscriber: return "ERR_NO_SUBSCRIBER"
     case .confirmUnsupported: return "ERR_CONFIRM_UNSUPPORTED"
-    case .advertisingOptionUnsupported: return "ERR_UNSUPPORTED"
+    case .advertisingOptionUnsupported, .configurationUnsupported: return "ERR_UNSUPPORTED"
     }
   }
 
@@ -125,6 +126,8 @@ enum GattServerError: Error {
       return "iOS cannot honour the advertising option \"\(option)\": \(reason) " +
         "CBPeripheralManager.startAdvertising supports only CBAdvertisementDataLocalNameKey and " +
         "CBAdvertisementDataServiceUUIDsKey."
+    case .configurationUnsupported(let option, let reason):
+      return "iOS cannot honour \"\(option)\": \(reason)"
     }
   }
 }

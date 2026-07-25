@@ -1,9 +1,16 @@
 import { Platform, type EventSubscription } from 'expo-modules-core';
 
 import ExpoGattServerModule from './ExpoGattServerModule';
-import { ATT_TRANSACTION_TIMEOUT_MS } from './ExpoGattServer.types';
+import {
+  ATT_TRANSACTION_TIMEOUT_MS,
+  CLIENT_CHARACTERISTIC_CONFIGURATION_UUID,
+} from './ExpoGattServer.types';
 import type {
   GattServiceConfig,
+  GattServiceType,
+  GattCharacteristicConfig,
+  CharacteristicProperty,
+  CharacteristicPermission,
   CreateServerOptions,
   AdvertiseConfig,
   AdvertisingMode,
@@ -26,8 +33,10 @@ export type { EventSubscription };
 
 export {
   type GattServiceConfig,
+  type GattServiceType,
   type CreateServerOptions,
   type GattCharacteristicConfig,
+  type GattDescriptorConfig,
   type CharacteristicDelegateConfig,
   type AdvertiseConfig,
   type AndroidAdvertiseOptions,
@@ -70,6 +79,7 @@ export {
   ATT_ERROR_INSUFFICIENT_RESOURCES,
   ATT_TRANSACTION_TIMEOUT_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
+  CLIENT_CHARACTERISTIC_CONFIGURATION_UUID,
 } from './ExpoGattServer.types';
 
 // Accepted by CBUUID(string:) on iOS: 16-bit (4 hex digits), 32-bit (8 hex digits) or the
@@ -103,17 +113,91 @@ function assertValidBytes(value: unknown, field: string): void {
   }
 }
 
+const SERVICE_TYPES: GattServiceType[] = ['primary', 'secondary'];
+
+const CHARACTERISTIC_PROPERTIES: CharacteristicProperty[] = [
+  'read',
+  'write',
+  'writeNoResponse',
+  'notify',
+  'indicate',
+  'broadcast',
+  'signedWrite',
+  'extendedProperties',
+];
+
+const CHARACTERISTIC_PERMISSIONS: CharacteristicPermission[] = [
+  'readable',
+  'writeable',
+  'readEncrypted',
+  'readEncryptedMitm',
+  'writeEncrypted',
+  'writeEncryptedMitm',
+  'writeSigned',
+  'writeSignedMitm',
+];
+
+/**
+ * Both platforms used to ignore a name they did not recognise, so a typo published an attribute with
+ * one fewer property or — far worse — one fewer permission than the app asked for, silently.
+ */
+function assertEachOneOf<T extends string>(values: unknown, allowed: T[], field: string): void {
+  if (!Array.isArray(values)) {
+    throw new Error(`Invalid ${field} ${JSON.stringify(values)}. Expected an array.`);
+  }
+  for (const value of values) {
+    assertOneOf(value, allowed, field);
+  }
+}
+
+/** Recognises the CCCD in any of the three forms `assertValidUuid` accepts. */
+function isClientCharacteristicConfiguration(uuid: string): boolean {
+  const lower = uuid.toLowerCase();
+  return (
+    lower === CLIENT_CHARACTERISTIC_CONFIGURATION_UUID || lower === '2902' || lower === '00002902'
+  );
+}
+
+function assertValidCharacteristic(characteristic: GattCharacteristicConfig): void {
+  assertValidUuid(characteristic?.uuid, 'characteristic');
+  assertEachOneOf(characteristic?.properties, CHARACTERISTIC_PROPERTIES, 'characteristic property');
+  assertEachOneOf(
+    characteristic?.permissions,
+    CHARACTERISTIC_PERMISSIONS,
+    'characteristic permission',
+  );
+  if (characteristic.value !== undefined) {
+    assertValidBytes(characteristic.value, 'characteristic');
+  }
+  for (const descriptor of characteristic.descriptors ?? []) {
+    assertValidUuid(descriptor?.uuid, 'descriptor');
+    if (isClientCharacteristicConfiguration(descriptor.uuid)) {
+      throw new Error(
+        `Descriptor ${descriptor.uuid} is the Client Characteristic Configuration descriptor, ` +
+          'which the module publishes itself for every characteristic declaring "notify" or ' +
+          '"indicate", and whose per-client value it answers from its own subscription tracking. ' +
+          'Declaring a second one would shadow that, so remove it — the automatic one is already ' +
+          'readable and writeable.',
+      );
+    }
+    assertValidBytes(descriptor?.value, 'descriptor');
+    if (descriptor.permissions !== undefined) {
+      assertEachOneOf(descriptor.permissions, CHARACTERISTIC_PERMISSIONS, 'descriptor permission');
+    }
+  }
+}
+
 export async function createServer(
   services: GattServiceConfig[],
   options: CreateServerOptions = {},
 ): Promise<void> {
   for (const service of services ?? []) {
     assertValidUuid(service?.uuid, 'service');
+    if (service.type !== undefined) {
+      assertOneOf(service.type, SERVICE_TYPES, 'service type');
+    }
     for (const characteristic of service?.characteristics ?? []) {
-      assertValidUuid(characteristic?.uuid, 'characteristic');
-      if (characteristic.value !== undefined) {
-        assertValidBytes(characteristic.value, 'characteristic');
-      }
+      assertValidCharacteristic(characteristic);
     }
   }
   if (options.requestTimeoutMs !== undefined) {
