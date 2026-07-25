@@ -80,8 +80,8 @@ The module does not hold BLE state itself -- it delegates to `GattServerManager`
 
 | State | iOS Type | Android Type | Purpose |
 |-------|----------|--------------|---------|
-| Connected devices | `[String: CBCentral]` (via subscriptions) | `ConcurrentHashMap<String, BluetoothDevice>` | Track which centrals are connected |
-| Device MTU | Derived from `central.maximumUpdateValueLength` | `ConcurrentHashMap<String, Int>` | Validate payload size |
+| Connected devices | `[String: CBCentral]` (from observed ATT activity) | `ConcurrentHashMap<String, BluetoothDevice>` | Track which centrals are connected |
+| Device MTU | Read live from `central.maximumUpdateValueLength` | `ConcurrentHashMap<String, Int>` | Validate payload size, answer `getMtu` |
 | Pending requests | `[Int: CBATTRequest]` | `ConcurrentHashMap<Int, String>` | Match `sendResponse` to read requests |
 | Characteristic values | `[CBUUID: Data]` | Set on `BluetoothGattCharacteristic.value` | Auto-respond to reads |
 | Subscribed centrals | `[String: [CBUUID: CBCentral]]` | Managed via CCCD descriptor | Track notification subscribers |
@@ -158,6 +158,19 @@ The "send first, throw after" pattern ensures the central receives whatever the 
 
 On iOS, the negotiated payload size is read from `central.maximumUpdateValueLength`. On Android, it is tracked via the `onMtuChanged` callback.
 
+### Exposing the MTU to JavaScript
+
+The public unit is the **ATT MTU in octets** -- what the Bluetooth Core Specification and the Android platform both call "MTU". `getMtu(deviceId)` returns it, and `onMtuChanged` reports every change. `maxNotificationPayload` is supplied alongside it as `mtu - 3`, the maximum Attribute Value length of an `ATT_HANDLE_VALUE_NTF` PDU, so callers never have to know the header size.
+
+The two platforms report different halves of the same figure exactly, and derive the other:
+
+| | iOS | Android |
+|---|---|---|
+| Native source | `CBCentral.maximumUpdateValueLength`, a **payload length** | `onMtuChanged`, an **ATT MTU** |
+| `maxNotificationPayload` | Exact | Derived as `mtu - 3` |
+| `mtu` | Derived as `maximumUpdateValueLength + 3` | Exact |
+| Change notification | None exists; the value is sampled on the central's next ATT activity | Delivered as it happens |
+
 ## Platform Differences
 
 | Behavior | iOS | Android |
@@ -167,6 +180,7 @@ On iOS, the negotiated payload size is read from `central.maximumUpdateValueLeng
 | Disconnection event | Inferred from the loss of the last subscription, or reported for every known central when Bluetooth leaves `poweredOn` | Fires on `onConnectionStateChange` |
 | Write auto-response | Not automatic; JS must respond if `responseNeeded` | Automatic for `responseNeeded` requests |
 | CCCD descriptor | Managed by CoreBluetooth internally | Explicitly added by the module |
-| MTU source | `central.maximumUpdateValueLength` | `onMtuChanged` callback |
+| MTU source | `central.maximumUpdateValueLength` (a payload length) | `onMtuChanged` callback (an ATT MTU) |
+| MTU change event | No callback exists; sampled on the central's next ATT activity | Delivered as it happens |
 | Bluetooth state check | `CBManagerState.poweredOn` | `BluetoothAdapter.isEnabled()` |
 | Permission model | `CBPeripheralManager.authorization` | Runtime permissions (API 31+) |

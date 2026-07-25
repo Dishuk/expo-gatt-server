@@ -108,6 +108,47 @@ export interface NotificationSentEvent {
 }
 
 /**
+ * The link budget for one connected device.
+ *
+ * The public unit is the **ATT MTU**, in octets, because that is what the Bluetooth Core
+ * Specification and the Android platform both call "MTU" — reporting anything else under that name
+ * would be actively misleading. Every payload capacity follows from it, so
+ * `maxNotificationPayload` is provided rather than left to the caller to derive.
+ */
+export interface DeviceMtu {
+  deviceId: string;
+  /**
+   * ATT_MTU in octets, including the ATT header. Before any negotiation this is the specification
+   * default of 23 (Core Specification, Vol 3, Part G, Section 5.2.1).
+   *
+   * Exact on Android, which reports the ATT MTU directly through `onMtuChanged`. Derived on iOS:
+   * CoreBluetooth only exposes `CBCentral.maximumUpdateValueLength`, a payload length, so three
+   * octets of `ATT_HANDLE_VALUE_NTF` header are added back. Apple does not document that identity,
+   * so prefer `maxNotificationPayload` on iOS where the figure is exact.
+   */
+  mtu: number;
+  /**
+   * Octets that fit in a single notification or indication — `mtu - 3`, the maximum Attribute Value
+   * length of an `ATT_HANDLE_VALUE_NTF` PDU (Core Specification, Vol 3, Part F, Section 3.4.7.1).
+   *
+   * This is the number to size a `sendNotification` payload against; `sendNotification` rejects
+   * anything larger with `PAYLOAD_EXCEEDS_MTU` rather than letting it be truncated.
+   */
+  maxNotificationPayload: number;
+}
+
+/**
+ * The MTU for a connection changed, or was observed for the first time.
+ *
+ * Android delivers this from `BluetoothGattServerCallback.onMtuChanged`, when a client requests a
+ * different MTU. iOS has no equivalent callback, so the value is sampled whenever the central
+ * produces ATT activity — a subscribe, read or write — and the event is emitted when it differs
+ * from the value last seen. On iOS a change therefore surfaces at the next activity rather than the
+ * moment it happens, and the first event for a device arrives alongside `onDeviceConnected`.
+ */
+export type MtuChangedEvent = DeviceMtu;
+
+/**
  * A central enabled notifications or indications on a characteristic — the signal to start
  * streaming to it.
  *
@@ -174,6 +215,7 @@ export type GattServerEvents = {
   onCharacteristicReadRequest(event: CharacteristicReadRequestEvent): void;
   onCharacteristicWriteRequest(event: CharacteristicWriteRequestEvent): void;
   onNotificationSent(event: NotificationSentEvent): void;
+  onMtuChanged(event: MtuChangedEvent): void;
   onCharacteristicSubscribed(event: CharacteristicSubscribedEvent): void;
   onCharacteristicUnsubscribed(event: CharacteristicUnsubscribedEvent): void;
   onBluetoothStateChanged(event: BluetoothStateChangedEvent): void;

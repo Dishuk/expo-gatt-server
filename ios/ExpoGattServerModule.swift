@@ -31,8 +31,33 @@ public class ExpoGattServerModule: Module {
       "onNotificationSent",
       "onCharacteristicSubscribed",
       "onCharacteristicUnsubscribed",
-      "onBluetoothStateChanged"
+      "onBluetoothStateChanged",
+      "onMtuChanged"
     )
+
+    AsyncFunction("getMtu") { (deviceId: String, promise: Promise) in
+      guard let mgr = self.manager else {
+        promise.reject("ERR_NO_SERVER", "Server not created")
+        return
+      }
+      // `connectedCentrals` is only touched on the main queue, which is also the queue the
+      // peripheral manager dispatches its callbacks on.
+      DispatchQueue.main.async {
+        guard let mtu = mgr.mtu(for: deviceId) else {
+          promise.reject(
+            "ERR_DEVICE_DISCONNECTED",
+            "Device \(deviceId) is not connected. iOS only knows a central once it has " +
+              "subscribed, read or written, so wait for onDeviceConnected."
+          )
+          return
+        }
+        promise.resolve([
+          "deviceId": deviceId,
+          "mtu": mtu.mtu,
+          "maxNotificationPayload": mtu.maxNotificationPayload
+        ])
+      }
+    }
 
     AsyncFunction("getBluetoothState") { (promise: Promise) in
       // `CBPeripheralManager.state` needs an instantiated manager, and instantiating one purely
@@ -448,6 +473,14 @@ extension ExpoGattServerModule: GattServerManagerDelegate {
       "deviceId": deviceId,
       "characteristicUuid": characteristicUuid,
       "status": status
+    ])
+  }
+
+  func onMtuChanged(deviceId: String, mtu: DeviceMtu) {
+    sendEvent("onMtuChanged", [
+      "deviceId": deviceId,
+      "mtu": mtu.mtu,
+      "maxNotificationPayload": mtu.maxNotificationPayload
     ])
   }
 

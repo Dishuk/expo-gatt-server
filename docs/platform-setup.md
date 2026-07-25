@@ -140,6 +140,6 @@ To support devices without BLE (with graceful degradation), override this in you
 |---------|-------|-----|
 | `createServer` rejects with permission error | `BLUETOOTH_CONNECT` not granted | Request runtime permission first (API 31+) |
 | `startAdvertising` rejects | `BLUETOOTH_ADVERTISE` not granted, or Bluetooth adapter off | Request permission and check `BluetoothAdapter.isEnabled()` |
-| MTU errors on notification | Central hasn't negotiated a larger MTU | Default MTU is 23 bytes (20 payload). Either send smaller payloads or wait for `onMtuChanged` |
+| MTU errors on notification | Central hasn't negotiated a larger MTU | Default MTU is 23 octets (20-byte payload). Size payloads against `getMtu(deviceId).maxNotificationPayload`, or wait for `addMtuChangedListener` to report a larger one |
 | `deviceId` is a MAC address | Expected on Android | iOS uses UUID, Android uses MAC address. Normalize in your app logic if needed |
 | App crashes on API < 31 | Legacy permissions missing | Ensure `BLUETOOTH` and `BLUETOOTH_ADMIN` are in the merged manifest (they are by default) |

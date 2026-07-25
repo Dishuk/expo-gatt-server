@@ -1,6 +1,14 @@
 import CoreBluetooth
 
-private let defaultAttMtuPayload = 20 // ATT_MTU 23 - 3 header bytes
+/// Default ATT_MTU, in octets — Bluetooth Core Specification, Vol 3, Part G, Section 5.2.1.
+let defaultAttMtu = 23
+
+/// Octets an `ATT_HANDLE_VALUE_NTF` / `ATT_HANDLE_VALUE_IND` PDU spends before the value: a
+/// one-octet Attribute Opcode plus a two-octet Attribute Handle (Core Specification, Vol 3, Part F,
+/// Sections 3.4.7.1 and 3.4.7.2). The value it carries is therefore at most `ATT_MTU - 3` octets.
+let attNotificationHeaderSize = 3
+
+private let defaultAttMtuPayload = defaultAttMtu - attNotificationHeaderSize
 
 /// Upper bound on notifications parked while the CoreBluetooth transmit queue is full. That queue
 /// belongs to the peripheral manager rather than to any one central, so the bound is shared too.
@@ -73,6 +81,22 @@ enum GattServerError: Error {
   }
 }
 
+/// The link budget for one central, expressed in the units the public API uses.
+struct DeviceMtu {
+  /// ATT_MTU in octets.
+  let mtu: Int
+  /// Octets that fit in one notification or indication: `ATT_MTU - 3`.
+  let maxNotificationPayload: Int
+
+  /// iOS only ever reports a payload length — `CBCentral.maximumUpdateValueLength` is "the maximum
+  /// amount of data, in bytes, that can be received by the central in a single notification or
+  /// indication" — so the ATT_MTU is reconstructed from it rather than read directly.
+  init(maxNotificationPayload: Int) {
+    self.maxNotificationPayload = maxNotificationPayload
+    self.mtu = maxNotificationPayload + attNotificationHeaderSize
+  }
+}
+
 /// Identifies a characteristic within the configured GATT database.
 struct CharacteristicAddress: Hashable {
   let service: CBUUID
@@ -100,6 +124,7 @@ protocol GattServerManagerDelegate: AnyObject {
     characteristicUuid: String, offset: Int, value: Data, responseNeeded: Bool
   )
   func onNotificationSent(deviceId: String, characteristicUuid: String, status: Int)
+  func onMtuChanged(deviceId: String, mtu: DeviceMtu)
   func onCharacteristicSubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
   func onCharacteristicUnsubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
 }
@@ -172,6 +197,11 @@ class GattServerManager: NSObject {
   /// write request. A central is therefore discovered on its first ATT activity rather than when
   /// the link is established.
   private var connectedCentrals: [String: CBCentral] = [:]
+
+  /// Last `maximumUpdateValueLength` observed per central, used purely to detect a change.
+  /// CoreBluetooth has no MTU-changed callback, so the only opportunity to notice one is when a
+  /// central next produces activity.
+  private var centralPayloadLengths: [String: Int] = [:]
 
   private var subscribedCentrals: [String: [CBUUID: CBCentral]] = [:]
   private var characteristicValues: [CBUUID: Data] = [:]
@@ -481,6 +511,7 @@ class GattServerManager: NSObject {
     servicesAwaitingRegistration.removeAll()
     addedServices.removeAll()
     connectedCentrals.removeAll()
+    centralPayloadLengths.removeAll()
     subscribedCentrals.removeAll()
     characteristicValues.removeAll()
     pendingRequests.removeAll()
@@ -525,13 +556,30 @@ class GattServerManager: NSObject {
       // nothing truthful to report here.
       delegate?.onDeviceConnected(deviceId: deviceId, name: nil)
     }
+
+    let payloadLength = central.maximumUpdateValueLength
+    if centralPayloadLengths.updateValue(payloadLength, forKey: deviceId) != payloadLength {
+      delegate?.onMtuChanged(
+        deviceId: deviceId, mtu: DeviceMtu(maxNotificationPayload: payloadLength)
+      )
+    }
     return deviceId
+  }
+
+  /// The current link budget for `deviceId`, or `nil` when no such central is known.
+  ///
+  /// Read live from the retained `CBCentral` rather than from the change-detection cache, so the
+  /// answer is whatever CoreBluetooth reports right now.
+  func mtu(for deviceId: String) -> DeviceMtu? {
+    guard let central = connectedCentrals[deviceId] else { return nil }
+    return DeviceMtu(maxNotificationPayload: central.maximumUpdateValueLength)
   }
 
   /// Drops every trace of `deviceId` and reports the disconnection exactly once. A device that was
   /// never seen, or that has already been reported, produces nothing.
   private func markDisconnected(_ deviceId: String, reason: GattServerError) {
     guard connectedCentrals.removeValue(forKey: deviceId) != nil else { return }
+    centralPayloadLengths.removeValue(forKey: deviceId)
     subscribedCentrals.removeValue(forKey: deviceId)
     pendingRequests = pendingRequests.filter {
       $0.value.request.central.identifier.uuidString != deviceId
@@ -580,6 +628,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       // never subscribed to anything.
       let disconnected = Array(connectedCentrals.keys)
       connectedCentrals.removeAll()
+      centralPayloadLengths.removeAll()
       subscribedCentrals.removeAll()
       pendingRequests.removeAll()
       failPendingNotifications(.bluetoothUnavailable(state: peripheral.state))

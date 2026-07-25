@@ -31,8 +31,25 @@ class ExpoGattServerModule : Module() {
       "onNotificationSent",
       "onCharacteristicSubscribed",
       "onCharacteristicUnsubscribed",
-      "onBluetoothStateChanged"
+      "onBluetoothStateChanged",
+      "onMtuChanged"
     )
+
+    AsyncFunction("getMtu") { deviceId: String, promise: Promise ->
+      val mgr = manager ?: run {
+        promise.reject("ERR_NO_SERVER", "Server not created", null)
+        return@AsyncFunction
+      }
+      val mtu = mgr.mtuFor(deviceId) ?: run {
+        promise.reject("ERR_DEVICE_DISCONNECTED", "Device $deviceId is not connected", null)
+        return@AsyncFunction
+      }
+      promise.resolve(bundleOf(
+        "deviceId" to deviceId,
+        "mtu" to mtu.mtu,
+        "maxNotificationPayload" to mtu.maxNotificationPayload
+      ))
+    }
 
     AsyncFunction("getBluetoothState") { promise: Promise ->
       val context = appContext.reactContext
@@ -233,6 +250,14 @@ class ExpoGattServerModule : Module() {
         "deviceId" to deviceId,
         "characteristicUuid" to characteristicUuid,
         "status" to status
+      ))
+    }
+
+    override fun onMtuChanged(deviceId: String, mtu: DeviceMtu) {
+      sendEvent("onMtuChanged", bundleOf(
+        "deviceId" to deviceId,
+        "mtu" to mtu.mtu,
+        "maxNotificationPayload" to mtu.maxNotificationPayload
       ))
     }
 

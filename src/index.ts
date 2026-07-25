@@ -14,6 +14,8 @@ import type {
   CharacteristicUnsubscribedEvent,
   BluetoothState,
   BluetoothStateChangedEvent,
+  DeviceMtu,
+  MtuChangedEvent,
 } from './ExpoGattServer.types';
 
 export type { EventSubscription };
@@ -35,6 +37,8 @@ export {
   type CharacteristicUnsubscribedEvent,
   type BluetoothState,
   type BluetoothStateChangedEvent,
+  type DeviceMtu,
+  type MtuChangedEvent,
   type GattServerEvents,
   GATT_SUCCESS,
   ATT_ERROR_INVALID_HANDLE,
@@ -196,6 +200,29 @@ export async function getBluetoothState(): Promise<BluetoothState> {
  * its first ATT activity instead: a subscribe, a read request or a write request. A central that
  * connects and never touches an attribute is not observable from the peripheral role at all.
  */
+/**
+ * Reads the current ATT MTU for a connected device, so payloads can be sized before they are sent.
+ *
+ * Rejects with `ERR_DEVICE_DISCONNECTED` when the device is not connected, and with
+ * `ERR_NO_SERVER` when no server exists. A device that has not negotiated an MTU reports the
+ * specification default of 23 rather than failing — that default is what the link carries until a
+ * negotiation happens.
+ */
+export async function getMtu(deviceId: string): Promise<DeviceMtu> {
+  return ExpoGattServerModule.getMtu(deviceId);
+}
+
+/**
+ * Fires when a connection's MTU changes. See `MtuChangedEvent` for the difference in timing between
+ * Android, which reports the change as it happens, and iOS, which can only sample the value when
+ * the central next produces activity.
+ */
+export function addMtuChangedListener(
+  listener: (event: MtuChangedEvent) => void,
+): EventSubscription {
+  return ExpoGattServerModule.addListener('onMtuChanged', listener);
+}
+
 export function addDeviceConnectedListener(
   listener: (event: DeviceConnectedEvent) => void,
 ): EventSubscription {

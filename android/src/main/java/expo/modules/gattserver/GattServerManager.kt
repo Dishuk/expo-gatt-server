@@ -19,8 +19,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 private const val TAG = "ExpoGattServer"
-private const val DEFAULT_ATT_MTU = 23
-private const val ATT_HEADER_SIZE = 3
+
+/** Default ATT_MTU, in octets — Bluetooth Core Specification, Vol 3, Part G, Section 5.2.1. */
+const val DEFAULT_ATT_MTU = 23
+
+/**
+ * Octets an `ATT_HANDLE_VALUE_NTF` / `ATT_HANDLE_VALUE_IND` PDU spends before the value: a
+ * one-octet Attribute Opcode plus a two-octet Attribute Handle (Core Specification, Vol 3, Part F,
+ * Sections 3.4.7.1 and 3.4.7.2). The value it carries is therefore at most `ATT_MTU - 3` octets.
+ */
+const val ATT_NOTIFICATION_HEADER_SIZE = 3
 
 /**
  * Upper bound on notifications waiting behind the one the platform is still delivering. Only one
@@ -50,6 +58,17 @@ class MtuException(code: String, message: String) : GattServerException(code, me
 
 /** Identifies a characteristic within the configured GATT database. */
 data class CharacteristicAddress(val service: UUID, val characteristic: UUID)
+
+/**
+ * The link budget for one device, expressed in the units the public API uses.
+ *
+ * Android reports the ATT_MTU directly through `onMtuChanged`, so [mtu] is exact and the payload
+ * capacity is derived from it.
+ */
+data class DeviceMtu(val mtu: Int) {
+  /** Octets that fit in one notification or indication: `ATT_MTU - 3`. */
+  val maxNotificationPayload: Int = mtu - ATT_NOTIFICATION_HEADER_SIZE
+}
 
 /**
  * Per-characteristic opt-in delegation of ATT request handling to JavaScript. Every flag defaults
@@ -99,6 +118,7 @@ class GattServerManager(
       characteristicUuid: String, offset: Int, value: ByteArray, responseNeeded: Boolean
     )
     fun onNotificationSent(deviceId: String, characteristicUuid: String, status: Int)
+    fun onMtuChanged(deviceId: String, mtu: DeviceMtu)
     fun onCharacteristicSubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
     fun onCharacteristicUnsubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
   }
@@ -447,6 +467,7 @@ class GattServerManager(
       device?.let {
         Log.d(TAG, "onMtuChanged: device=${it.address} mtu=$mtu")
         deviceMtu[it.address] = mtu
+        listener?.onMtuChanged(it.address, DeviceMtu(mtu))
       }
     }
   }
@@ -657,6 +678,17 @@ class GattServerManager(
     pumpNotifications(deviceId)
   }
 
+  /**
+   * The current link budget for [deviceId], or `null` when the device is not connected.
+   *
+   * A device that has not negotiated an MTU is reported at the specification default rather than as
+   * unknown — that default is what the link actually carries until a negotiation happens.
+   */
+  fun mtuFor(deviceId: String): DeviceMtu? {
+    if (!connectedDevices.containsKey(deviceId)) return null
+    return DeviceMtu(deviceMtu[deviceId] ?: DEFAULT_ATT_MTU)
+  }
+
   /** Two octets, little endian, as the descriptor value is defined. */
   private fun cccdBits(value: ByteArray): Int =
     (value[0].toInt() and 0xFF) or ((value[1].toInt() and 0xFF) shl 8)
@@ -778,7 +810,7 @@ class GattServerManager(
   private fun mtuErrorFor(deviceId: String, size: Int, subject: String): MtuException? {
     val negotiatedMtu = deviceMtu[deviceId]
     val mtu = negotiatedMtu ?: DEFAULT_ATT_MTU
-    val maxPayload = mtu - ATT_HEADER_SIZE
+    val maxPayload = mtu - ATT_NOTIFICATION_HEADER_SIZE
     if (size <= maxPayload) return null
     return if (negotiatedMtu == null) {
       MtuException("MTU_SMALL", "$subject size $size exceeds default MTU payload capacity of $maxPayload bytes. Client has not negotiated a larger MTU.")

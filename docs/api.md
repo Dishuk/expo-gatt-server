@@ -9,6 +9,7 @@ Complete reference for all exported functions, types, events, and constants.
   - [sendNotification](#sendnotification)
   - [sendResponse](#sendresponse)
   - [updateCharacteristicValue](#updatecharacteristicvalue)
+  - [getMtu](#getmtu)
   - [stopServer](#stopserver)
 - [Event Listeners](#event-listeners)
   - [addDeviceConnectedListener](#adddeviceconnectedlistener)
@@ -16,6 +17,7 @@ Complete reference for all exported functions, types, events, and constants.
   - [addCharacteristicReadRequestListener](#addcharacteristicreadrequestlistener)
   - [addCharacteristicWriteRequestListener](#addcharacteristicwriterequestlistener)
   - [addNotificationSentListener](#addnotificationsentlistener)
+  - [addMtuChangedListener](#addmtuchangedlistener)
   - [addCharacteristicSubscribedListener](#addcharacteristicsubscribedlistener)
   - [addCharacteristicUnsubscribedListener](#addcharacteristicunsubscribedlistener)
 - [Types](#types)
@@ -169,6 +171,36 @@ Does **not** send a notification. Use `sendNotification` to push updates to subs
 
 ---
 
+### getMtu
+
+```typescript
+getMtu(deviceId: string): Promise<DeviceMtu>
+```
+
+Read the current ATT MTU for a connected device, so payloads can be sized before they are sent.
+
+The unit is the **ATT MTU in octets** -- the same thing the Bluetooth Core Specification and the
+Android platform call "MTU". `maxNotificationPayload` is the number to size a `sendNotification`
+payload against; it is `mtu - 3`, the maximum Attribute Value length of an `ATT_HANDLE_VALUE_NTF`
+PDU.
+
+A device that has not negotiated an MTU reports the specification default of `23` rather than
+failing, because that default is what the link actually carries until a negotiation happens.
+
+**Throws** `ERR_DEVICE_DISCONNECTED` when the device is not connected, `ERR_NO_SERVER` when no
+server exists.
+
+| Platform | `mtu` | `maxNotificationPayload` |
+|----------|-------|--------------------------|
+| Android | Exact, from `BluetoothGattServerCallback.onMtuChanged` | Derived as `mtu - 3` |
+| iOS | Derived as `maximumUpdateValueLength + 3` | Exact, from `CBCentral.maximumUpdateValueLength` |
+
+CoreBluetooth exposes only a payload length, never an MTU, so on iOS `mtu` is reconstructed by
+adding the three header octets back. Apple does not document that identity, so prefer
+`maxNotificationPayload` on iOS where the figure is exact.
+
+---
+
 ### stopServer
 
 ```typescript
@@ -280,6 +312,31 @@ Fired after a notification or indication is delivered (or fails).
 
 `characteristicUuid` always identifies the characteristic this particular notification carried, so
 notifying several characteristics, or several devices, reports each one correctly.
+
+---
+
+### addMtuChangedListener
+
+```typescript
+addMtuChangedListener(
+  listener: (event: MtuChangedEvent) => void,
+): Subscription
+```
+
+Fired when a connection's MTU changes, or when it is observed for the first time. The event carries
+the same fields as [`getMtu`](#getmtu).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event.deviceId` | `string` | The device whose MTU changed |
+| `event.mtu` | `number` | ATT MTU in octets |
+| `event.maxNotificationPayload` | `number` | `mtu - 3`; size `sendNotification` payloads against this |
+
+Android delivers this from `BluetoothGattServerCallback.onMtuChanged`, as the change happens. iOS
+has no MTU callback at all, so the value is sampled whenever the central produces ATT activity -- a
+subscribe, read or write -- and the event fires when it differs from the value last seen. On iOS a
+change therefore surfaces at the next activity rather than the moment it happens, and the first
+event for a device arrives alongside `onDeviceConnected`.
 
 ---
 
@@ -425,6 +482,20 @@ interface NotificationSentEvent {
   characteristicUuid: string;
   status: number;
 }
+```
+
+### DeviceMtu / MtuChangedEvent
+
+```typescript
+interface DeviceMtu {
+  deviceId: string;
+  /** ATT MTU in octets, including the 3-octet ATT header. Defaults to 23 before negotiation. */
+  mtu: number;
+  /** Octets that fit in one notification or indication: `mtu - 3`. */
+  maxNotificationPayload: number;
+}
+
+type MtuChangedEvent = DeviceMtu;
 ```
 
 ### CharacteristicSubscribedEvent / CharacteristicUnsubscribedEvent

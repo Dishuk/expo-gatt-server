@@ -4,6 +4,7 @@ import type {
   GattServiceConfig,
   AdvertiseConfig,
   BluetoothState,
+  DeviceMtu,
   GattServerEvents,
 } from './ExpoGattServer.types';
 
@@ -33,6 +34,7 @@ declare class ExpoGattServerModuleType extends NativeModule<GattServerEvents> {
   ): void;
   stopServer(): void;
   getBluetoothState(): Promise<BluetoothState>;
+  getMtu(deviceId: string): Promise<DeviceMtu>;
 }
 
 export default requireNativeModule<ExpoGattServerModuleType>('ExpoGattServer');
