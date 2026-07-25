@@ -38,11 +38,15 @@ public class ExpoGattServerModule: Module {
       }
 
       do {
-        let cbServices = try services.map { try self.parseServiceConfig($0) }
+        var initialValues: [CBUUID: Data] = [:]
+        var cbServices: [CBMutableService] = []
+        for serviceConfig in services {
+          cbServices.append(try self.parseServiceConfig(serviceConfig, initialValues: &initialValues))
+        }
         self.manager?.stop()
         let mgr = GattServerManager()
         mgr.delegate = self
-        mgr.open(services: cbServices)
+        mgr.open(services: cbServices, initialValues: initialValues)
         self.manager = mgr
         promise.resolve(nil)
       } catch {
@@ -236,37 +240,46 @@ public class ExpoGattServerModule: Module {
     return CBUUID(string: string)
   }
 
-  private func parseServiceConfig(_ map: [String: Any]) throws -> CBMutableService {
+  private func parseServiceConfig(
+    _ map: [String: Any],
+    initialValues: inout [CBUUID: Data]
+  ) throws -> CBMutableService {
     let uuid = try parseUuid(map["uuid"], field: "service")
     let service = CBMutableService(type: uuid, primary: true)
 
     var characteristics: [CBMutableCharacteristic] = []
     if let charList = map["characteristics"] as? [[String: Any]] {
       for charMap in charList {
-        characteristics.append(try parseCharacteristicConfig(charMap))
+        characteristics.append(
+          try parseCharacteristicConfig(charMap, initialValues: &initialValues)
+        )
       }
     }
     service.characteristics = characteristics
     return service
   }
 
-  private func parseCharacteristicConfig(_ map: [String: Any]) throws -> CBMutableCharacteristic {
+  private func parseCharacteristicConfig(
+    _ map: [String: Any],
+    initialValues: inout [CBUUID: Data]
+  ) throws -> CBMutableCharacteristic {
     let uuid = try parseUuid(map["uuid"], field: "characteristic")
     let properties = parseProperties(map["properties"] as? [String])
     let permissions = parsePermissions(map["permissions"] as? [String])
-    let initialValue: Data? = (map["value"] as? [Int])?.isEmpty == false
-      ? Data((map["value"] as! [Int]).map { UInt8(clamping: $0) })
-      : nil
 
-    // For notify/indicate characteristics, value must be nil to allow dynamic updates
-    let value: Data? = properties.contains(.notify) || properties.contains(.indicate)
-      ? nil
-      : initialValue
+    // A CBMutableCharacteristic created with a non-nil value is forced read-only by
+    // CoreBluetooth, and adding it with any other properties/permissions raises
+    // "Characteristics with cached values must be read-only". Always publish the
+    // characteristic with a dynamic (nil) value and serve the initial value from our own
+    // cache instead, so that any configuration Android accepts also works here.
+    if let bytes = map["value"] as? [Int], !bytes.isEmpty {
+      initialValues[uuid] = Data(bytes.map { UInt8(clamping: $0) })
+    }
 
     return CBMutableCharacteristic(
       type: uuid,
       properties: properties,
-      value: value,
+      value: nil,
       permissions: permissions
     )
   }

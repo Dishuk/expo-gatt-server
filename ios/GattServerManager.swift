@@ -54,8 +54,9 @@ class GattServerManager: NSObject {
   private var pendingRequests: [Int: CBATTRequest] = [:]
   private var requestCounter = 0
 
-  func open(services: [CBMutableService]) {
+  func open(services: [CBMutableService], initialValues: [CBUUID: Data] = [:]) {
     pendingServices = services
+    characteristicValues = initialValues
     peripheralManager = CBPeripheralManager(delegate: self, queue: .main)
   }
 
