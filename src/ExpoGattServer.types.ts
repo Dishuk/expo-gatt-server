@@ -61,11 +61,66 @@ export interface SendNotificationOptions {
   requireSubscription?: boolean;
 }
 
+/**
+ * Advertising options that only mean something on Android, because the concept they describe has
+ * no CoreBluetooth counterpart. Absent or empty, nothing about the advertisement changes.
+ */
+export interface AndroidAdvertiseOptions {
+  /**
+   * Include the device's *own* Bluetooth name in the scan response, via
+   * `AdvertiseData.Builder.setIncludeDeviceName(true)`.
+   *
+   * Defaults to `true` when `localName` is set and `false` otherwise, so a configuration that asks
+   * for a name still gets one advertised — just the device's own, not the requested string. See
+   * `localName` for why Android cannot advertise an arbitrary one.
+   *
+   * Costs the name's length plus two bytes of the scan response's 31-byte budget.
+   */
+  includeDeviceName?: boolean;
+  /**
+   * Rename the device's Bluetooth adapter to `localName`, so that the name a scanner sees is the
+   * requested one.
+   *
+   * **This changes the phone's system-wide Bluetooth name.** It is not scoped to this
+   * advertisement, this app, or this process: the new name appears in the device's own Bluetooth
+   * settings and to every peer the device talks to, over Classic as well as LE. It is the only way
+   * Android offers to control the advertised name, which is why it is exposed at all — but it is a
+   * decision for the app, not for a library, so it defaults to `false`.
+   *
+   * The module records the name the device had and restores it when advertising stops
+   * (`stopAdvertising`, `stopServer`, or the module being destroyed). Restoration is best-effort:
+   * `BluetoothAdapter.setName` fails while the adapter is off, and a process killed while
+   * advertising never gets to run it, so the renamed adapter can outlive the app. Prefer
+   * `includeDeviceName` unless the exact advertised name genuinely matters.
+   *
+   * Requires `BLUETOOTH_CONNECT` on API 31+, which `BluetoothAdapter.setName` enforces. Rejects
+   * with `ERR_ADVERTISE` when set without a `localName` to rename to. Ignored on iOS, which
+   * honours `localName` directly and has no such setting to change.
+   */
+  setAdapterName?: boolean;
+}
+
 export interface AdvertiseConfig {
+  /**
+   * The local name to advertise.
+   *
+   * **iOS honours this verbatim.** It becomes `CBAdvertisementDataLocalNameKey`, one of the two
+   * keys `CBPeripheralManager.startAdvertising` supports.
+   *
+   * **Android cannot.** The platform has no per-advertisement local name:
+   * `AdvertiseData.Builder` offers only `setIncludeDeviceName(boolean)`, and the name that flag
+   * includes is the *adapter's* — `BluetoothLeAdvertiser` sizes the field from
+   * `BluetoothAdapter.getNameLengthForAdvertise()`. There is no public API for writing an arbitrary
+   * Local Name into an advertisement. So on Android this string is not advertised; the device's own
+   * Bluetooth name is included instead (`android.includeDeviceName`), unless the app explicitly
+   * opts in to renaming the adapter with `android.setAdapterName`.
+   */
   localName?: string;
   serviceUuids?: string[];
   includeTxPowerLevel?: boolean;
   connectable?: boolean;
+  /** Options with no cross-platform meaning. Ignored on iOS. */
+  android?: AndroidAdvertiseOptions;
 }
 
 export interface DeviceConnectedEvent {

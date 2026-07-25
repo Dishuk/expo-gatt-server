@@ -16,8 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sendNotification` option `requireSubscription` for sending without a subscription on Android
 - Error codes `ERR_NO_SUBSCRIBER`, `ERR_NOTIFY_QUEUE_FULL`, `ERR_DEVICE_DISCONNECTED`,
   `ERR_CHARACTERISTIC_NOT_FOUND`
+- `AdvertiseConfig.android` with `includeDeviceName` and `setAdapterName`
 
 ### Changed
+
+- **Breaking:** Android no longer renames the device's Bluetooth adapter when `localName` is set.
+  Android has no per-advertisement local name, so the device's own name is advertised instead. Set
+  `android.setAdapterName` to opt back in to the rename, which is now undone when advertising stops
 
 - `sendNotification` resolves when the platform reports the notification as delivered, and queues
   sends behind one still in flight instead of letting the platform drop them

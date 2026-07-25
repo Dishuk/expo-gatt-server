@@ -131,6 +131,10 @@ class GattServerManager(
   private var advertiser: BluetoothLeAdvertiser? = null
   private var advertiseCallback: AdvertiseCallback? = null
   private var pendingAdvertiseResult: ((String?) -> Unit)? = null
+  // The adapter name the device had before this module renamed it, so the rename can be undone.
+  // `null` means the module has not renamed anything and has nothing to restore. Set from the
+  // caller's thread and read again during teardown, which may be another thread.
+  private val originalAdapterName = AtomicReference<String?>(null)
   private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
   private val deviceMtu = ConcurrentHashMap<String, Int>()
   private val pendingRequests = ConcurrentHashMap<Int, PendingRequest>()
@@ -559,21 +563,39 @@ class GattServerManager(
     openCompletion.getAndSet(null)?.invoke(error)
   }
 
+  /**
+   * Starts advertising.
+   *
+   * Android has no per-advertisement local name. `AdvertiseData.Builder` exposes only
+   * `setIncludeDeviceName(boolean)`, and the name that flag includes is the adapter's own — the
+   * platform sizes the field from `BluetoothAdapter.getNameLengthForAdvertise()`. So [localName] is
+   * not advertised as such: [includeDeviceName] advertises the name the device already has, and
+   * only [setAdapterName] makes the advertised name match [localName], by renaming the adapter —
+   * which changes the device's system-wide Bluetooth name and is therefore never done implicitly.
+   */
   fun startAdvertising(
     localName: String?,
     serviceUuids: List<String>?,
     includeTxPower: Boolean,
     connectable: Boolean,
+    includeDeviceName: Boolean,
+    setAdapterName: Boolean,
     onResult: (error: String?) -> Unit,
   ) {
-    pendingAdvertiseResult?.invoke("Advertising restarted")
-    pendingAdvertiseResult = onResult
-
     val adapter = bluetoothAdapter
       ?: throw IllegalStateException("Bluetooth not available")
 
-    if (localName != null) {
-      adapter.name = localName
+    if (setAdapterName && localName == null) {
+      throw IllegalArgumentException(
+        "android.setAdapterName was requested without a localName for the adapter to be renamed to."
+      )
+    }
+
+    pendingAdvertiseResult?.invoke("Advertising restarted")
+    pendingAdvertiseResult = onResult
+
+    if (setAdapterName && localName != null) {
+      applyAdapterName(adapter, localName)
     }
 
     advertiser = adapter.bluetoothLeAdvertiser
@@ -595,7 +617,7 @@ class GattServerManager(
     }
 
     val scanResponse = AdvertiseData.Builder()
-      .setIncludeDeviceName(localName != null)
+      .setIncludeDeviceName(includeDeviceName)
       .setIncludeTxPowerLevel(includeTxPower)
       .build()
 
@@ -628,6 +650,44 @@ class GattServerManager(
     advertiseCallback = null
     pendingAdvertiseResult?.invoke("Advertising stopped")
     pendingAdvertiseResult = null
+    restoreAdapterName()
+  }
+
+  /**
+   * Renames the adapter, remembering the name it had first so [restoreAdapterName] can put it back.
+   *
+   * `BluetoothAdapter.setName` changes the device's system-wide Bluetooth name, not this
+   * advertisement's — it is visible in the phone's own Bluetooth settings and to every peer, over
+   * Classic as well as LE. Only ever called when the consumer explicitly asked for it.
+   */
+  private fun applyAdapterName(adapter: BluetoothAdapter, name: String) {
+    // Recorded only on the first rename, so restarting advertising repeatedly still restores the
+    // name the device actually had rather than the previous advertisement's.
+    val previous = adapter.name
+    if (previous == null) {
+      // Documented as possible ("or null on error"), and without it there is nothing to restore to.
+      Log.w(TAG, "The current adapter name is unavailable, so it cannot be restored later")
+    } else {
+      originalAdapterName.compareAndSet(null, previous)
+    }
+    if (!adapter.setName(name)) {
+      // `setName` returns false while the adapter is off, and never throws.
+      Log.w(TAG, "Could not set the adapter name to \"$name\"")
+    }
+  }
+
+  /** Puts back the adapter name the device had before [applyAdapterName] changed it. */
+  private fun restoreAdapterName() {
+    val previous = originalAdapterName.get() ?: return
+    val adapter = bluetoothAdapter ?: return
+    if (adapter.setName(previous)) {
+      originalAdapterName.compareAndSet(previous, null)
+      Log.d(TAG, "Restored the adapter name to \"$previous\"")
+    } else {
+      // Kept so a later teardown can try again — `setName` fails while the adapter is off, which is
+      // exactly when a teardown is most likely to run.
+      Log.w(TAG, "Could not restore the adapter name to \"$previous\" yet")
+    }
   }
 
   /**

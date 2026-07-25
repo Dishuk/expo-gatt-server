@@ -126,10 +126,14 @@ await startAdvertising({
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `localName` | `string` | -- | Device name visible to scanners |
+| `localName` | `string` | -- | Local name to advertise. Honoured on iOS only -- Android has no per-advertisement local name |
 | `serviceUuids` | `string[]` | -- | Service UUIDs to include in advertisement |
 | `includeTxPowerLevel` | `boolean` | `false` | Include TX power in advertisement data |
 | `connectable` | `boolean` | `true` | Whether the device accepts connections |
+| `android.includeDeviceName` | `boolean` | `localName !== undefined` | Advertise the device's own Bluetooth name |
+| `android.setAdapterName` | `boolean` | `false` | Rename the phone's system-wide Bluetooth name to `localName` |
+
+On Android, `localName` cannot be advertised as given: the platform only offers "include the adapter's name". By default the device's existing name is advertised instead. Set `android.setAdapterName` to opt in to renaming the adapter, which the module reverses when advertising stops. See [the API reference](./api.md#the-advertised-local-name) for the details and caveats.
 
 The promise resolves when advertising starts successfully. On iOS, this requires Bluetooth to be powered on. On Android, this requires the `BLUETOOTH_ADVERTISE` permission.
 

@@ -25,6 +25,7 @@ export {
   type GattCharacteristicConfig,
   type CharacteristicDelegateConfig,
   type AdvertiseConfig,
+  type AndroidAdvertiseOptions,
   type SendNotificationOptions,
   type CharacteristicProperty,
   type CharacteristicPermission,

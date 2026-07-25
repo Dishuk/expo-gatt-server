@@ -54,12 +54,25 @@ Begin BLE advertisement. The device becomes visible to nearby scanners.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `config.localName` | `string` | -- | Device name in advertisement data |
+| `config.localName` | `string` | -- | Local name to advertise. **iOS only** -- see below |
 | `config.serviceUuids` | `string[]` | -- | Service UUIDs to advertise |
 | `config.includeTxPowerLevel` | `boolean` | `false` | Include TX power level |
 | `config.connectable` | `boolean` | `true` | Accept incoming connections |
+| `config.android.includeDeviceName` | `boolean` | `localName !== undefined` | Include the device's own Bluetooth name in the scan response |
+| `config.android.setAdapterName` | `boolean` | `false` | Rename the device's Bluetooth adapter to `localName` |
 
-**Throws** if Bluetooth is not powered on (iOS) or `BLUETOOTH_ADVERTISE` permission is missing (Android).
+**Throws** if Bluetooth is not powered on (iOS) or `BLUETOOTH_ADVERTISE` permission is missing (Android). `android.setAdapterName` additionally requires `BLUETOOTH_CONNECT` on API 31+, and rejects with `ERR_ADVERTISE` when no `localName` is supplied.
+
+#### The advertised local name
+
+`localName` is honoured verbatim on iOS: it becomes `CBAdvertisementDataLocalNameKey`, one of the two advertisement keys `CBPeripheralManager.startAdvertising` supports.
+
+**Android has no per-advertisement local name.** `AdvertiseData.Builder` exposes only `setIncludeDeviceName(boolean)`, and the name that flag includes is the *adapter's* -- `BluetoothLeAdvertiser` sizes the field from `BluetoothAdapter.getNameLengthForAdvertise()`. No public API writes an arbitrary Local Name into an advertisement. Android therefore has two options, neither of which advertises `localName` as given:
+
+- **`android.includeDeviceName`** (the default whenever `localName` is set) advertises the name the device already has, in the scan response. Nothing is mutated.
+- **`android.setAdapterName`** renames the adapter to `localName` so scanners see the requested string. This changes the phone's **system-wide** Bluetooth name -- visible in the device's own Bluetooth settings and to every peer, over Classic as well as LE. The module records the previous name and restores it on `stopAdvertising`, `stopServer`, or module destruction, but restoration is best-effort: `BluetoothAdapter.setName` fails while the adapter is off, and a process killed while advertising never runs it. Prefer `includeDeviceName` unless the exact advertised name genuinely matters.
+
+Earlier versions renamed the adapter unconditionally whenever `localName` was set, and never restored it.
 
 ---
 
@@ -451,6 +464,16 @@ interface AdvertiseConfig {
   serviceUuids?: string[];
   includeTxPowerLevel?: boolean;
   connectable?: boolean;
+  android?: AndroidAdvertiseOptions;
+}
+```
+
+### AndroidAdvertiseOptions
+
+```typescript
+interface AndroidAdvertiseOptions {
+  includeDeviceName?: boolean;
+  setAdapterName?: boolean;
 }
 ```
 

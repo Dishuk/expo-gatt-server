@@ -109,12 +109,34 @@ class ExpoGattServerModule : Module() {
         promise.reject("ERR_NO_SERVER", "Server not created. Call createServer first.", null)
         return@AsyncFunction
       }
+      val localName = config["localName"] as? String
+      val androidOptions = config["android"] as? Map<*, *>
+      val setAdapterName = androidOptions?.get("setAdapterName") as? Boolean ?: false
+      // A configuration that asks for a name still gets one advertised by default — the device's
+      // own, since Android has no per-advertisement local name to put the requested string in.
+      val includeDeviceName =
+        androidOptions?.get("includeDeviceName") as? Boolean ?: (localName != null)
+
+      // Renaming the adapter goes through `BluetoothAdapter.setName`, which enforces
+      // BLUETOOTH_CONNECT on API 31+. Checked here so the opt-in fails with a permission error
+      // rather than a SecurityException from the Bluetooth stack.
+      if (setAdapterName && missingPermission(android.Manifest.permission.BLUETOOTH_CONNECT)) {
+        promise.reject(
+          "ERR_PERMISSION",
+          "BLUETOOTH_CONNECT permission not granted, which android.setAdapterName requires",
+          null
+        )
+        return@AsyncFunction
+      }
+
       try {
-        val localName = config["localName"] as? String
         val serviceUuids = (config["serviceUuids"] as? List<*>)?.mapNotNull { it as? String }
         val includeTxPower = config["includeTxPowerLevel"] as? Boolean ?: false
         val connectable = config["connectable"] as? Boolean ?: true
-        mgr.startAdvertising(localName, serviceUuids, includeTxPower, connectable) { error ->
+        mgr.startAdvertising(
+          localName, serviceUuids, includeTxPower, connectable,
+          includeDeviceName, setAdapterName
+        ) { error ->
           if (error != null) {
             promise.reject("ERR_ADVERTISE", error, null)
           } else {
