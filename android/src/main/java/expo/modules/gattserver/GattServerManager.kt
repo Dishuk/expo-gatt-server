@@ -61,6 +61,18 @@ const val MAX_ADVERTISING_TIMEOUT_MS = 180_000
 /** ATT "Invalid Attribute Value Length" — Core Specification, Vol 3, Part F, Table 3.4. */
 private const val ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH = 0x0D
 
+/** ATT "Prepare Queue Full" — Core Specification, Vol 3, Part F, Table 3.4. */
+private const val ATT_ERROR_PREPARE_QUEUE_FULL = 0x09
+
+/**
+ * Prepared writes one device may queue before an execute. "A server may limit the number of prepared
+ * writes that it can queue. A higher layer specification should define this limit" (Core
+ * Specification, Vol 3, Part F, Section 3.4.6.1), and exceeding it is answered with
+ * [ATT_ERROR_PREPARE_QUEUE_FULL]. 64 covers a 512-octet attribute written in the smallest parts the
+ * default ATT_MTU allows, with room to spare for a reliable write spanning several attributes.
+ */
+private const val MAX_PREPARED_WRITES_PER_DEVICE = 64
+
 /** ATT "Unlikely Error" — Core Specification, Vol 3, Part F, Table 3.4. */
 private const val ATT_ERROR_UNLIKELY_ERROR = 0x0E
 
@@ -223,6 +235,13 @@ class GattServerManager(
   // is touched from the caller's thread and from the binder thread that delivers the callback.
   private val notificationQueues = ConcurrentHashMap<String, NotificationQueue>()
 
+  // "Each client's queued values are separate; the execution of one queue shall not affect the
+  // preparation or execution of any other client's queued values" (Core Specification, Vol 3,
+  // Part F, Section 3.4.6.1), so the queue is keyed by device. Every mutation goes through
+  // `compute`, whose bin lock is what makes the lists safe against the binder threads that deliver
+  // prepares, executes and disconnects.
+  private val preparedWrites = ConcurrentHashMap<String, MutableList<PreparedWrite>>()
+
   /**
    * A request awaiting `sendResponse`.
    *
@@ -238,6 +257,29 @@ class GattServerManager(
     val isRead: Boolean,
     val timeout: Runnable? = null,
   )
+
+  /**
+   * One `ATT_PREPARE_WRITE_REQ` held until its execute arrives. "The server shall not change the
+   * value of the attribute until an ATT_EXECUTE_WRITE_REQ PDU is received", and repeats of the same
+   * handle "will then be executed in the order received" rather than replacing one another (Core
+   * Specification, Vol 3, Part F, Section 3.4.6.1).
+   */
+  private sealed class PreparedWrite {
+    abstract val offset: Int
+    abstract val value: ByteArray
+
+    class ToCharacteristic(
+      val characteristic: BluetoothGattCharacteristic,
+      override val offset: Int,
+      override val value: ByteArray,
+    ) : PreparedWrite()
+
+    class ToDescriptor(
+      val descriptor: BluetoothGattDescriptor,
+      override val offset: Int,
+      override val value: ByteArray,
+    ) : PreparedWrite()
+  }
 
   /** One notification waiting for, or occupying, the single outstanding slot a device has. */
   private class QueuedNotification(
@@ -353,6 +395,7 @@ class GattServerManager(
     connectedDevices.clear()
     deviceMtu.clear()
     discardPendingRequests { true }
+    preparedWrites.clear()
     failAllNotifications(GattServerException("ERR_BLUETOOTH", "Bluetooth was turned off"))
     // The server is gone, so no onConnectionStateChange callbacks will arrive for these.
     disconnected.forEach {
@@ -396,6 +439,10 @@ class GattServerManager(
           connectedDevices.remove(id)
           deviceMtu.remove(id)
           discardPendingRequests { it.deviceId == id }
+          // "If all ATT bearers belonging to the same client are lost while a number of pending
+          // prepare write values have been queued, the queue will be cleared and no writes will be
+          // executed" (Core Specification, Vol 3, Part F, Section 3.4.6.1).
+          preparedWrites.remove(id)
           // Nothing will ever acknowledge these now, so fail them instead of leaking the queue.
           failNotifications(id, GattServerException("ERR_DEVICE_DISCONNECTED", "Device $id disconnected"))
           clearSubscriptions(id)
@@ -452,6 +499,16 @@ class GattServerManager(
     ) {
       val serviceUuid = characteristic.service?.uuid?.toString() ?: ""
       val data = value ?: ByteArray(0)
+
+      if (preparedWrite) {
+        queuePreparedWrite(
+          device, requestId,
+          PreparedWrite.ToCharacteristic(characteristic, offset, data),
+          responseNeeded
+        )
+        return
+      }
+
       // A write without a response cannot be answered at all, so it is never delegated even when
       // the characteristic opted in — there is nothing for JavaScript to reply to.
       val delegated = delegationFor(characteristic).write && responseNeeded
@@ -475,6 +532,15 @@ class GattServerManager(
       preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?
     ) {
       Log.d(TAG, "onDescriptorWriteRequest: device=${device.address} desc=${descriptor.uuid} responseNeeded=$responseNeeded value=${value?.joinToString(",") { String.format("%02x", it) }}")
+
+      if (preparedWrite) {
+        queuePreparedWrite(
+          device, requestId,
+          PreparedWrite.ToDescriptor(descriptor, offset, value ?: ByteArray(0)),
+          responseNeeded
+        )
+        return
+      }
 
       if (descriptor.uuid == CCCD_UUID) {
         // The specification fixes the length at two octets, so anything else is malformed and is
@@ -554,6 +620,27 @@ class GattServerManager(
         Log.w(TAG, "onNotificationSent: no in-flight notification for device=$deviceId status=$status")
       }
       pumpNotifications(deviceId)
+    }
+
+    /**
+     * Applies or discards everything the device prepared, as the execute's flag directs.
+     *
+     * Flag 0x01 writes "all pending prepare write values that are currently queued [...] in the
+     * order they were received"; flag 0x00 discards them. Either way "the queue shall then be
+     * cleared and an ATT_EXECUTE_WRITE_RSP PDU shall be sent" — including when nothing was queued
+     * (Core Specification, Vol 3, Part F, Section 3.4.6.3). Android surfaces the flag as [execute]
+     * and requires the response like any other request.
+     */
+    @SuppressLint("MissingPermission")
+    override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
+      val queued = preparedWrites.remove(device.address) ?: emptyList<PreparedWrite>()
+      Log.d(TAG, "onExecuteWrite: device=${device.address} execute=$execute queued=${queued.size}")
+
+      if (!execute) {
+        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+        return
+      }
+      applyPreparedWrites(device, requestId, queued)
     }
 
     override fun onServiceAdded(status: Int, service: BluetoothGattService) {
@@ -1039,6 +1126,140 @@ class GattServerManager(
   }
 
   /**
+   * Holds one part of a long or reliable write until the execute arrives, and echoes it back.
+   *
+   * The response's handle, offset and part value "shall be set to the same value as in the
+   * corresponding ATT_PREPARE_WRITE_REQ PDU" (Core Specification, Vol 3, Part F, Section 3.4.6.2) —
+   * a Reliable Write client compares them and cancels the whole procedure if they differ. A refused
+   * prepare leaves the existing queue untouched, as the specification requires.
+   */
+  @SuppressLint("MissingPermission")
+  private fun queuePreparedWrite(
+    device: BluetoothDevice,
+    requestId: Int,
+    write: PreparedWrite,
+    responseNeeded: Boolean,
+  ) {
+    var accepted = false
+    preparedWrites.compute(device.address) { _, existing ->
+      val queue = existing ?: mutableListOf()
+      if (queue.size < MAX_PREPARED_WRITES_PER_DEVICE) {
+        queue.add(write)
+        accepted = true
+      }
+      queue
+    }
+    if (!accepted) {
+      Log.w(TAG, "onPreparedWrite: queue full for device=${device.address}, rejecting")
+      if (responseNeeded) {
+        gattServer?.sendResponse(device, requestId, ATT_ERROR_PREPARE_QUEUE_FULL, write.offset, null)
+      }
+      return
+    }
+    if (responseNeeded) {
+      gattServer?.sendResponse(
+        device, requestId, BluetoothGatt.GATT_SUCCESS, write.offset, write.value
+      )
+    }
+  }
+
+  /**
+   * Executes [queued] as one atomic operation, in the order the parts were received.
+   *
+   * Parts are assembled onto each attribute's current value first and nothing is applied until every
+   * one of them has been validated, because the execute either wholly succeeds or wholly fails: a
+   * part starting past the end of its attribute is answered with "Invalid Offset" and discards the
+   * entire queue (Core Specification, Vol 3, Part F, Section 3.4.6.3).
+   */
+  @SuppressLint("MissingPermission")
+  private fun applyPreparedWrites(
+    device: BluetoothDevice,
+    requestId: Int,
+    queued: List<PreparedWrite>,
+  ) {
+    // Identity-keyed, which is what is wanted: these are the very instances the published database
+    // holds, and neither class overrides equals.
+    val characteristicValues = LinkedHashMap<BluetoothGattCharacteristic, ByteArray>()
+    val descriptorValues = LinkedHashMap<BluetoothGattDescriptor, ByteArray>()
+
+    for (write in queued) {
+      @Suppress("DEPRECATION")
+      val current = when (write) {
+        is PreparedWrite.ToCharacteristic ->
+          characteristicValues[write.characteristic] ?: write.characteristic.value
+        is PreparedWrite.ToDescriptor ->
+          descriptorValues[write.descriptor] ?: write.descriptor.value
+      } ?: ByteArray(0)
+
+      val merged = spliceAt(current, write.offset, write.value)
+      if (merged == null) {
+        Log.w(TAG, "onExecuteWrite: offset ${write.offset} past the end of a ${current.size}-byte value, rejecting")
+        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, 0, null)
+        return
+      }
+      when (write) {
+        is PreparedWrite.ToCharacteristic -> characteristicValues[write.characteristic] = merged
+        is PreparedWrite.ToDescriptor -> descriptorValues[write.descriptor] = merged
+      }
+    }
+
+    // The specification fixes a CCCD at two octets, so a prepared write that assembles to any other
+    // length is rejected here rather than parsed into a guess, exactly as a direct write would be.
+    descriptorValues.forEach { (descriptor, value) ->
+      if (descriptor.uuid == CCCD_UUID && value.size != CCCD_VALUE_LENGTH) {
+        Log.w(TAG, "onExecuteWrite: prepared CCCD write assembles to ${value.size} octets, rejecting")
+        gattServer?.sendResponse(
+          device, requestId, ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH, 0, null
+        )
+        return
+      }
+    }
+
+    descriptorValues.forEach { (descriptor, value) ->
+      if (descriptor.uuid == CCCD_UUID) {
+        applyClientConfiguration(device, descriptor.characteristic, cccdBits(value))
+      } else {
+        @Suppress("DEPRECATION")
+        descriptor.value = value
+      }
+    }
+
+    // A delegated write is JavaScript's to accept or reject, so the assembled value is withheld
+    // until it answers, and one pending request stands for the whole atomic execute.
+    val delegated = characteristicValues.keys.any { delegationFor(it).write }
+    if (delegated) {
+      registerPendingRequest(requestId, device.address, offset = 0, isRead = false)
+    } else {
+      characteristicValues.forEach { (characteristic, value) ->
+        @Suppress("DEPRECATION")
+        characteristic.value = value
+      }
+      gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+    }
+
+    // The reassembled value is reported once per attribute from offset 0, rather than replaying the
+    // fragments the client happened to split it into.
+    characteristicValues.forEach { (characteristic, value) ->
+      listener?.onCharacteristicWriteRequest(
+        device.address, requestId, characteristic.service?.uuid?.toString() ?: "",
+        characteristic.uuid.toString(), 0, value, delegated
+      )
+    }
+  }
+
+  /**
+   * Writes [part] into [current] at [offset], extending the value when the part runs past its end.
+   * Returns `null` for an offset beyond the current end, which the specification answers with
+   * "Invalid Offset" — an offset exactly at the end appends and is in range.
+   */
+  private fun spliceAt(current: ByteArray, offset: Int, part: ByteArray): ByteArray? {
+    if (offset > current.size) return null
+    val result = current.copyOf(maxOf(current.size, offset + part.size))
+    part.copyInto(result, offset)
+    return result
+  }
+
+  /**
    * Records a request handed to JavaScript and arms the expiry that answers it if JavaScript never
    * does. Called before the event is emitted, so a listener that responds synchronously still finds
    * the request.
@@ -1234,6 +1455,7 @@ class GattServerManager(
     connectedDevices.clear()
     deviceMtu.clear()
     discardPendingRequests { true }
+    preparedWrites.clear()
     failAllNotifications(GattServerException("ERR_NO_SERVER", "Server stopped"))
     subscriptions.clear()
     delegations.clear()

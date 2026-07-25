@@ -228,11 +228,21 @@ export interface CharacteristicReadRequestEvent {
   offset: number;
 }
 
+/**
+ * A central wrote to a characteristic.
+ *
+ * A long or reliable write — the `ATT_PREPARE_WRITE_REQ` / `ATT_EXECUTE_WRITE_REQ` procedure a
+ * central uses for a value too long for one PDU — is reported on Android as a single event per
+ * attribute, carrying the reassembled value at `offset: 0`, once the execute has committed it.
+ * Cancelled queues emit nothing. iOS cannot report the distinction: CoreBluetooth exposes no
+ * prepared-write callback, so the fragmentation happens below the app layer.
+ */
 export interface CharacteristicWriteRequestEvent {
   deviceId: string;
   requestId: number;
   serviceUuid: string;
   characteristicUuid: string;
+  /** Where `value` begins within the attribute. Always `0` for a reassembled long write. */
   offset: number;
   value: number[];
   /**

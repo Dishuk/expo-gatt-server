@@ -424,9 +424,42 @@ Fired when a central writes to a characteristic.
 
 > **Android:** Write responses are auto-sent by the native layer when `responseNeeded` is true.
 
----
+#### Long writes and reliable writes
 
-### addNotificationSentListener
+A central writing a value longer than one `ATT_WRITE_REQ` can carry uses the queued-write procedure:
+a run of `ATT_PREPARE_WRITE_REQ` PDUs each carrying a fragment and its offset, then a single
+`ATT_EXECUTE_WRITE_REQ` that applies or cancels the lot (Vol 3, Part F, Section 3.4.6; Vol 3, Part G,
+Sections 4.9.4 and 4.9.5).
+
+On **Android** the module buffers the fragments per device, echoing each one back in its prepare
+response as the specification requires, and applies nothing until the execute arrives -- "the server
+shall not change the value of the attribute until an `ATT_EXECUTE_WRITE_REQ` PDU is received". On
+execute:
+
+- **Flag `0x01`** -- fragments are assembled onto each attribute's current value in the order they
+  were received, then applied atomically. One event per attribute is emitted with the **reassembled**
+  value and `offset: 0`, rather than one per fragment.
+- **Flag `0x00`** -- everything queued is discarded and nothing is applied or emitted.
+- A fragment starting past the end of its attribute fails the whole execute with
+  `ATT_ERROR_INVALID_OFFSET` and discards the queue.
+- More than 64 queued fragments are refused with `ATT_ERROR_PREPARE_QUEUE_FULL`; the already-queued
+  fragments survive, as the specification requires.
+- The queue is per device and is dropped when that device disconnects, when Bluetooth is turned off,
+  and on `stopServer`.
+
+If the characteristic is configured with `delegate.write`, the execute is what waits for
+`sendResponse` -- a single `requestId` covering the whole atomic operation, exactly as an iOS write
+batch does. The individual prepare steps are never delegated; there is nothing meaningful to accept
+or reject until the execute says the value is real.
+
+> **iOS does not expose prepared writes at all.** `CBPeripheralManagerDelegate` declares twelve
+> methods and none of them concerns prepare or execute; `CBATTRequest` carries only `central`,
+> `characteristic`, `offset` and `value`, with no prepared-write flag. (`CBATTError` does define
+> `prepareQueueFull`, but that is just the complete ATT error table -- there is no callback to return
+> it from.) CoreBluetooth handles the procedure below the app layer and surfaces whatever it decides
+> to surface through `didReceiveWriteRequests`, so there is nothing for the module to buffer and
+> nothing to configure. Long writes to an iOS peripheral work, but the fragmentation is not
+> observable and the execute cannot be rejected.
 
 ```typescript
 addNotificationSentListener(

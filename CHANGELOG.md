@@ -64,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Android ignored the `preparedWrite` flag and never answered `onExecuteWrite`, so a central
+  performing an ATT long or reliable write had its fragments applied immediately and then hung
+  waiting for an execute response that never came. Fragments are now buffered per device and applied
+  or discarded on execute, and the reassembled value is reported as one write event per attribute.
+  iOS is unaffected — CoreBluetooth does not expose prepared writes to the peripheral role
 - Android treated an unavailable React context as "permission granted" and carried on into a
   `SecurityException`. `createServer` and `startAdvertising` now reject with `ERR_NO_CONTEXT`
 
