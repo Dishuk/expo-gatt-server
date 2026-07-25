@@ -157,16 +157,22 @@ public class ExpoGattServerModule: Module {
       }
       DispatchQueue.main.async {
         do {
-          let success = try mgr.sendNotification(
+          // Resolves once CoreBluetooth has accepted the payload for transmission. A payload the
+          // transmit queue could not take stays queued and resolves when it is resent, so a caller
+          // that awaits it paces itself against the link instead of overrunning it.
+          try mgr.sendNotification(
             deviceId: deviceId,
             serviceUuid: serviceUuid,
             characteristicUuid: characteristicUuid,
             value: data
-          )
-          if success {
-            promise.resolve(nil)
-          } else {
-            promise.reject("ERR_NOTIFY", "Failed to send notification — transmit queue full, will retry on peripheralManagerIsReady")
+          ) { error in
+            if let error = error as? GattServerError {
+              promise.reject(error.code, error.message)
+            } else if let error = error {
+              promise.reject("ERR_NOTIFY", error.localizedDescription)
+            } else {
+              promise.resolve(nil)
+            }
           }
         } catch let error as GattServerError {
           promise.reject(error.code, error.message)

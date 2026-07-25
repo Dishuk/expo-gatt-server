@@ -2,6 +2,11 @@ import CoreBluetooth
 
 private let defaultAttMtuPayload = 20 // ATT_MTU 23 - 3 header bytes
 
+/// Upper bound on notifications parked while the CoreBluetooth transmit queue is full. Without a
+/// bound a producer that outruns the link would grow the queue forever; exceeding it fails the
+/// call rather than dropping a payload silently.
+private let maxQueuedNotificationsPerDevice = 64
+
 enum GattServerError: Error {
   case mtuSmall(maxPayload: Int, payloadSize: Int)
   case payloadExceedsMtu(maxPayload: Int, payloadSize: Int, responded: Bool)
@@ -9,6 +14,9 @@ enum GattServerError: Error {
   case bluetoothUnavailable(state: CBManagerState)
   case serviceRegistrationFailed(uuid: String, reason: String)
   case serverStopped
+  case characteristicNotFound(service: String, characteristic: String)
+  case notifyQueueFull(deviceId: String, limit: Int)
+  case deviceDisconnected(deviceId: String)
 
   var code: String {
     switch self {
@@ -19,6 +27,9 @@ enum GattServerError: Error {
       return state == .unauthorized ? "ERR_PERMISSION" : "ERR_BLUETOOTH"
     case .serviceRegistrationFailed: return "ERR_CREATE_SERVER"
     case .serverStopped: return "ERR_NO_SERVER"
+    case .characteristicNotFound: return "ERR_CHARACTERISTIC_NOT_FOUND"
+    case .notifyQueueFull: return "ERR_NOTIFY_QUEUE_FULL"
+    case .deviceDisconnected: return "ERR_DEVICE_DISCONNECTED"
     }
   }
 
@@ -42,6 +53,13 @@ enum GattServerError: Error {
       return "Failed to publish service \(uuid): \(reason)"
     case .serverStopped:
       return "Server was stopped before it finished opening"
+    case .characteristicNotFound(let service, let characteristic):
+      return "Characteristic \(characteristic) was not found in service \(service)"
+    case .notifyQueueFull(let deviceId, let limit):
+      return "Device \(deviceId) already has \(limit) notifications waiting to be sent. " +
+        "Wait for earlier sends to resolve before queueing more."
+    case .deviceDisconnected(let deviceId):
+      return "Device \(deviceId) disconnected"
     }
   }
 }
@@ -140,6 +158,26 @@ class GattServerManager: NSObject {
   // Fallback for a characteristic whose owning service cannot be identified. Only populated for
   // characteristic UUIDs that occur exactly once in the configuration, so a hit is unambiguous.
   private var delegationsByCharacteristic: [CBUUID: CharacteristicDelegation] = [:]
+
+  /// Notifications CoreBluetooth could not accept yet, oldest first. Apple documents that when
+  /// `updateValue(_:for:onSubscribedCentrals:)` returns `false` "because the underlying transmit
+  /// queue is full", the manager calls `peripheralManagerIsReady(toUpdateSubscribers:)` "when more
+  /// space in the transmit queue becomes available. After you receive this delegate method
+  /// callback, you may resend the update" — so exactly these payloads, in this order, are what has
+  /// to be resent.
+  private var pendingNotifications: [QueuedNotification] = []
+
+  private struct QueuedNotification {
+    let deviceId: String
+    let characteristicUuid: CBUUID
+    let characteristic: CBMutableCharacteristic
+    let central: CBCentral
+    let value: Data
+    /// Reported once the payload is accepted rather than instead of accepting it: an oversized
+    /// value is still transmitted, truncated, so the caller is told what actually went out.
+    let deferredError: GattServerError?
+    let completion: (Error?) -> Void
+  }
 
   private struct PendingRequest {
     let request: CBATTRequest
@@ -266,39 +304,104 @@ class GattServerManager: NSObject {
     }
   }
 
+  /// Sends one notification and reports the outcome through `completion` — with `nil` once
+  /// CoreBluetooth has accepted the payload for transmission, or with the failure that stopped it.
+  /// Throws only for problems detectable before the payload joins the queue.
+  ///
+  /// A payload the transmit queue cannot take is retained and resent, in order, when the manager
+  /// reports it is ready again. Nothing else is resent: an unrelated central never receives an
+  /// unsolicited update because another central's send was throttled.
   func sendNotification(
     deviceId: String, serviceUuid: String,
-    characteristicUuid: String, value: Data
-  ) throws -> Bool {
+    characteristicUuid: String, value: Data,
+    completion: @escaping (Error?) -> Void
+  ) throws {
     let charUUID = CBUUID(string: characteristicUuid)
 
     guard let characteristic = findCharacteristic(
       serviceUuid: CBUUID(string: serviceUuid),
       characteristicUuid: charUUID
-    ) else { return false }
+    ) else {
+      throw GattServerError.characteristicNotFound(
+        service: serviceUuid, characteristic: characteristicUuid
+      )
+    }
 
     guard let centrals = subscribedCentrals[deviceId],
           let central = centrals[charUUID] else {
       characteristicValues[charUUID] = value
-      return true
+      completion(nil)
+      return
     }
 
     characteristicValues[charUUID] = value
 
-    let sent = peripheralManager?.updateValue(
-      value, for: characteristic, onSubscribedCentrals: [central]
-    ) ?? false
-
     let maxPayload = central.maximumUpdateValueLength
+    var deferredError: GattServerError?
     if value.count > maxPayload {
-      if maxPayload <= defaultAttMtuPayload {
-        throw GattServerError.mtuSmall(maxPayload: maxPayload, payloadSize: value.count)
-      } else {
-        throw GattServerError.payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count, responded: false)
-      }
+      deferredError = maxPayload <= defaultAttMtuPayload
+        ? .mtuSmall(maxPayload: maxPayload, payloadSize: value.count)
+        : .payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count, responded: false)
     }
 
-    return sent
+    let entry = QueuedNotification(
+      deviceId: deviceId,
+      characteristicUuid: charUUID,
+      characteristic: characteristic,
+      central: central,
+      value: value,
+      deferredError: deferredError,
+      completion: completion
+    )
+
+    // Anything already waiting has to go out first, or a later payload would overtake an earlier
+    // one on the same characteristic.
+    guard pendingNotifications.isEmpty else {
+      guard pendingNotifications.count < maxQueuedNotificationsPerDevice else {
+        throw GattServerError.notifyQueueFull(
+          deviceId: deviceId, limit: maxQueuedNotificationsPerDevice
+        )
+      }
+      pendingNotifications.append(entry)
+      return
+    }
+
+    if !deliver(entry) {
+      pendingNotifications.append(entry)
+    }
+  }
+
+  /// Hands one queued notification to CoreBluetooth. Returns `false` only when the transmit queue
+  /// is full and the entry must stay queued until the manager reports it is ready.
+  private func deliver(_ entry: QueuedNotification) -> Bool {
+    guard let peripheral = peripheralManager else {
+      entry.completion(GattServerError.serverStopped)
+      return true
+    }
+    guard peripheral.updateValue(
+      entry.value, for: entry.characteristic, onSubscribedCentrals: [entry.central]
+    ) else {
+      return false
+    }
+    delegate?.onNotificationSent(
+      deviceId: entry.deviceId,
+      characteristicUuid: entry.characteristicUuid.uuidString,
+      status: 0
+    )
+    entry.completion(entry.deferredError)
+    return true
+  }
+
+  /// Fails and drops every queued notification matching `predicate`.
+  private func failPendingNotifications(
+    _ error: GattServerError, where predicate: (QueuedNotification) -> Bool = { _ in true }
+  ) {
+    let abandoned = pendingNotifications.filter(predicate)
+    guard !abandoned.isEmpty else { return }
+    pendingNotifications.removeAll(where: predicate)
+    for entry in abandoned {
+      entry.completion(error)
+    }
   }
 
   func sendResponse(
@@ -337,6 +440,7 @@ class GattServerManager: NSObject {
     stopAdvertising()
     completeOpen(GattServerError.serverStopped)
     flushReadinessWaiters(GattServerError.serverStopped)
+    failPendingNotifications(.serverStopped)
     for (_, service) in addedServices {
       peripheralManager?.remove(service)
     }
@@ -390,6 +494,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       let disconnected = Array(subscribedCentrals.keys)
       subscribedCentrals.removeAll()
       pendingRequests.removeAll()
+      failPendingNotifications(.bluetoothUnavailable(state: peripheral.state))
       for deviceId in disconnected {
         delegate?.onDeviceDisconnected(deviceId: deviceId)
       }
@@ -446,6 +551,10 @@ extension GattServerManager: CBPeripheralManagerDelegate {
   ) {
     let deviceId = central.identifier.uuidString
     subscribedCentrals[deviceId]?.removeValue(forKey: characteristic.uuid)
+    // Nothing will ever accept these now, so fail them instead of leaking the queue.
+    failPendingNotifications(.deviceDisconnected(deviceId: deviceId)) {
+      $0.deviceId == deviceId && $0.characteristicUuid == characteristic.uuid
+    }
     if subscribedCentrals[deviceId]?.isEmpty == true {
       subscribedCentrals.removeValue(forKey: deviceId)
       pendingRequests = pendingRequests.filter {
@@ -531,28 +640,12 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     }
   }
 
+  /// Resends only the payloads that were actually refused, oldest first, and stops as soon as the
+  /// transmit queue fills again so the rest keep their place in line.
   func peripheralManagerIsReady(_ peripheral: CBPeripheralManager) {
-    for (deviceId, subs) in subscribedCentrals {
-      for (charUUID, central) in subs {
-        guard let value = characteristicValues[charUUID],
-              let service = addedServices.values.first(where: {
-                $0.characteristics?.contains(where: { $0.uuid == charUUID }) ?? false
-              }),
-              let characteristic = service.characteristics?.first(where: {
-                $0.uuid == charUUID
-              }) as? CBMutableCharacteristic else { continue }
-
-        let sent = peripheral.updateValue(
-          value, for: characteristic, onSubscribedCentrals: [central]
-        )
-        if sent {
-          delegate?.onNotificationSent(
-            deviceId: deviceId,
-            characteristicUuid: charUUID.uuidString,
-            status: 0
-          )
-        }
-      }
+    while let next = pendingNotifications.first {
+      guard deliver(next) else { return }
+      pendingNotifications.removeFirst()
     }
   }
 }

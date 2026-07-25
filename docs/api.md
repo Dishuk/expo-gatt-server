@@ -102,6 +102,11 @@ stream against the connection instead of overrunning it.
 > ([`onNotificationSent`](https://developer.android.com/reference/android/bluetooth/BluetoothGattServerCallback#onNotificationSent(android.bluetooth.BluetoothDevice,%20int))).
 > Sends beyond that used to be dropped by the stack while the promise still resolved.
 
+> **iOS:** a payload CoreBluetooth's transmit queue cannot take is held and resent when
+> [`peripheralManagerIsReady(toUpdateSubscribers:)`](https://developer.apple.com/documentation/corebluetooth/cbperipheralmanagerdelegate/peripheralmanagerisready(toupdatesubscribers:))
+> reports space. Only the refused payloads are resent, in order -- an unrelated central never
+> receives an unsolicited update because another central's send was throttled.
+
 **Throws** `MTU_SMALL` if the default MTU is too small for the payload, or `PAYLOAD_EXCEEDS_MTU` if the payload exceeds the negotiated MTU. The data is sent before the error is thrown -- the error serves as a warning that the central may have received truncated data. Also throws `ERR_NOTIFY` when the stack refuses or fails the send, `ERR_NOTIFY_QUEUE_FULL` when too many sends are already waiting for the same device, and `ERR_DEVICE_DISCONNECTED` when the central goes away before a queued notification is delivered.
 
 ---
@@ -399,4 +404,5 @@ Errors thrown by `sendNotification` and `sendResponse` include a `code` property
 | `REQUEST_NOT_FOUND` | The `requestId` does not match any pending read request. |
 | `ERR_NOTIFY` | The Bluetooth stack refused the notification, or reported it as undelivered. |
 | `ERR_NOTIFY_QUEUE_FULL` | Too many notifications are already queued for the device. Await earlier sends before queueing more. |
-| `ERR_DEVICE_DISCONNECTED` | The central disconnected before a queued notification could be delivered. |
+| `ERR_DEVICE_DISCONNECTED` | The central disconnected, or unsubscribed, before a queued notification could be delivered. |
+| `ERR_CHARACTERISTIC_NOT_FOUND` | The characteristic is not part of the published GATT database. |
