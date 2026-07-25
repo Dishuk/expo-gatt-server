@@ -1,6 +1,5 @@
 import { Platform, type EventSubscription } from 'expo-modules-core';
 
-import ExpoGattServerModule, { type ExpoGattServerModuleType } from './ExpoGattServerModule';
 import {
   ATT_TRANSACTION_TIMEOUT_MS,
   CLIENT_CHARACTERISTIC_CONFIGURATION_UUID,
@@ -30,6 +29,7 @@ import type {
   MtuChangedEvent,
   GattServerEvents,
 } from './ExpoGattServer.types';
+import ExpoGattServerModule, { type ExpoGattServerModuleType } from './ExpoGattServerModule';
 
 export type { EventSubscription };
 
@@ -253,9 +253,7 @@ function normalizeCharacteristic(
     }
     return { ...descriptor, uuid: descriptorUuid };
   });
-  return descriptors
-    ? { ...characteristic, uuid, descriptors }
-    : { ...characteristic, uuid };
+  return descriptors ? { ...characteristic, uuid, descriptors } : { ...characteristic, uuid };
 }
 
 /**
@@ -270,7 +268,9 @@ function normalizeCharacteristic(
  * The same characteristic UUID in *different* services stays legal: the specification permits it, and
  * the pair of UUIDs still names one attribute.
  */
-function assertUniqueUuids(services: { uuid: string; characteristics: { uuid: string }[] }[]): void {
+function assertUniqueUuids(
+  services: { uuid: string; characteristics: { uuid: string }[] }[],
+): void {
   const serviceUuids = new Set<string>();
   for (const service of services) {
     if (serviceUuids.has(service.uuid)) {

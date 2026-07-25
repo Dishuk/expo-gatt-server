@@ -465,12 +465,7 @@ export interface CharacteristicUnsubscribedEvent {
  * services on the next transition to `poweredOn`, but advertising must be restarted by the consumer.
  */
 export type BluetoothState =
-  | 'unknown'
-  | 'resetting'
-  | 'unsupported'
-  | 'unauthorized'
-  | 'poweredOff'
-  | 'poweredOn';
+  'unknown' | 'resetting' | 'unsupported' | 'unauthorized' | 'poweredOff' | 'poweredOn';
 
 export interface BluetoothStateChangedEvent {
   state: BluetoothState;

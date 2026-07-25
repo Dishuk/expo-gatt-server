@@ -30,22 +30,21 @@ afterEach(() => {
 });
 
 describe('createServer request timeout', () => {
-  it.each([0, 1, 9999, ATT_TRANSACTION_TIMEOUT_MS - 1])('accepts %d ms', async (requestTimeoutMs) => {
-    await expect(createServer([], { requestTimeoutMs })).resolves.toBeUndefined();
-  });
+  it.each([0, 1, 9999, ATT_TRANSACTION_TIMEOUT_MS - 1])(
+    'accepts %d ms',
+    async (requestTimeoutMs) => {
+      await expect(createServer([], { requestTimeoutMs })).resolves.toBeUndefined();
+    },
+  );
 
-  it.each([
-    ATT_TRANSACTION_TIMEOUT_MS,
-    ATT_TRANSACTION_TIMEOUT_MS + 1,
-    -1,
-    1.5,
-    NaN,
-    Infinity,
-  ])('rejects %p', async (requestTimeoutMs) => {
-    await expect(createServer([], { requestTimeoutMs })).rejects.toThrow(
-      /Invalid request timeout/,
-    );
-  });
+  it.each([ATT_TRANSACTION_TIMEOUT_MS, ATT_TRANSACTION_TIMEOUT_MS + 1, -1, 1.5, NaN, Infinity])(
+    'rejects %p',
+    async (requestTimeoutMs) => {
+      await expect(createServer([], { requestTimeoutMs })).rejects.toThrow(
+        /Invalid request timeout/,
+      );
+    },
+  );
 
   it('names the exclusive upper bound in the error', async () => {
     await expect(createServer([], { requestTimeoutMs: 30000 })).rejects.toThrow(
@@ -124,9 +123,9 @@ describe('manufacturer company identifier', () => {
   });
 
   it('rejects a missing company identifier', async () => {
-    await expect(
-      startAdvertising({ manufacturerData: [{ data: [1] } as never] }),
-    ).rejects.toThrow(/Invalid manufacturer company id/);
+    await expect(startAdvertising({ manufacturerData: [{ data: [1] } as never] })).rejects.toThrow(
+      /Invalid manufacturer company id/,
+    );
   });
 });
 

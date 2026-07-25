@@ -101,12 +101,7 @@ const CODED_ENTRY_POINTS: {
     name: 'updateCharacteristicValue',
     native: nativeModuleMock.updateCharacteristicValue,
     invoke: () => updateCharacteristicValue(SERVICE, CHARACTERISTIC, [1]),
-    codes: [
-      'ERR_BLUETOOTH',
-      'ERR_NO_SERVER',
-      'ERR_CHARACTERISTIC_NOT_FOUND',
-      'ERR_UPDATE_VALUE',
-    ],
+    codes: ['ERR_BLUETOOTH', 'ERR_NO_SERVER', 'ERR_CHARACTERISTIC_NOT_FOUND', 'ERR_UPDATE_VALUE'],
   },
   {
     name: 'getMtu',
@@ -139,10 +134,13 @@ describe('a native error code reaches the caller unchanged', () => {
     await expect(invoke()).rejects.toMatchObject({ code });
   });
 
-  it.each(codedCases)('%s surfaces the native message for %s', async (_name, code, native, invoke) => {
-    native.mockRejectedValueOnce(codedError(code));
-    await expect(invoke()).rejects.toThrow(`Rejected with ${code}`);
-  });
+  it.each(codedCases)(
+    '%s surfaces the native message for %s',
+    async (_name, code, native, invoke) => {
+      native.mockRejectedValueOnce(codedError(code));
+      await expect(invoke()).rejects.toThrow(`Rejected with ${code}`);
+    },
+  );
 });
 
 /**

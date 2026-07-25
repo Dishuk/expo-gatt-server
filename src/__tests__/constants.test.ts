@@ -112,8 +112,6 @@ describe('timing constants', () => {
 
 describe('CCCD UUID', () => {
   it('is 0x2902 expanded onto the Bluetooth base UUID, lowercase', () => {
-    expect(CLIENT_CHARACTERISTIC_CONFIGURATION_UUID).toBe(
-      '00002902-0000-1000-8000-00805f9b34fb',
-    );
+    expect(CLIENT_CHARACTERISTIC_CONFIGURATION_UUID).toBe('00002902-0000-1000-8000-00805f9b34fb');
   });
 });

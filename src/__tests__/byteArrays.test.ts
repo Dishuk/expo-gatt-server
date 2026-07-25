@@ -125,9 +125,7 @@ describe('byte validation reporting', () => {
   });
 
   it('never reaches the native module with invalid bytes', async () => {
-    await expect(
-      sendNotification('AA:BB', SERVICE, CHARACTERISTIC, [256]),
-    ).rejects.toThrow();
+    await expect(sendNotification('AA:BB', SERVICE, CHARACTERISTIC, [256])).rejects.toThrow();
     expect(nativeModuleMock.sendNotification).not.toHaveBeenCalled();
   });
 });

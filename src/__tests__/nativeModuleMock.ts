@@ -1,5 +1,5 @@
-import type { ExpoGattServerModuleType } from '../ExpoGattServerModule';
 import type { BluetoothState, ConnectedDevice } from '../ExpoGattServer.types';
+import type { ExpoGattServerModuleType } from '../ExpoGattServerModule';
 
 /**
  * Stands in for the native module so the JavaScript layer can be exercised without a device or a

@@ -51,9 +51,12 @@ describe('calls that cannot be approximated', () => {
     await expect(call()).rejects.toThrow(/\[expo-gatt-server\]/);
   });
 
-  it.each(rejecting)('%s explains how to get a binary containing the module', async (_name, call) => {
-    await expect(call()).rejects.toThrow(/development build/);
-  });
+  it.each(rejecting)(
+    '%s explains how to get a binary containing the module',
+    async (_name, call) => {
+      await expect(call()).rejects.toThrow(/development build/);
+    },
+  );
 
   it('rejects rather than letting a property access on null surface as the error', async () => {
     await expect(createServer([])).rejects.not.toThrow(/of null|null is not an object/);

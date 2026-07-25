@@ -83,9 +83,9 @@ describe('characteristic properties', () => {
     ['undefined', undefined],
     ['an object', {}],
   ])('rejects %s in place of the properties array', async (_label, properties) => {
-    await expect(
-      publish({ properties: properties as CharacteristicProperty[] }),
-    ).rejects.toThrow(/Invalid characteristic property/);
+    await expect(publish({ properties: properties as CharacteristicProperty[] })).rejects.toThrow(
+      /Invalid characteristic property/,
+    );
   });
 });
 
@@ -100,9 +100,9 @@ describe('characteristic permissions', () => {
     ['a property name', 'read'],
     ['the wrong case', 'Readable'],
   ])('rejects %s as a permission', async (_label, permission) => {
-    await expect(publish({ permissions: [permission as CharacteristicPermission] })).rejects.toThrow(
-      /Invalid characteristic permission/,
-    );
+    await expect(
+      publish({ permissions: [permission as CharacteristicPermission] }),
+    ).rejects.toThrow(/Invalid characteristic permission/);
   });
 
   it.each([
@@ -210,9 +210,7 @@ describe('service configuration', () => {
   });
 
   it('treats a missing characteristics array as empty rather than failing', async () => {
-    await expect(
-      createServer([{ uuid: SERVICE } as GattServiceConfig]),
-    ).resolves.toBeUndefined();
+    await expect(createServer([{ uuid: SERVICE } as GattServiceConfig])).resolves.toBeUndefined();
     expect(nativeModuleMock.createServer.mock.calls[0][0][0].characteristics).toEqual([]);
   });
 
