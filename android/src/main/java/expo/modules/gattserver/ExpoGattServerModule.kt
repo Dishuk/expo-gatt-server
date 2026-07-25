@@ -49,9 +49,16 @@ class ExpoGattServerModule : Module() {
         val mgr = GattServerManager(context)
         mgr.listener = createListener()
         val gattServices = services.map { parseServiceConfig(it) }
-        mgr.open(gattServices)
         manager = mgr
-        promise.resolve(null)
+        // Resolves only once every service is confirmed registered — until then the server has
+        // no attributes to expose and advertising it would be meaningless.
+        mgr.open(gattServices) { error ->
+          if (error != null) {
+            promise.reject("ERR_CREATE_SERVER", error, null)
+          } else {
+            promise.resolve(null)
+          }
+        }
       } catch (e: Exception) {
         promise.reject("ERR_CREATE_SERVER", e.message, e)
       }
