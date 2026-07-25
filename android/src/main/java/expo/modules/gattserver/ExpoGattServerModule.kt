@@ -126,8 +126,15 @@ class ExpoGattServerModule : Module() {
       }
       try {
         val bytes = toByteArray(value, "notification")
-        mgr.sendNotification(deviceId, serviceUuid, characteristicUuid, bytes, confirm)
-        promise.resolve(null)
+        // Resolves once the platform has confirmed the notification was delivered, so a caller
+        // that awaits it can pace itself against the link instead of overrunning it.
+        mgr.sendNotification(deviceId, serviceUuid, characteristicUuid, bytes, confirm) { error ->
+          if (error != null) {
+            promise.reject(error.code, error.message, error)
+          } else {
+            promise.resolve(null)
+          }
+        }
       } catch (e: GattServerException) {
         promise.reject(e.code, e.message, e)
       } catch (e: Exception) {

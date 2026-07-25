@@ -105,6 +105,14 @@ export function stopAdvertising(): void {
   ExpoGattServerModule.stopAdvertising();
 }
 
+/**
+ * Sends a notification (or, with `confirm`, an indication) to a connected central.
+ *
+ * The promise settles when the platform reports the notification as delivered, not when the call
+ * reaches the Bluetooth stack. A device may only have one notification outstanding at a time, so
+ * sends issued while an earlier one is still in flight are queued in order rather than dropped;
+ * awaiting the promise is what paces a stream against the link.
+ */
 export async function sendNotification(
   deviceId: string,
   serviceUuid: string,

@@ -91,7 +91,18 @@ Send a notification or indication to a connected central.
 | `value` | `number[]` | -- | Byte array payload |
 | `confirm` | `boolean` | `false` | `true` for indication (acknowledged), `false` for notification |
 
-**Throws** `MTU_SMALL` if the default MTU is too small for the payload, or `PAYLOAD_EXCEEDS_MTU` if the payload exceeds the negotiated MTU. The data is sent before the error is thrown -- the error serves as a warning that the central may have received truncated data.
+The returned promise resolves once the platform reports the notification as delivered, not when the
+call is handed to the Bluetooth stack. Calls made while an earlier notification for the same device
+is still in flight are queued in order and sent as the link drains, so awaiting the promise paces a
+stream against the connection instead of overrunning it.
+
+> **Android:** the platform allows one outstanding notification per device -- "when multiple
+> notifications are to be sent, an application must wait for this callback to be received before
+> sending additional notifications"
+> ([`onNotificationSent`](https://developer.android.com/reference/android/bluetooth/BluetoothGattServerCallback#onNotificationSent(android.bluetooth.BluetoothDevice,%20int))).
+> Sends beyond that used to be dropped by the stack while the promise still resolved.
+
+**Throws** `MTU_SMALL` if the default MTU is too small for the payload, or `PAYLOAD_EXCEEDS_MTU` if the payload exceeds the negotiated MTU. The data is sent before the error is thrown -- the error serves as a warning that the central may have received truncated data. Also throws `ERR_NOTIFY` when the stack refuses or fails the send, `ERR_NOTIFY_QUEUE_FULL` when too many sends are already waiting for the same device, and `ERR_DEVICE_DISCONNECTED` when the central goes away before a queued notification is delivered.
 
 ---
 
@@ -383,3 +394,6 @@ Errors thrown by `sendNotification` and `sendResponse` include a `code` property
 | `MTU_SMALL` | Default ATT MTU (23 bytes / 20 payload) is too small for the value. The central has not negotiated a larger MTU. |
 | `PAYLOAD_EXCEEDS_MTU` | Value exceeds the negotiated MTU. Data was sent but may be truncated by the central. |
 | `REQUEST_NOT_FOUND` | The `requestId` does not match any pending read request. |
+| `ERR_NOTIFY` | The Bluetooth stack refused the notification, or reported it as undelivered. |
+| `ERR_NOTIFY_QUEUE_FULL` | Too many notifications are already queued for the device. Await earlier sends before queueing more. |
+| `ERR_DEVICE_DISCONNECTED` | The central disconnected before a queued notification could be delivered. |

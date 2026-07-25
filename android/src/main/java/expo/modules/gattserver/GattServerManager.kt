@@ -22,6 +22,14 @@ private const val TAG = "ExpoGattServer"
 private const val DEFAULT_ATT_MTU = 23
 private const val ATT_HEADER_SIZE = 3
 
+/**
+ * Upper bound on notifications waiting behind the one the platform is still delivering. Only one
+ * notification may be outstanding per the `onNotificationSent` contract, so without a bound a
+ * producer that outruns the link would grow the queue forever. Exceeding it fails the call rather
+ * than dropping a payload silently.
+ */
+private const val MAX_QUEUED_NOTIFICATIONS_PER_DEVICE = 64
+
 open class GattServerException(val code: String, message: String) : Exception(message)
 class MtuException(code: String, message: String) : GattServerException(code, message)
 
@@ -90,6 +98,42 @@ class GattServerManager(
   private val deviceMtu = ConcurrentHashMap<String, Int>()
   private val pendingRequests = ConcurrentHashMap<Int, String>()
   private var lastNotifiedCharacteristicUuid: String = ""
+
+  // Android delivers one notification at a time: "When multiple notifications are to be sent, an
+  // application must wait for this callback to be received before sending additional
+  // notifications" (BluetoothGattServerCallback.onNotificationSent). Sends are therefore queued
+  // per device and handed to the stack one at a time, each waiting for its own callback. The map
+  // is touched from the caller's thread and from the binder thread that delivers the callback.
+  private val notificationQueues = ConcurrentHashMap<String, NotificationQueue>()
+
+  /**
+   * One notification waiting for, or occupying, the single outstanding slot a device has.
+   *
+   * [deferredError] carries a failure that must not stop the payload going out — the MTU checks
+   * report a payload the link will truncate, and the caller is told about it once the send
+   * completes rather than instead of the send happening.
+   */
+  private class QueuedNotification(
+    val device: BluetoothDevice,
+    val characteristic: BluetoothGattCharacteristic,
+    val characteristicUuid: String,
+    val confirm: Boolean,
+    val value: ByteArray,
+    val onResult: (GattServerException?) -> Unit,
+  ) {
+    var deferredError: GattServerException? = null
+  }
+
+  /** Per-device send queue. Every field is read and written under the instance's own monitor. */
+  private class NotificationQueue {
+    val waiting = ArrayDeque<QueuedNotification>()
+    var inFlight: QueuedNotification? = null
+  }
+
+  // The pre-33 `notifyCharacteristicChanged` overload reads the payload from the shared
+  // `characteristic.value` field, so the write and the call have to be atomic with respect to a
+  // send for another device that targets the same characteristic.
+  private val legacyNotifyLock = Any()
 
   // Delegation is fixed for the lifetime of a server but is read from the binder threads that
   // deliver the GATT callbacks, so both maps are concurrent.
@@ -175,6 +219,7 @@ class GattServerManager(
     connectedDevices.clear()
     deviceMtu.clear()
     pendingRequests.clear()
+    failAllNotifications(GattServerException("ERR_BLUETOOTH", "Bluetooth was turned off"))
     // The server is gone, so no onConnectionStateChange callbacks will arrive for these.
     disconnected.forEach { listener?.onDeviceDisconnected(it) }
   }
@@ -212,6 +257,8 @@ class GattServerManager(
           connectedDevices.remove(id)
           deviceMtu.remove(id)
           pendingRequests.entries.removeIf { it.value == id }
+          // Nothing will ever acknowledge these now, so fail them instead of leaking the queue.
+          failNotifications(id, GattServerException("ERR_DEVICE_DISCONNECTED", "Device $id disconnected"))
           listener?.onDeviceDisconnected(id)
         }
       }
@@ -297,7 +344,31 @@ class GattServerManager(
     }
 
     override fun onNotificationSent(device: BluetoothDevice, status: Int) {
-      listener?.onNotificationSent(device.address, lastNotifiedCharacteristicUuid, status)
+      val deviceId = device.address
+      listener?.onNotificationSent(deviceId, lastNotifiedCharacteristicUuid, status)
+
+      // The outstanding slot is free again as soon as this callback arrives, so release the
+      // in-flight entry before letting the queue move on.
+      val queue = notificationQueues[deviceId]
+      val finished = queue?.let {
+        synchronized(it) {
+          val entry = it.inFlight
+          it.inFlight = null
+          entry
+        }
+      }
+      if (finished != null) {
+        val error = if (status != BluetoothGatt.GATT_SUCCESS) {
+          GattServerException(
+            "ERR_NOTIFY",
+            "Notification for ${finished.characteristicUuid} was not delivered (status $status)"
+          )
+        } else {
+          finished.deferredError
+        }
+        finished.onResult(error)
+      }
+      pumpNotifications(deviceId)
     }
 
     override fun onServiceAdded(status: Int, service: BluetoothGattService) {
@@ -462,12 +533,22 @@ class GattServerManager(
     pendingAdvertiseResult = null
   }
 
+  /**
+   * Queues a notification for [deviceId] and reports the outcome through [onResult] — with `null`
+   * once the platform confirms delivery through `onNotificationSent`, or with the failure that
+   * stopped it. Throws only for problems detectable before the send is accepted into the queue.
+   *
+   * The call no longer completes as soon as the payload is handed to the stack: a device may have
+   * one notification outstanding at a time, so anything sent while an earlier notification is
+   * still in flight waits its turn instead of being discarded by the stack.
+   */
   fun sendNotification(
     deviceId: String,
     serviceUuid: String,
     characteristicUuid: String,
     value: ByteArray,
     confirm: Boolean,
+    onResult: (GattServerException?) -> Unit,
   ) {
     val server = gattServer ?: throw IllegalStateException("Server not open")
     val device = connectedDevices[deviceId]
@@ -480,17 +561,88 @@ class GattServerManager(
 
     lastNotifiedCharacteristicUuid = characteristicUuid
 
-    notifyValue(server, device, characteristic, confirm, value)
+    val entry = QueuedNotification(device, characteristic, characteristicUuid, confirm, value, onResult)
+    val queue = notificationQueues.getOrPut(deviceId) { NotificationQueue() }
+    synchronized(queue) {
+      if (queue.waiting.size >= MAX_QUEUED_NOTIFICATIONS_PER_DEVICE) {
+        throw GattServerException(
+          "ERR_NOTIFY_QUEUE_FULL",
+          "Device $deviceId already has $MAX_QUEUED_NOTIFICATIONS_PER_DEVICE notifications " +
+            "waiting to be sent. Wait for earlier sends to resolve before queueing more."
+        )
+      }
+      queue.waiting.addLast(entry)
+    }
+    // The device may have gone away between the check above and the queue being registered, in
+    // which case nothing will ever drain it.
+    if (!connectedDevices.containsKey(deviceId)) {
+      failNotifications(deviceId, GattServerException("ERR_DEVICE_DISCONNECTED", "Device $deviceId disconnected"))
+      return
+    }
+    pumpNotifications(deviceId)
+  }
 
+  /**
+   * Hands the next queued notification to the stack if the device's single outstanding slot is
+   * free. Entries the stack refuses outright never produce a callback, so they are completed here
+   * and the loop moves on to the next one.
+   */
+  private fun pumpNotifications(deviceId: String) {
+    val queue = notificationQueues[deviceId] ?: return
+    while (true) {
+      val next = synchronized(queue) {
+        if (queue.inFlight != null) return
+        val candidate = queue.waiting.removeFirstOrNull() ?: return
+        queue.inFlight = candidate
+        candidate
+      }
+      val error = dispatchNotification(deviceId, next) ?: return
+      synchronized(queue) {
+        if (queue.inFlight === next) queue.inFlight = null
+      }
+      next.onResult(error)
+    }
+  }
+
+  /** Returns `null` when the stack accepted the send and a callback is now expected. */
+  private fun dispatchNotification(deviceId: String, entry: QueuedNotification): GattServerException? {
+    val server = gattServer
+      ?: return GattServerException("ERR_NO_SERVER", "Server not open")
+    entry.deferredError = mtuErrorFor(deviceId, entry.value.size, "Payload")
+    return notifyValue(server, entry.device, entry.characteristic, entry.confirm, entry.value)
+  }
+
+  /** Fails every queued and in-flight notification for [deviceId] and forgets the queue. */
+  private fun failNotifications(deviceId: String, error: GattServerException) {
+    val queue = notificationQueues.remove(deviceId) ?: return
+    val abandoned = synchronized(queue) {
+      val all = ArrayList<QueuedNotification>()
+      queue.inFlight?.let { all.add(it) }
+      queue.inFlight = null
+      all.addAll(queue.waiting)
+      queue.waiting.clear()
+      all
+    }
+    abandoned.forEach { it.onResult(error) }
+  }
+
+  private fun failAllNotifications(error: GattServerException) {
+    notificationQueues.keys.toList().forEach { failNotifications(it, error) }
+  }
+
+  /**
+   * Reports a payload the link cannot carry intact. The value is still transmitted — the platform
+   * truncates it — so this describes what went out rather than replacing it.
+   */
+  private fun mtuErrorFor(deviceId: String, size: Int, subject: String): MtuException? {
     val negotiatedMtu = deviceMtu[deviceId]
     val mtu = negotiatedMtu ?: DEFAULT_ATT_MTU
     val maxPayload = mtu - ATT_HEADER_SIZE
-    if (value.size > maxPayload) {
-      if (negotiatedMtu == null) {
-        throw MtuException("MTU_SMALL", "Payload size ${value.size} exceeds default MTU payload capacity of $maxPayload bytes. Client has not negotiated a larger MTU.")
-      } else {
-        throw MtuException("PAYLOAD_EXCEEDS_MTU", "Payload size ${value.size} exceeds negotiated MTU payload capacity of $maxPayload bytes (MTU: $mtu).")
-      }
+    if (size <= maxPayload) return null
+    return if (negotiatedMtu == null) {
+      MtuException("MTU_SMALL", "$subject size $size exceeds default MTU payload capacity of $maxPayload bytes. Client has not negotiated a larger MTU.")
+    } else {
+      MtuException("PAYLOAD_EXCEEDS_MTU", "$subject size $size exceeds negotiated MTU payload capacity of $maxPayload bytes (MTU: $mtu).")
     }
   }
 
@@ -520,33 +672,47 @@ class GattServerManager(
     // not consumed by this call.
     pendingRequests.remove(requestId, deviceId)
 
-    val negotiatedMtu = deviceMtu[deviceId]
-    val mtu = negotiatedMtu ?: DEFAULT_ATT_MTU
-    val maxPayload = mtu - ATT_HEADER_SIZE
-    if (value.size > maxPayload) {
-      if (negotiatedMtu == null) {
-        throw MtuException("MTU_SMALL", "Response size ${value.size} exceeds default MTU payload capacity of $maxPayload bytes. Client has not negotiated a larger MTU.")
-      } else {
-        throw MtuException("PAYLOAD_EXCEEDS_MTU", "Response size ${value.size} exceeds negotiated MTU payload capacity of $maxPayload bytes (MTU: $mtu).")
-      }
-    }
+    mtuErrorFor(deviceId, value.size, "Response")?.let { throw it }
   }
 
+  /**
+   * Hands one notification to the stack. Returns `null` when it was accepted — and only then will
+   * `onNotificationSent` arrive — or the failure that stopped it.
+   *
+   * The API 33 overload returns a `BluetoothStatusCodes` value and the older one a plain boolean
+   * ("true, if the notification has been triggered successfully"); both are checked, because a
+   * refused call produces no callback at all.
+   */
   private fun notifyValue(
     server: BluetoothGattServer,
     device: BluetoothDevice,
     characteristic: BluetoothGattCharacteristic,
     confirm: Boolean,
     payload: ByteArray,
-  ) {
+  ): GattServerException? {
     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-      server.notifyCharacteristicChanged(device, characteristic, confirm, payload)
-    } else {
+      val status = server.notifyCharacteristicChanged(device, characteristic, confirm, payload)
+      if (status != android.bluetooth.BluetoothStatusCodes.SUCCESS) {
+        return GattServerException(
+          "ERR_NOTIFY",
+          "The Bluetooth stack refused the notification for ${characteristic.uuid} (status $status)"
+        )
+      }
+      return null
+    }
+    val triggered = synchronized(legacyNotifyLock) {
       @Suppress("DEPRECATION")
       characteristic.value = payload
       @Suppress("DEPRECATION")
       server.notifyCharacteristicChanged(device, characteristic, confirm)
     }
+    if (!triggered) {
+      return GattServerException(
+        "ERR_NOTIFY",
+        "The Bluetooth stack could not trigger the notification for ${characteristic.uuid}"
+      )
+    }
+    return null
   }
 
   fun updateCharacteristicValue(serviceUuid: String, characteristicUuid: String, value: ByteArray) {
@@ -568,6 +734,7 @@ class GattServerManager(
     connectedDevices.clear()
     deviceMtu.clear()
     pendingRequests.clear()
+    failAllNotifications(GattServerException("ERR_NO_SERVER", "Server stopped"))
     delegations.clear()
     delegationsByCharacteristic.clear()
   }
