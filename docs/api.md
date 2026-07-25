@@ -260,6 +260,10 @@ A parked call is always settled: a terminal Bluetooth state rejects with `ERR_BL
 `ERR_NO_SERVER`; and [`stopServer`](#stopserver) or Bluetooth going off while the call waits rejects it
 rather than leaving it pending.
 
+Bluetooth going off settles a call the platform has already accepted, too: both platforms stop the
+advertisement themselves when the adapter goes down, and neither promises a callback saying so, so the
+module rejects the outstanding call with `ERR_BLUETOOTH` instead of leaving it pending.
+
 Calling `startAdvertising` again **replaces** the current advertisement on both platforms rather than
 adding a second one, and settles the earlier call's promise with `ERR_ADVERTISE`.
 

@@ -1005,6 +1005,14 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     publication = .idle
     servicesAwaitingRegistration.removeAll()
 
+    // `peripheralManagerDidStartAdvertising:error:` is documented only as returning "the result of a
+    // startAdvertising: call", with nothing promising one arrives when the state drops instead — so a
+    // start CoreBluetooth already has is settled here rather than left pending for the process
+    // lifetime. Claiming the completion is what stops a late callback settling it a second time, and
+    // the expiry goes with the advertisement it belonged to rather than stopping a later one.
+    cancelAdvertisingTimeout()
+    claimAdvertisingCompletion()?(reason)
+
     // Every subscription dies with the database, so report each one as ended.
     let ended = subscribedCentrals.map { ($0.key, Array($0.value.keys)) }
     for (deviceId, addresses) in ended {
