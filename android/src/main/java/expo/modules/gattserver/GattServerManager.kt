@@ -148,7 +148,12 @@ fun currentBluetoothState(context: Context): String {
   return normalizedBluetoothState(adapter.state)
 }
 
-@SuppressLint("MissingPermission")
+/**
+ * `MissingPermission` is suppressed per function rather than for the whole class. The permissions
+ * are checked in [ExpoGattServerModule] before anything here is reachable, but a class-level
+ * suppression also hid every *new* violation — including the module's own broken check — so each
+ * function that genuinely calls a guarded API opts out by name instead.
+ */
 class GattServerManager(
   private val context: Context,
 ) {
@@ -298,6 +303,7 @@ class GattServerManager(
    * this process registered. Close it explicitly so the next power-on starts from a clean server
    * rather than relying on undocumented survival of the old one.
    */
+  @SuppressLint("MissingPermission")
   private fun handleAdapterOff() {
     Log.d(TAG, "Adapter off — closing GATT server")
     pendingServices.clear()
@@ -345,6 +351,7 @@ class GattServerManager(
   }
 
   private val gattServerCallback = object : BluetoothGattServerCallback() {
+    @SuppressLint("MissingPermission")
     override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
       val id = device.address
       Log.d(TAG, "onConnectionStateChange: device=$id status=$status newState=$newState")
@@ -365,6 +372,7 @@ class GattServerManager(
       }
     }
 
+    @SuppressLint("MissingPermission")
     override fun onCharacteristicReadRequest(
       device: BluetoothDevice, requestId: Int, offset: Int,
       characteristic: BluetoothGattCharacteristic
@@ -405,6 +413,7 @@ class GattServerManager(
       )
     }
 
+    @SuppressLint("MissingPermission")
     override fun onCharacteristicWriteRequest(
       device: BluetoothDevice, requestId: Int, characteristic: BluetoothGattCharacteristic,
       preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?
@@ -430,6 +439,7 @@ class GattServerManager(
       )
     }
 
+    @SuppressLint("MissingPermission")
     override fun onDescriptorWriteRequest(
       device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor,
       preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?
@@ -464,6 +474,7 @@ class GattServerManager(
       }
     }
 
+    @SuppressLint("MissingPermission")
     override fun onDescriptorReadRequest(
       device: BluetoothDevice, requestId: Int, offset: Int,
       descriptor: BluetoothGattDescriptor
@@ -564,6 +575,7 @@ class GattServerManager(
   }
 
   /** Opens a fresh [BluetoothGattServer] and starts registering the configured services. */
+  @SuppressLint("MissingPermission")
   private fun openServer(): Boolean {
     val buildServices = serviceFactory.get() ?: return false
     val server = bluetoothManager.openGattServer(context, gattServerCallback) ?: return false
@@ -582,6 +594,7 @@ class GattServerManager(
    * Adds the next queued service, or completes the open once the queue drains. Only ever called
    * from [open] or from `onServiceAdded`, so at most one `addService` is ever in flight.
    */
+  @SuppressLint("MissingPermission")
   private fun addNextService() {
     val next = pendingServices.poll()
     if (next == null) {
@@ -682,6 +695,7 @@ class GattServerManager(
     advertiser?.startAdvertising(settings, advData.build(), scanResponse, callback)
   }
 
+  @SuppressLint("MissingPermission")
   fun stopAdvertising() {
     advertiseCallback?.let { advertiser?.stopAdvertising(it) }
     advertiseCallback = null
@@ -696,6 +710,7 @@ class GattServerManager(
    * Classic as well as LE. Only ever called when the consumer explicitly asked for it, and undone by
    * [restoreAdapterName].
    */
+  @SuppressLint("MissingPermission")
   private fun applyAdapterName(adapter: BluetoothAdapter, name: String) {
     // compareAndSet, so repeatedly restarting advertising still restores the device's own name
     // rather than the previous advertisement's.
@@ -710,6 +725,7 @@ class GattServerManager(
     }
   }
 
+  @SuppressLint("MissingPermission")
   private fun restoreAdapterName() {
     val previous = originalAdapterName.get() ?: return
     val adapter = bluetoothAdapter ?: return
@@ -957,6 +973,7 @@ class GattServerManager(
    * Blob continuation correctly, and passing the request's own offset with a pre-sliced value works
    * too. iOS honours the same contract.
    */
+  @SuppressLint("MissingPermission")
   fun sendResponse(deviceId: String, requestId: Int, status: Int, offset: Int, value: ByteArray) {
     val server = gattServer ?: throw IllegalStateException("Server not open")
     val device = connectedDevices[deviceId]
@@ -1027,6 +1044,7 @@ class GattServerManager(
    * ("true, if the notification has been triggered successfully"); both are checked, because a
    * refused call produces no callback at all.
    */
+  @SuppressLint("MissingPermission")
   private fun notifyValue(
     server: BluetoothGattServer,
     device: BluetoothDevice,
@@ -1066,6 +1084,7 @@ class GattServerManager(
     characteristic.value = value
   }
 
+  @SuppressLint("MissingPermission")
   fun stop() {
     unregisterStateReceiver()
     onStateChange = null

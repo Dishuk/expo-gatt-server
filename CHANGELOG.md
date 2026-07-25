@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - iOS resends only the payload the transmit queue refused, instead of pushing cached values to every
   subscribed central
 
+### Fixed
+
+- Android treated an unavailable React context as "permission granted" and carried on into a
+  `SecurityException`. `createServer` and `startAdvertising` now reject with `ERR_NO_CONTEXT`
+
 ## [0.1.0] - 2025-05-23
 
 ### Added

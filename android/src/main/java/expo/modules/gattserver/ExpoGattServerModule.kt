@@ -14,10 +14,23 @@ import java.util.UUID
 class ExpoGattServerModule : Module() {
   private var manager: GattServerManager? = null
 
-  private fun missingPermission(permission: String): Boolean {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
-    val context = appContext.reactContext ?: return false
-    return ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED
+  /**
+   * The rejection [permission] warrants, as a code and message, or `null` when it is held.
+   *
+   * A missing React context is an error rather than a pass: with nothing to check the grant against,
+   * assuming it was granted only defers the failure to a `SecurityException` from the Bluetooth
+   * stack, which surfaces as an unrelated crash rather than as a permission problem.
+   */
+  private fun permissionError(permission: String, requiredBy: String? = null): Pair<String, String>? {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
+    val suffix = if (requiredBy != null) ", which $requiredBy requires" else ""
+    val context = appContext.reactContext
+      ?: return "ERR_NO_CONTEXT" to
+        "React context not available, so the $permission permission$suffix could not be checked"
+    if (ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED) {
+      return "ERR_PERMISSION" to "$permission permission not granted$suffix"
+    }
+    return null
   }
 
   override fun definition() = ModuleDefinition {
@@ -61,8 +74,8 @@ class ExpoGattServerModule : Module() {
     }
 
     AsyncFunction("createServer") { services: List<Map<String, Any?>>, promise: Promise ->
-      if (missingPermission(android.Manifest.permission.BLUETOOTH_CONNECT)) {
-        promise.reject("ERR_PERMISSION", "BLUETOOTH_CONNECT permission not granted", null)
+      permissionError(android.Manifest.permission.BLUETOOTH_CONNECT)?.let { (code, message) ->
+        promise.reject(code, message, null)
         return@AsyncFunction
       }
 
@@ -100,8 +113,8 @@ class ExpoGattServerModule : Module() {
     }
 
     AsyncFunction("startAdvertising") { config: Map<String, Any?>, promise: Promise ->
-      if (missingPermission(android.Manifest.permission.BLUETOOTH_ADVERTISE)) {
-        promise.reject("ERR_PERMISSION", "BLUETOOTH_ADVERTISE permission not granted", null)
+      permissionError(android.Manifest.permission.BLUETOOTH_ADVERTISE)?.let { (code, message) ->
+        promise.reject(code, message, null)
         return@AsyncFunction
       }
 
@@ -119,13 +132,13 @@ class ExpoGattServerModule : Module() {
 
       // `BluetoothAdapter.setName` enforces BLUETOOTH_CONNECT on API 31+; checked here so the opt-in
       // fails with a permission error rather than a SecurityException from the Bluetooth stack.
-      if (setAdapterName && missingPermission(android.Manifest.permission.BLUETOOTH_CONNECT)) {
-        promise.reject(
-          "ERR_PERMISSION",
-          "BLUETOOTH_CONNECT permission not granted, which android.setAdapterName requires",
-          null
-        )
-        return@AsyncFunction
+      if (setAdapterName) {
+        permissionError(
+          android.Manifest.permission.BLUETOOTH_CONNECT, "android.setAdapterName"
+        )?.let { (code, message) ->
+          promise.reject(code, message, null)
+          return@AsyncFunction
+        }
       }
 
       try {
