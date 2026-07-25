@@ -171,6 +171,11 @@ Central                    Native                     JavaScript
   │                          │      responseNeeded: false │
 ```
 
+The written value is stored before the listener runs, on both platforms, so a later read of the same
+characteristic serves it without JavaScript doing anything. The value is *replaced* rather than merged,
+as `ATT_WRITE_REQ` requires; a fragment bearing a non-zero offset, which only arises from the
+queued-write procedure, is spliced in at that offset instead.
+
 ### Write Request (`delegate.write`)
 
 ```
@@ -243,7 +248,6 @@ The two platforms report different halves of the same figure exactly, and derive
 | Dropping a central | **Impossible** -- `disconnectDevice` rejects with `ERR_UNSUPPORTED` | `BluetoothGattServer.cancelConnection` |
 | Read auto-response | From the module's own value cache, keyed by service **and** characteristic | From `BluetoothGattCharacteristic.value`, which is already per service |
 | Write auto-response | Automatic, unless the characteristic sets `delegate.write` | Automatic, unless the characteristic sets `delegate.write` |
-| Written value cached | Yes, for an automatically acknowledged write | No -- call `updateCharacteristicValue` if a later read should serve it |
 | Prepared / long writes | Not exposed at all; CoreBluetooth handles the procedure below the app layer | Buffered per device and applied on execute |
 | `confirm` on a notification | Never reaches the platform; CoreBluetooth picks notification or indication from the declared properties | Passed to `notifyCharacteristicChanged` |
 | CCCD descriptor | Created by CoreBluetooth on publication; per-client bits are not exposed | Explicitly added by the module, which tracks the per-client bits itself |

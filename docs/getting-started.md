@@ -337,8 +337,11 @@ addCharacteristicWriteRequestListener((event) => {
 The event fires for every write. By default the module has **already** acknowledged it before the
 listener runs, on both platforms, so `event.responseNeeded` is `false` and there is nothing to answer.
 
-Note that an acknowledged write updates the value later reads are answered from on iOS but not on
-Android. Call `updateCharacteristicValue` from the listener if a read should serve what was written.
+An acknowledged write also updates the value later reads are answered from, identically on both
+platforms, so a readable characteristic serves what was written with no help from the listener --
+there is no need to keep a copy of it yourself. A characteristic configured with
+`delegate: { write: true }` is the exception: nothing is stored until you accept the write, so commit
+the value with `updateCharacteristicValue` when you answer.
 
 ### Delegating to JavaScript
 
