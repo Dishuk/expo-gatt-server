@@ -116,14 +116,15 @@ public class ExpoGattServerModule: Module {
         promise.reject("ERR_NO_SERVER", "Server not created")
         return
       }
+      let data: Data
       do {
         try self.validateUuid(serviceUuid, field: "service")
         try self.validateUuid(characteristicUuid, field: "characteristic")
+        data = try self.parseBytes(value, field: "notification")
       } catch {
         promise.reject("ERR_NOTIFY", error.localizedDescription)
         return
       }
-      let data = Data(value.map { UInt8(clamping: $0) })
       DispatchQueue.main.async {
         do {
           let success = try mgr.sendNotification(
@@ -157,7 +158,13 @@ public class ExpoGattServerModule: Module {
         promise.reject("ERR_NO_SERVER", "Server not created")
         return
       }
-      let data = Data(value.map { UInt8(clamping: $0) })
+      let data: Data
+      do {
+        data = try self.parseBytes(value, field: "response")
+      } catch {
+        promise.reject("ERR_RESPONSE", error.localizedDescription)
+        return
+      }
       DispatchQueue.main.async {
         do {
           try mgr.sendResponse(
@@ -183,7 +190,7 @@ public class ExpoGattServerModule: Module {
     ) in
       try self.validateUuid(serviceUuid, field: "service")
       try self.validateUuid(characteristicUuid, field: "characteristic")
-      let data = Data(value.map { UInt8(clamping: $0) })
+      let data = try self.parseBytes(value, field: "characteristic")
       self.manager?.updateCharacteristicValue(
         serviceUuid: serviceUuid,
         characteristicUuid: characteristicUuid,
@@ -240,6 +247,23 @@ public class ExpoGattServerModule: Module {
     return CBUUID(string: string)
   }
 
+  /// Byte arrays arrive from JS as `[Int]`. Anything outside 0...255 would be silently
+  /// corrupted by a clamping or truncating conversion, so reject it instead.
+  private func parseBytes(_ value: [Int], field: String) throws -> Data {
+    var bytes: [UInt8] = []
+    bytes.reserveCapacity(value.count)
+    for (index, element) in value.enumerated() {
+      guard let byte = UInt8(exactly: element) else {
+        throw GattArgumentError(
+          message: "Invalid \(field) byte \(element) at index \(index). " +
+            "Every element must be an integer between 0 and 255."
+        )
+      }
+      bytes.append(byte)
+    }
+    return Data(bytes)
+  }
+
   private func parseServiceConfig(
     _ map: [String: Any],
     initialValues: inout [CBUUID: Data]
@@ -273,7 +297,7 @@ public class ExpoGattServerModule: Module {
     // characteristic with a dynamic (nil) value and serve the initial value from our own
     // cache instead, so that any configuration Android accepts also works here.
     if let bytes = map["value"] as? [Int], !bytes.isEmpty {
-      initialValues[uuid] = Data(bytes.map { UInt8(clamping: $0) })
+      initialValues[uuid] = try parseBytes(bytes, field: "characteristic")
     }
 
     return CBMutableCharacteristic(

@@ -44,11 +44,30 @@ function assertValidUuid(uuid: unknown, field: string): void {
   }
 }
 
+function assertValidBytes(value: unknown, field: string): void {
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `Invalid ${field} value ${JSON.stringify(value)}. Expected an array of byte values.`,
+    );
+  }
+  for (const [index, byte] of value.entries()) {
+    if (!Number.isInteger(byte) || byte < 0 || byte > 255) {
+      throw new Error(
+        `Invalid ${field} byte ${JSON.stringify(byte)} at index ${index}. ` +
+          'Every element must be an integer between 0 and 255.',
+      );
+    }
+  }
+}
+
 export async function createServer(services: GattServiceConfig[]): Promise<void> {
   for (const service of services ?? []) {
     assertValidUuid(service?.uuid, 'service');
     for (const characteristic of service?.characteristics ?? []) {
       assertValidUuid(characteristic?.uuid, 'characteristic');
+      if (characteristic.value !== undefined) {
+        assertValidBytes(characteristic.value, 'characteristic');
+      }
     }
   }
   return ExpoGattServerModule.createServer(services);
@@ -74,6 +93,7 @@ export async function sendNotification(
 ): Promise<void> {
   assertValidUuid(serviceUuid, 'service');
   assertValidUuid(characteristicUuid, 'characteristic');
+  assertValidBytes(value, 'notification');
   return ExpoGattServerModule.sendNotification(
     deviceId,
     serviceUuid,
@@ -90,6 +110,7 @@ export async function sendResponse(
   offset: number,
   value: number[],
 ): Promise<void> {
+  assertValidBytes(value, 'response');
   return ExpoGattServerModule.sendResponse(deviceId, requestId, status, offset, value);
 }
 
@@ -100,6 +121,7 @@ export function updateCharacteristicValue(
 ): void {
   assertValidUuid(serviceUuid, 'service');
   assertValidUuid(characteristicUuid, 'characteristic');
+  assertValidBytes(value, 'characteristic');
   ExpoGattServerModule.updateCharacteristicValue(serviceUuid, characteristicUuid, value);
 }
 

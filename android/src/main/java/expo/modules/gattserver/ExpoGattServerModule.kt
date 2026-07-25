@@ -100,7 +100,7 @@ class ExpoGattServerModule : Module() {
         return@AsyncFunction
       }
       try {
-        val bytes = value.map { it.toByte() }.toByteArray()
+        val bytes = toByteArray(value, "notification")
         mgr.sendNotification(deviceId, serviceUuid, characteristicUuid, bytes, confirm)
         promise.resolve(null)
       } catch (e: GattServerException) {
@@ -122,7 +122,7 @@ class ExpoGattServerModule : Module() {
         return@AsyncFunction
       }
       try {
-        val bytes = value.map { it.toByte() }.toByteArray()
+        val bytes = toByteArray(value, "response")
         mgr.sendResponse(deviceId, requestId, status, offset, bytes)
         promise.resolve(null)
       } catch (e: GattServerException) {
@@ -136,7 +136,7 @@ class ExpoGattServerModule : Module() {
       serviceUuid: String,
       characteristicUuid: String,
       value: List<Int> ->
-      val bytes = value.map { it.toByte() }.toByteArray()
+      val bytes = toByteArray(value, "characteristic")
       manager?.updateCharacteristicValue(serviceUuid, characteristicUuid, bytes)
     }
 
@@ -202,6 +202,28 @@ class ExpoGattServerModule : Module() {
     }
   }
 
+  /**
+   * Byte arrays arrive from JS as numbers. Anything outside 0..255 would be silently
+   * truncated by [Int.toByte], so reject it instead.
+   */
+  private fun toByteArray(value: List<*>, field: String): ByteArray {
+    val bytes = ByteArray(value.size)
+    value.forEachIndexed { index, element ->
+      val number = element as? Number
+      val intValue = number?.toInt()
+      if (number == null || intValue == null ||
+        number.toDouble() != intValue.toDouble() || intValue !in 0..255
+      ) {
+        throw IllegalArgumentException(
+          "Invalid $field byte $element at index $index. " +
+            "Every element must be an integer between 0 and 255."
+        )
+      }
+      bytes[index] = intValue.toByte()
+    }
+    return bytes
+  }
+
   private fun parseServiceConfig(map: Map<String, Any?>): BluetoothGattService {
     val uuid = UUID.fromString(map["uuid"] as String)
     val service = BluetoothGattService(uuid, BluetoothGattService.SERVICE_TYPE_PRIMARY)
@@ -229,7 +251,7 @@ class ExpoGattServerModule : Module() {
       characteristic.addDescriptor(cccd)
     }
 
-    val initialValue = (map["value"] as? List<*>)?.mapNotNull { (it as? Number)?.toByte() }?.toByteArray()
+    val initialValue = (map["value"] as? List<*>)?.let { toByteArray(it, "characteristic") }
     if (initialValue != null) {
       @Suppress("DEPRECATION")
       characteristic.value = initialValue
