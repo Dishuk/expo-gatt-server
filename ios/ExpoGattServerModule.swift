@@ -7,6 +7,8 @@ struct GattArgumentError: LocalizedError {
 }
 
 public class ExpoGattServerModule: Module {
+  /// Read and written only on the main queue, along with everything the manager itself owns — see the
+  /// note on `GattServerManager`.
   private var manager: GattServerManager?
 
   private func checkBluetoothAuthorization() -> String? {
@@ -36,13 +38,11 @@ public class ExpoGattServerModule: Module {
     )
 
     AsyncFunction("getMtu") { (deviceId: String, promise: Promise) in
-      guard let mgr = self.manager else {
-        promise.reject("ERR_NO_SERVER", "Server not created")
-        return
-      }
-      // The tracked centrals are only ever touched on the main queue, which is also the queue the
-      // peripheral manager dispatches its callbacks on.
       DispatchQueue.main.async {
+        guard let mgr = self.manager else {
+          promise.reject("ERR_NO_SERVER", "Server not created")
+          return
+        }
         guard let mtu = mgr.mtu(for: deviceId) else {
           promise.reject(
             "ERR_DEVICE_DISCONNECTED",
@@ -60,12 +60,11 @@ public class ExpoGattServerModule: Module {
     }
 
     AsyncFunction("getConnectedDevices") { (promise: Promise) in
-      guard let mgr = self.manager else {
-        promise.resolve([])
-        return
-      }
-      // Main queue for the same reason as `getMtu`.
       DispatchQueue.main.async {
+        guard let mgr = self.manager else {
+          promise.resolve([])
+          return
+        }
         promise.resolve(mgr.connectedDeviceIds.map { ["deviceId": $0, "name": ""] })
       }
     }
@@ -85,34 +84,28 @@ public class ExpoGattServerModule: Module {
     }
 
     AsyncFunction("isServerRunning") { (promise: Promise) in
-      guard let mgr = self.manager else {
-        promise.resolve(false)
-        return
-      }
-      DispatchQueue.main.async { promise.resolve(mgr.isServerRunning) }
+      DispatchQueue.main.async { promise.resolve(self.manager?.isServerRunning ?? false) }
     }
 
     AsyncFunction("isAdvertising") { (promise: Promise) in
-      guard let mgr = self.manager else {
-        promise.resolve(false)
-        return
-      }
-      DispatchQueue.main.async { promise.resolve(mgr.isAdvertising) }
+      DispatchQueue.main.async { promise.resolve(self.manager?.isAdvertising ?? false) }
     }
 
     AsyncFunction("getBluetoothState") { (promise: Promise) in
-      // `CBPeripheralManager.state` needs an instantiated manager, and instantiating one purely to
-      // read state would trigger the Bluetooth permission prompt.
-      guard let mgr = self.manager else {
-        switch CBManager.authorization {
-        case .denied, .restricted:
-          promise.resolve("unauthorized")
-        default:
-          promise.resolve("unknown")
+      DispatchQueue.main.async {
+        // `CBPeripheralManager.state` needs an instantiated manager, and instantiating one purely to
+        // read state would trigger the Bluetooth permission prompt.
+        guard let mgr = self.manager else {
+          switch CBManager.authorization {
+          case .denied, .restricted:
+            promise.resolve("unauthorized")
+          default:
+            promise.resolve("unknown")
+          }
+          return
         }
-        return
+        promise.resolve(normalizedBluetoothState(mgr.bluetoothState))
       }
-      promise.resolve(normalizedBluetoothState(mgr.bluetoothState))
     }
 
     AsyncFunction("createServer") { (
@@ -133,25 +126,29 @@ public class ExpoGattServerModule: Module {
           cbServices.append(try self.parseServiceConfig(serviceConfig, initialValues: &initialValues))
         }
         let delegations = try self.parseDelegations(services)
-        self.manager?.stop()
-        let mgr = GattServerManager(requestTimeoutMs: requestTimeoutMs)
-        mgr.setDelegations(delegations)
-        mgr.delegate = self
-        mgr.onStateChange = { [weak self] state in
-          self?.sendEvent("onBluetoothStateChanged", [
-            "state": normalizedBluetoothState(state)
-          ])
-        }
-        self.manager = mgr
-        // Resolves only once CoreBluetooth is powered on and has acknowledged every service, so a
-        // resolved promise means the server really is advertisable.
-        mgr.open(services: cbServices, initialValues: initialValues) { error in
-          if let error = error as? GattServerError {
-            promise.reject(error.code, error.message)
-          } else if let error = error {
-            promise.reject("ERR_CREATE_SERVER", error.localizedDescription)
-          } else {
-            promise.resolve(nil)
+        // Only the parsing above is queue-agnostic; the manager is built and opened on the main queue.
+        let parsedValues = initialValues
+        DispatchQueue.main.async {
+          self.manager?.stop()
+          let mgr = GattServerManager(requestTimeoutMs: requestTimeoutMs)
+          mgr.setDelegations(delegations)
+          mgr.delegate = self
+          mgr.onStateChange = { [weak self] state in
+            self?.sendEvent("onBluetoothStateChanged", [
+              "state": normalizedBluetoothState(state)
+            ])
+          }
+          self.manager = mgr
+          // Resolves only once CoreBluetooth is powered on and has acknowledged every service, so a
+          // resolved promise means the server really is advertisable.
+          mgr.open(services: cbServices, initialValues: parsedValues) { error in
+            if let error = error as? GattServerError {
+              promise.reject(error.code, error.message)
+            } else if let error = error {
+              promise.reject("ERR_CREATE_SERVER", error.localizedDescription)
+            } else {
+              promise.resolve(nil)
+            }
           }
         }
       } catch let error as GattServerError {
@@ -166,11 +163,6 @@ public class ExpoGattServerModule: Module {
     AsyncFunction("startAdvertising") { (config: [String: Any], promise: Promise) in
       if let err = self.checkBluetoothAuthorization() {
         promise.reject("ERR_PERMISSION", err)
-        return
-      }
-
-      guard let mgr = self.manager else {
-        promise.reject("ERR_NO_SERVER", "Server not created. Call createServer first.")
         return
       }
 
@@ -190,32 +182,43 @@ public class ExpoGattServerModule: Module {
       // Already range-checked in JavaScript against the same bound Android enforces.
       let timeoutMs = (config["timeoutMs"] as? NSNumber)?.intValue ?? 0
 
-      // Waits for a definitive powered-on state rather than sampling it: a synchronous read is
-      // `.unknown` until peripheralManagerDidUpdateState fires, which rejected perfectly healthy
-      // calls made straight after createServer.
-      mgr.whenPoweredOn { readinessError in
-        if let readinessError = readinessError as? GattServerError {
-          promise.reject(readinessError.code, readinessError.message)
+      DispatchQueue.main.async {
+        guard let mgr = self.manager else {
+          promise.reject("ERR_NO_SERVER", "Server not created. Call createServer first.")
           return
         }
-        if let readinessError = readinessError {
-          promise.reject("ERR_BLUETOOTH", readinessError.localizedDescription)
-          return
-        }
-        mgr.startAdvertising(
-          localName: localName, serviceUuids: serviceUuids, timeoutMs: timeoutMs
-        ) { error in
-          if let error = error {
-            promise.reject("ERR_ADVERTISE", error.localizedDescription)
-          } else {
-            promise.resolve(nil)
+        // Waits for a definitive powered-on state rather than sampling it: a synchronous read is
+        // `.unknown` until peripheralManagerDidUpdateState fires, which rejected perfectly healthy
+        // calls made straight after createServer.
+        mgr.whenPoweredOn { readinessError in
+          if let readinessError = readinessError as? GattServerError {
+            promise.reject(readinessError.code, readinessError.message)
+            return
+          }
+          if let readinessError = readinessError {
+            promise.reject("ERR_BLUETOOTH", readinessError.localizedDescription)
+            return
+          }
+          mgr.startAdvertising(
+            localName: localName, serviceUuids: serviceUuids, timeoutMs: timeoutMs
+          ) { error in
+            if let error = error {
+              promise.reject("ERR_ADVERTISE", error.localizedDescription)
+            } else {
+              promise.resolve(nil)
+            }
           }
         }
       }
     }
 
+    // Kept synchronous, so the JavaScript signature stays `void` and matches Android's. The teardown
+    // itself is deferred because it must run on the main queue, and blocking the JavaScript thread on
+    // it invites a deadlock against a main thread already waiting on JavaScript. Nothing observes the
+    // difference: every other entry point reaches the manager through the same serial queue, so it is
+    // ordered behind this.
     Function("stopAdvertising") {
-      self.manager?.stopAdvertising()
+      DispatchQueue.main.async { self.manager?.stopAdvertising() }
     }
 
     AsyncFunction("sendNotification") { (
@@ -227,10 +230,6 @@ public class ExpoGattServerModule: Module {
       requireSubscription: Bool,
       promise: Promise
     ) in
-      guard let mgr = self.manager else {
-        promise.reject("ERR_NO_SERVER", "Server not created")
-        return
-      }
       let data: Data
       do {
         try self.validateUuid(serviceUuid, field: "service")
@@ -243,6 +242,10 @@ public class ExpoGattServerModule: Module {
       // `requireSubscription` has no iOS counterpart: CoreBluetooth only ever transmits to subscribed
       // centrals, so an unsubscribed send cannot be forced through.
       DispatchQueue.main.async {
+        guard let mgr = self.manager else {
+          promise.reject("ERR_NO_SERVER", "Server not created")
+          return
+        }
         do {
           try mgr.sendNotification(
             deviceId: deviceId,
@@ -275,10 +278,6 @@ public class ExpoGattServerModule: Module {
       value: [Int],
       promise: Promise
     ) in
-      guard let mgr = self.manager else {
-        promise.reject("ERR_NO_SERVER", "Server not created")
-        return
-      }
       let data: Data
       do {
         data = try self.parseBytes(value, field: "response")
@@ -287,6 +286,10 @@ public class ExpoGattServerModule: Module {
         return
       }
       DispatchQueue.main.async {
+        guard let mgr = self.manager else {
+          promise.reject("ERR_NO_SERVER", "Server not created")
+          return
+        }
         do {
           try mgr.sendResponse(
             deviceId: deviceId,
@@ -310,10 +313,6 @@ public class ExpoGattServerModule: Module {
       value: [Int],
       promise: Promise
     ) in
-      guard let mgr = self.manager else {
-        promise.reject("ERR_NO_SERVER", "Server not created")
-        return
-      }
       let data: Data
       do {
         try self.validateUuid(serviceUuid, field: "service")
@@ -323,9 +322,11 @@ public class ExpoGattServerModule: Module {
         promise.reject("ERR_UPDATE_VALUE", error.localizedDescription)
         return
       }
-      // The mirrored values are only touched on the main queue, which is also the queue the
-      // peripheral manager delivers the read requests that consume them on.
       DispatchQueue.main.async {
+        guard let mgr = self.manager else {
+          promise.reject("ERR_NO_SERVER", "Server not created")
+          return
+        }
         do {
           try mgr.updateCharacteristicValue(
             serviceUuid: serviceUuid,
@@ -341,14 +342,20 @@ public class ExpoGattServerModule: Module {
       }
     }
 
+    // Synchronous and deferred for the same reasons as `stopAdvertising`.
     Function("stopServer") {
-      self.manager?.stop()
-      self.manager = nil
+      DispatchQueue.main.async {
+        self.manager?.stop()
+        self.manager = nil
+      }
     }
 
     OnDestroy {
-      self.manager?.stop()
-      self.manager = nil
+      // The block captures the module strongly, so deferring the teardown cannot skip it.
+      DispatchQueue.main.async {
+        self.manager?.stop()
+        self.manager = nil
+      }
     }
   }
 

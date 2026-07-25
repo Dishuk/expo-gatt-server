@@ -229,6 +229,12 @@ func normalizedBluetoothState(_ state: CBManagerState) -> String {
   }
 }
 
+/// Every member of this class must be reached from the main queue, including `open` and `stop`.
+///
+/// `CBPeripheralManager` is created with `queue: .main`, so every delegate callback mutates this state
+/// there, and Swift's `Dictionary` and `Array` tolerate no concurrent mutation at all. The module is
+/// what enforces this: Expo runs `AsyncFunction` bodies on a shared background queue and `Function`
+/// bodies on the JavaScript thread, so neither reaches the main queue by itself.
 class GattServerManager: NSObject {
   weak var delegate: GattServerManagerDelegate?
 
@@ -249,7 +255,6 @@ class GattServerManager: NSObject {
   private var openCompletion: ((Error?) -> Void)?
   private var readinessWaiters: [(Error?) -> Void] = []
   private var advertisingCompletion: ((Error?) -> Void)?
-  /// Only ever touched on the main queue.
   private var advertisingTimeout: DispatchWorkItem?
   private var addedServices: [CBUUID: CBMutableService] = [:]
 
@@ -405,10 +410,12 @@ class GattServerManager: NSObject {
     timeoutMs: Int,
     completion: @escaping (Error?) -> Void
   ) {
-    if let pending = advertisingCompletion {
-      advertisingCompletion = nil
-      pending(NSError(domain: "ExpoGattServer", code: 0, userInfo: [NSLocalizedDescriptionKey: "Advertising restarted"]))
-    }
+    claimAdvertisingCompletion()?(
+      NSError(
+        domain: "ExpoGattServer", code: 0,
+        userInfo: [NSLocalizedDescriptionKey: "Advertising restarted"]
+      )
+    )
     advertisingCompletion = completion
     var advertisementData: [String: Any] = [:]
     if let name = localName {
@@ -425,10 +432,20 @@ class GattServerManager: NSObject {
   func stopAdvertising() {
     cancelAdvertisingTimeout()
     peripheralManager?.stopAdvertising()
-    if let pending = advertisingCompletion {
-      advertisingCompletion = nil
-      pending(NSError(domain: "ExpoGattServer", code: 0, userInfo: [NSLocalizedDescriptionKey: "Advertising stopped"]))
-    }
+    claimAdvertisingCompletion()?(
+      NSError(
+        domain: "ExpoGattServer", code: 0,
+        userInfo: [NSLocalizedDescriptionKey: "Advertising stopped"]
+      )
+    )
+  }
+
+  /// Takes ownership of the pending advertising completion, so the `Promise` behind it is settled by
+  /// exactly one of `didStartAdvertising`, a restart and a stop — each of which can arrive for the same
+  /// completion, and two of which would otherwise resolve and reject the same promise.
+  private func claimAdvertisingCompletion() -> ((Error?) -> Void)? {
+    defer { advertisingCompletion = nil }
+    return advertisingCompletion
   }
 
   /// Emulates `AdvertiseSettings.setTimeout`, which CoreBluetooth has no equivalent for. Android
@@ -908,8 +925,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
   }
 
   func peripheralManager(_ peripheral: CBPeripheralManager, didStartAdvertising error: Error?) {
-    advertisingCompletion?(error)
-    advertisingCompletion = nil
+    claimAdvertisingCompletion()?(error)
   }
 
   func peripheralManager(
