@@ -1244,7 +1244,9 @@ which would fail the whole service at publication time. Declare such a descripto
 The CCCD is rejected on both platforms: the module publishes it for every characteristic declaring
 `notify` or `indicate`, and answers reads and writes of it from its own per-device subscription
 tracking, because the specification gives "each client its own instantiation" of that descriptor
-while the platforms hand out a single shared object. A manually declared one would shadow that.
+while the platforms hand out a single shared object. A manually declared one would shadow that. Its
+permissions come from the parent characteristic — see
+[Permissions and subscriptions](#permissions-and-subscriptions).
 
 ### CharacteristicProperty
 
@@ -1316,6 +1318,44 @@ saying so. Failing the call is the safer outcome, and the error names `readEncry
 
 An unrecognised name throws, rather than being ignored, so a typo cannot silently publish an attribute
 less protected than the configuration asked for.
+
+#### Permissions and subscriptions
+
+A permission is enforced on the attribute that carries it and on nothing else. Android resolves
+`p_attr->permission` from the handle being read or written and inherits nothing from the parent
+characteristic (`gatts_write_attr_perm_check`, `system/stack/gatt/gatt_db.cc`), and
+`GATTS_HandleValueNotification` performs no permission, encryption or subscription check whatsoever.
+A notification therefore escapes every check a read of the same value would face — so the Client
+Characteristic Configuration descriptor, whose write is what opens the stream, carries permissions
+derived from the parent characteristic's rather than a fixed `PERMISSION_READ | PERMISSION_WRITE`:
+
+| Characteristic declares | CCCD read | CCCD write |
+|---|---|---|
+| neither `readEncrypted*` nor `writeEncrypted*` | `PERMISSION_READ` | `PERMISSION_WRITE` |
+| `readEncrypted` | `PERMISSION_READ_ENCRYPTED` | `PERMISSION_WRITE_ENCRYPTED` |
+| `writeEncrypted` | `PERMISSION_READ` | `PERMISSION_WRITE_ENCRYPTED` |
+| `readEncryptedMitm` | `PERMISSION_READ_ENCRYPTED_MITM` | `PERMISSION_WRITE_ENCRYPTED_MITM` |
+| `writeEncryptedMitm` | `PERMISSION_READ` | `PERMISSION_WRITE_ENCRYPTED_MITM` |
+
+The strongest level wins when several are combined: the descriptor's read mirrors the characteristic's
+strongest read permission, and its write demands the strongest encryption level declared in *either*
+direction, because enabling a subscription is what puts the value on the air. `writeSigned` and
+`writeSignedMitm` contribute nothing — they constrain the form of an inbound write PDU, and a CCCD is
+configured with an ordinary write request rather than a signed write command.
+
+A characteristic declaring only `readable` and `writeable` keeps the plain
+`PERMISSION_READ | PERMISSION_WRITE` it always had. One declaring an encrypted permission is a
+**behaviour change**: a client that has not reached that level is now refused at the CCCD with
+`GATT_INSUF_ENCRYPTION` or `GATT_INSUF_AUTHENTICATION`, where before it could subscribe and receive
+every value in cleartext.
+
+> **The residual limitation.** `sendNotification` with `requireSubscription: false` sends without any
+> subscription, and so without the descriptor check above. Android offers nothing at this layer to
+> replace it with: `BluetoothDevice.isEncrypted()` is `@hide`/`@SystemApi` and unreachable from an
+> app, and the public `getBondState()` answers a different question — LE pairing without bonding
+> leaves it at `BOND_NONE` over an encrypted link, and a bonded device is not necessarily on an
+> encrypted one. Leave `requireSubscription` at its default of `true` for a characteristic whose value
+> needs a secure link.
 
 ### AdvertiseConfig
 

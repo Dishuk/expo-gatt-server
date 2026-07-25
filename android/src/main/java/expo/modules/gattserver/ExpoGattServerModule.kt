@@ -552,11 +552,7 @@ class ExpoGattServerModule : Module() {
     val characteristic = BluetoothGattCharacteristic(uuid, properties, permissions)
 
     if (properties and (BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0) {
-      val cccd = BluetoothGattDescriptor(
-        CCCD_UUID,
-        BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
-      )
-      characteristic.addDescriptor(cccd)
+      characteristic.addDescriptor(BluetoothGattDescriptor(CCCD_UUID, cccdPermissions(permissions)))
     }
 
     for (item in (map["descriptors"] as? List<*>) ?: emptyList<Any>()) {
@@ -571,6 +567,38 @@ class ExpoGattServerModule : Module() {
     }
 
     return characteristic
+  }
+
+  /**
+   * The link security a client must reach to configure the CCCD the module publishes for [permissions].
+   *
+   * Android enforces permissions per attribute handle with no inheritance — `gatts_write_attr_perm_check`
+   * resolves the permission from the written handle alone, and `GATTS_HandleValueNotification` checks
+   * nothing at all — so a fixed `PERMISSION_WRITE` here would let an unbonded client subscribe to a
+   * characteristic the app marked encrypted-only and receive every later value in cleartext, while the
+   * direct read it would have tried first was correctly refused. Enabling a subscription is what puts the
+   * value on the air, so the write inherits the strongest level declared in *either* direction.
+   *
+   * The signed permissions deliberately contribute nothing: they constrain the form of an inbound write
+   * PDU, and a CCCD is configured with an ordinary write request rather than a signed write command.
+   */
+  private fun cccdPermissions(permissions: Int): Int {
+    val readEncryptedMitm = permissions and BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED_MITM != 0
+    val readEncrypted = permissions and BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED != 0
+    val writeEncryptedMitm = permissions and BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED_MITM != 0
+    val writeEncrypted = permissions and BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED != 0
+
+    val read = when {
+      readEncryptedMitm -> BluetoothGattDescriptor.PERMISSION_READ_ENCRYPTED_MITM
+      readEncrypted -> BluetoothGattDescriptor.PERMISSION_READ_ENCRYPTED
+      else -> BluetoothGattDescriptor.PERMISSION_READ
+    }
+    val write = when {
+      readEncryptedMitm || writeEncryptedMitm -> BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED_MITM
+      readEncrypted || writeEncrypted -> BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED
+      else -> BluetoothGattDescriptor.PERMISSION_WRITE
+    }
+    return read or write
   }
 
   /**

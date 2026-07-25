@@ -222,6 +222,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Configuration bit `confirm` selects, so a client that enabled only indications is no longer sent a
   notification. iOS still checks only that the central is subscribed, because CoreBluetooth does not
   report which bit it set
+- **Breaking:** on Android the Client Characteristic Configuration descriptor the module publishes for
+  every `notify` or `indicate` characteristic now carries permissions derived from that characteristic
+  instead of a fixed `PERMISSION_READ | PERMISSION_WRITE`. An encrypted read or write permission raises
+  the descriptor's write to `PERMISSION_WRITE_ENCRYPTED`, an MITM one to
+  `PERMISSION_WRITE_ENCRYPTED_MITM`, and an encrypted read is mirrored onto the descriptor's read.
+  Android enforces permissions per attribute handle and checks nothing at all before sending a
+  notification, so a plain descriptor let an unpaired central subscribe to a characteristic whose direct
+  read it was correctly refused and then receive every value in cleartext. A characteristic declaring
+  only `readable` and `writeable` is unaffected; one declaring an encrypted permission now requires that
+  link security before a central can subscribe
 - `onNotificationSent` reports the characteristic the notification actually carried
 - iOS resends only the payload the transmit queue refused, instead of pushing cached values to every
   subscribed central
