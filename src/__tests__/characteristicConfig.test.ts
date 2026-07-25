@@ -200,3 +200,75 @@ describe('service configuration', () => {
     ).toBe(false);
   });
 });
+
+describe('duplicate UUIDs', () => {
+  const OTHER_SERVICE = '0000180f-0000-1000-8000-00805f9b34fb';
+  const OTHER_CHARACTERISTIC = '00002a19-0000-1000-8000-00805f9b34fb';
+
+  const readable = (uuid: string): GattCharacteristicConfig => ({
+    uuid,
+    properties: ['read'],
+    permissions: ['readable'],
+  });
+
+  it('rejects two services declaring the same UUID', async () => {
+    await expect(
+      createServer([
+        { uuid: SERVICE, characteristics: [readable(CHARACTERISTIC)] },
+        { uuid: SERVICE, characteristics: [readable(OTHER_CHARACTERISTIC)] },
+      ]),
+    ).rejects.toThrow(/Duplicate service UUID 0000180d-0000-1000-8000-00805f9b34fb/);
+  });
+
+  it.each([
+    ['a 16-bit alias against its 128-bit expansion', '180d', SERVICE],
+    ['a difference in case', SERVICE, SERVICE.toUpperCase()],
+  ])('recognises %s as the same service UUID', async (_label, first, second) => {
+    await expect(
+      createServer([
+        { uuid: first, characteristics: [] },
+        { uuid: second, characteristics: [] },
+      ]),
+    ).rejects.toThrow(/Duplicate service UUID/);
+  });
+
+  it('rejects one service declaring the same characteristic UUID twice', async () => {
+    await expect(
+      createServer([
+        {
+          uuid: SERVICE,
+          characteristics: [readable(CHARACTERISTIC), readable(CHARACTERISTIC)],
+        },
+      ]),
+    ).rejects.toThrow(
+      /Duplicate characteristic UUID 00002a37-0000-1000-8000-00805f9b34fb in service 0000180d-0000-1000-8000-00805f9b34fb/,
+    );
+  });
+
+  it('recognises a short and a long characteristic spelling as the same UUID', async () => {
+    await expect(
+      createServer([
+        { uuid: SERVICE, characteristics: [readable('2a37'), readable(CHARACTERISTIC)] },
+      ]),
+    ).rejects.toThrow(/Duplicate characteristic UUID/);
+  });
+
+  it('accepts the same characteristic UUID in two different services', async () => {
+    await expect(
+      createServer([
+        { uuid: SERVICE, characteristics: [readable(CHARACTERISTIC)] },
+        { uuid: OTHER_SERVICE, characteristics: [readable(CHARACTERISTIC)] },
+      ]),
+    ).resolves.toBeUndefined();
+  });
+
+  it('never reaches the native module with a duplicate UUID', async () => {
+    await expect(
+      createServer([
+        { uuid: SERVICE, characteristics: [] },
+        { uuid: SERVICE, characteristics: [] },
+      ]),
+    ).rejects.toThrow();
+    expect(nativeModuleMock.createServer).not.toHaveBeenCalled();
+  });
+});

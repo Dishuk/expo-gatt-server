@@ -131,6 +131,12 @@ export type CharacteristicPermission =
  */
 export type GattServiceType = 'primary' | 'secondary';
 
+/**
+ * Two services declaring the same `uuid`, and one service declaring the same characteristic `uuid`
+ * twice, are both rejected: `sendNotification` and `updateCharacteristicValue` address an attribute by
+ * the pair of UUIDs, and each platform resolves that pair to exactly one attribute. The same
+ * characteristic UUID in two *different* services is accepted, which GATT permits.
+ */
 export interface GattServiceConfig {
   uuid: string;
   /** Defaults to `primary`. */

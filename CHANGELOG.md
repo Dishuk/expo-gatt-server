@@ -328,6 +328,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   paths too, matching the direct write path. The batch stays atomic: the plain characteristics' values
   are held until it is answered with `GATT_SUCCESS` and discarded if it is rejected or left to expire,
   and only the delegated characteristics' events carry `responseNeeded: true`
+- **Breaking:** nothing rejected two services declaring the same UUID, or one service declaring the same
+  characteristic UUID twice, even though `sendNotification` and `updateCharacteristicValue` address an
+  attribute by that pair of UUIDs — Android's `getService` and `getCharacteristic` return the first
+  match while iOS kept the last service added, so the same call reached a different attribute on each
+  platform. Both cases now throw from `createServer` in the shared TypeScript layer, comparing UUIDs
+  after normalisation so a 16-bit alias and its 128-bit expansion count as one, and both platforms
+  repeat the check natively. The same characteristic UUID in two *different* services stays legal
 
 ### Removed
 

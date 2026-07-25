@@ -122,8 +122,19 @@ public class ExpoGattServerModule: Module {
         let requestTimeoutMs = try self.parseRequestTimeout(options["requestTimeoutMs"])
         var initialValues: [CharacteristicAddress: Data] = [:]
         var cbServices: [CBMutableService] = []
+        // `addedServices` is keyed by service UUID and `findCharacteristic` takes the first match, so a
+        // repeat would leave one attribute unreachable and the other addressed by both spellings.
+        // Rejected in JavaScript too; repeated here because the native module is reachable directly.
+        var serviceUuids: Set<CBUUID> = []
         for serviceConfig in services {
-          cbServices.append(try self.parseServiceConfig(serviceConfig, initialValues: &initialValues))
+          let service = try self.parseServiceConfig(serviceConfig, initialValues: &initialValues)
+          guard serviceUuids.insert(service.uuid).inserted else {
+            throw GattArgumentError(
+              message: "Duplicate service UUID \(service.uuid.normalizedString). Give each service " +
+                "its own UUID, or merge their characteristics into one service."
+            )
+          }
+          cbServices.append(service)
         }
         let delegations = try self.parseDelegations(services)
         // Only the parsing above is queue-agnostic; the manager is built and opened on the main queue.
@@ -484,11 +495,20 @@ public class ExpoGattServerModule: Module {
     let service = CBMutableService(type: uuid, primary: try parseIsPrimary(map["type"]))
 
     var characteristics: [CBMutableCharacteristic] = []
+    var characteristicUuids: Set<CBUUID> = []
     if let charList = map["characteristics"] as? [[String: Any]] {
       for charMap in charList {
-        characteristics.append(
-          try parseCharacteristicConfig(charMap, service: uuid, initialValues: &initialValues)
+        let characteristic = try parseCharacteristicConfig(
+          charMap, service: uuid, initialValues: &initialValues
         )
+        guard characteristicUuids.insert(characteristic.uuid).inserted else {
+          throw GattArgumentError(
+            message: "Duplicate characteristic UUID \(characteristic.uuid.normalizedString) in " +
+              "service \(uuid.normalizedString). The same characteristic UUID in a different " +
+              "service is fine."
+          )
+        }
+        characteristics.append(characteristic)
       }
     }
     service.characteristics = characteristics

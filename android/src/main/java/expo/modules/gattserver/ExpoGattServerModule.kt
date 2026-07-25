@@ -136,7 +136,7 @@ class ExpoGattServerModule : Module() {
         }
         // Parse once up front so malformed configuration rejects synchronously, then hand the
         // manager a factory it can call again to rebuild the services after a power cycle.
-        services.forEach { parseServiceConfig(it) }
+        parseServices(services)
         mgr.setDelegations(parseDelegations(services))
         manager = mgr
         // Resolves only once every service is confirmed registered — until then the server has no
@@ -148,7 +148,7 @@ class ExpoGattServerModule : Module() {
             promise.resolve(null)
           }
         }) {
-          services.map { parseServiceConfig(it) }
+          parseServices(services)
         }
       } catch (e: GattServerException) {
         // Keeps a specific code such as ERR_BLUETOOTH, which the generic catch below would flatten into
@@ -497,14 +497,42 @@ class ExpoGattServerModule : Module() {
     return result
   }
 
+  /**
+   * `BluetoothGattServer.getService` and `BluetoothGattService.getCharacteristic` both return the first
+   * match, so a repeated UUID leaves one attribute unreachable and the other addressed by both
+   * spellings. Rejected in JavaScript too; repeated here because the native module is reachable
+   * directly. The same characteristic UUID in *different* services stays legal, as GATT permits.
+   */
+  private fun parseServices(services: List<Map<String, Any?>>): List<BluetoothGattService> {
+    val seen = mutableSetOf<UUID>()
+    return services.map { config ->
+      val service = parseServiceConfig(config)
+      if (!seen.add(service.uuid)) {
+        throw IllegalArgumentException(
+          "Duplicate service UUID ${service.uuid}. Give each service its own UUID, or merge their " +
+            "characteristics into one service."
+        )
+      }
+      service
+    }
+  }
+
   private fun parseServiceConfig(map: Map<String, Any?>): BluetoothGattService {
     val uuid = UUID.fromString(map["uuid"] as String)
     val service = BluetoothGattService(uuid, parseServiceType(map["type"] as? String))
 
     val characteristics = (map["characteristics"] as? List<*>) ?: emptyList<Any>()
+    val seen = mutableSetOf<UUID>()
     for (item in characteristics) {
       val charMap = item as? Map<*, *> ?: continue
-      service.addCharacteristic(parseCharacteristicConfig(charMap))
+      val characteristic = parseCharacteristicConfig(charMap)
+      if (!seen.add(characteristic.uuid)) {
+        throw IllegalArgumentException(
+          "Duplicate characteristic UUID ${characteristic.uuid} in service $uuid. The same " +
+            "characteristic UUID in a different service is fine."
+        )
+      }
+      service.addCharacteristic(characteristic)
     }
     return service
   }

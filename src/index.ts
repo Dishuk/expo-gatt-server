@@ -258,6 +258,46 @@ function normalizeCharacteristic(
     : { ...characteristic, uuid };
 }
 
+/**
+ * Rejects a configuration in which a pair of UUIDs would name more than one attribute.
+ *
+ * `sendNotification` and `updateCharacteristicValue` address an attribute by service and
+ * characteristic UUID, and each platform resolves that pair to exactly one attribute — Android's
+ * `getService` and `getCharacteristic` to the first match, iOS to the last service added — so a repeat
+ * leaves the two platforms answering the same call about different attributes. This is the same
+ * shadowing that already rejects a manually declared Client Characteristic Configuration descriptor.
+ *
+ * The same characteristic UUID in *different* services stays legal: the specification permits it, and
+ * the pair of UUIDs still names one attribute.
+ */
+function assertUniqueUuids(services: { uuid: string; characteristics: { uuid: string }[] }[]): void {
+  const serviceUuids = new Set<string>();
+  for (const service of services) {
+    if (serviceUuids.has(service.uuid)) {
+      throw new Error(
+        `Duplicate service UUID ${service.uuid}. Two services declaring the same UUID cannot be ` +
+          'told apart by sendNotification or updateCharacteristicValue, which address an attribute ' +
+          'by service and characteristic UUID. Give each service its own UUID, or merge their ' +
+          'characteristics into one service.',
+      );
+    }
+    serviceUuids.add(service.uuid);
+
+    const characteristicUuids = new Set<string>();
+    for (const characteristic of service.characteristics) {
+      if (characteristicUuids.has(characteristic.uuid)) {
+        throw new Error(
+          `Duplicate characteristic UUID ${characteristic.uuid} in service ${service.uuid}. Two ` +
+            'characteristics declaring the same UUID within one service cannot be told apart by ' +
+            'sendNotification or updateCharacteristicValue. The same characteristic UUID in a ' +
+            'different service is fine.',
+        );
+      }
+      characteristicUuids.add(characteristic.uuid);
+    }
+  }
+}
+
 export async function createServer(
   services: GattServiceConfig[],
   options: CreateServerOptions = {},
@@ -274,6 +314,9 @@ export async function createServer(
       characteristics: (service?.characteristics ?? []).map(normalizeCharacteristic),
     };
   });
+  // Checked on the normalised UUIDs, so a service written as `180d` and another as its 128-bit
+  // expansion are recognised as the one UUID they are.
+  assertUniqueUuids(normalizedServices);
   if (options.requestTimeoutMs !== undefined) {
     if (
       !Number.isInteger(options.requestTimeoutMs) ||

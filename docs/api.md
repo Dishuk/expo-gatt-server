@@ -162,8 +162,25 @@ callback".
 
 Invalid configuration is rejected in the shared TypeScript layer before either platform sees it, as a
 plain `Error` rather than a coded one: a malformed UUID, a byte outside `0`--`255`, an unrecognised
-service type, characteristic property or permission name, a `requestTimeoutMs` outside its range, or a
-descriptor declaring the Client Characteristic Configuration UUID.
+service type, characteristic property or permission name, a `requestTimeoutMs` outside its range, a
+descriptor declaring the Client Characteristic Configuration UUID, or a duplicate UUID.
+
+#### Duplicate UUIDs
+
+`sendNotification` and `updateCharacteristicValue` address an attribute by a **pair** of UUIDs, and both
+platforms resolve that pair to exactly one attribute -- Android's `getService` and `getCharacteristic`
+return the first match, iOS keeps the last service added. A configuration in which the pair names more
+than one attribute is therefore rejected:
+
+| Configuration | Verdict |
+|---|---|
+| Two services with the same UUID | **Rejected** |
+| One service declaring the same characteristic UUID twice | **Rejected** |
+| The same characteristic UUID in two *different* services | **Accepted** -- GATT permits it, and the pair of UUIDs still names one attribute |
+
+UUIDs are compared after normalisation, so `'180d'` and `'0000180D-0000-1000-8000-00805F9B34FB'` count
+as the same service. Both platforms repeat the check natively, since the native module is reachable
+directly.
 
 #### Delegating requests to JavaScript
 
