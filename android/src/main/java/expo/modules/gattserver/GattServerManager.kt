@@ -71,6 +71,11 @@ private const val MAX_PREPARED_WRITES_PER_DEVICE = 64
 /** ATT "Unlikely Error" — Core Spec Vol 3, Part F, Table 3.4. */
 private const val ATT_ERROR_UNLIKELY_ERROR = 0x0E
 
+// Worded to match what iOS reports for the same two `CBManagerState` values, since both platforms
+// report them under the same `ERR_BLUETOOTH` code.
+private const val BLUETOOTH_UNSUPPORTED_MESSAGE = "BLE not supported on this device"
+private const val BLUETOOTH_OFF_MESSAGE = "Bluetooth is turned off"
+
 /**
  * The ATT transaction timeout. A transaction not completed within 30 s fails, and no further request,
  * command, indication or notification may then be sent on that ATT bearer — recovering costs a whole
@@ -304,7 +309,7 @@ class GattServerManager(
   // this callback", so services are queued and added strictly one at a time. Both fields are touched
   // from the caller's thread and from the binder thread that delivers `onServiceAdded`.
   private val pendingServices = ConcurrentLinkedQueue<BluetoothGattService>()
-  private val openCompletion = AtomicReference<((String?) -> Unit)?>(null)
+  private val openCompletion = AtomicReference<((GattServerException?) -> Unit)?>(null)
 
   // The adapter being disabled invalidates the whole server, so the configuration is retained as a
   // factory and fresh BluetoothGattService instances are built for every registration pass. Re-adding
@@ -364,7 +369,9 @@ class GattServerManager(
     Log.d(TAG, "Adapter off — closing GATT server")
     databasePublished.set(false)
     pendingServices.clear()
-    finishOpen("Bluetooth was turned off before the server finished opening")
+    finishOpen(GattServerException(
+      "ERR_BLUETOOTH", "Bluetooth was turned off before the server finished opening"
+    ))
 
     // The adapter taking the stack down stops advertising without any AdvertiseCallback.
     advertising.set(false)
@@ -638,7 +645,9 @@ class GattServerManager(
       if (status != BluetoothGatt.GATT_SUCCESS) {
         Log.e(TAG, "onServiceAdded: service=${service.uuid} failed with status=$status")
         pendingServices.clear()
-        finishOpen("Failed to add service ${service.uuid} (status $status)")
+        finishOpen(GattServerException(
+          "ERR_CREATE_SERVER", "Failed to add service ${service.uuid} (status $status)"
+        ))
         return
       }
       Log.d(TAG, "onServiceAdded: service=${service.uuid} registered")
@@ -662,14 +671,12 @@ class GattServerManager(
    * [buildServices] is retained and called again whenever the server has to be rebuilt, such as after
    * the adapter is disabled and re-enabled, so it must return freshly constructed services.
    */
-  fun open(onReady: (error: String?) -> Unit, buildServices: () -> List<BluetoothGattService>) {
-    val adapter = bluetoothAdapter
-    if (adapter == null) {
-      onReady("Bluetooth not available on this device")
-      return
-    }
-    if (!adapter.isEnabled) {
-      onReady("Bluetooth is turned off")
+  fun open(
+    onReady: (error: GattServerException?) -> Unit,
+    buildServices: () -> List<BluetoothGattService>,
+  ) {
+    bluetoothUnavailable()?.let {
+      onReady(it)
       return
     }
 
@@ -678,7 +685,7 @@ class GattServerManager(
     registerStateReceiver()
 
     if (!openServer()) {
-      finishOpen("Unable to open GATT server")
+      finishOpen(GattServerException("ERR_CREATE_SERVER", "Unable to open GATT server"))
     }
   }
 
@@ -714,20 +721,47 @@ class GattServerManager(
     val server = gattServer
     if (server == null) {
       pendingServices.clear()
-      finishOpen("GATT server closed before service ${next.uuid} could be registered")
+      finishOpen(GattServerException(
+        "ERR_NO_SERVER", "The GATT server was closed before service ${next.uuid} could be registered"
+      ))
       return
     }
     // A false return means the registration was never initiated, so no callback will arrive.
     if (!server.addService(next)) {
       Log.e(TAG, "addService: could not initiate registration of ${next.uuid}")
       pendingServices.clear()
-      finishOpen("Could not initiate registration of service ${next.uuid}")
+      finishOpen(GattServerException(
+        "ERR_CREATE_SERVER", "Could not initiate registration of service ${next.uuid}"
+      ))
     }
   }
 
-  private fun finishOpen(error: String?) {
+  private fun finishOpen(error: GattServerException?) {
     openCompletion.getAndSet(null)?.invoke(error)
   }
+
+  /**
+   * The Bluetooth-level rejection that stops the server working at all, or `null` when it can work.
+   * `BluetoothAdapter.isEnabled` is annotated `@RequiresNoPermission`, so this is safe to call before any
+   * grant has been checked.
+   */
+  private fun bluetoothUnavailable(): GattServerException? {
+    val adapter = bluetoothAdapter
+      ?: return GattServerException("ERR_BLUETOOTH", BLUETOOTH_UNSUPPORTED_MESSAGE)
+    if (!adapter.isEnabled) {
+      return GattServerException("ERR_BLUETOOTH", BLUETOOTH_OFF_MESSAGE)
+    }
+    return null
+  }
+
+  /**
+   * The rejection an absent [gattServer] warrants. Turning the adapter off closes the server, so that is
+   * reported as the Bluetooth problem it is rather than as a server nobody created — which is both what
+   * iOS reports for the same situation and what tells a consumer whether re-enabling Bluetooth will fix
+   * it.
+   */
+  private fun serverUnavailable(): GattServerException =
+    bluetoothUnavailable() ?: GattServerException("ERR_NO_SERVER", "The GATT server is not open")
 
   /**
    * Android has no per-advertisement local name: `AdvertiseData.Builder` offers only
@@ -736,8 +770,13 @@ class GattServerManager(
    * makes the advertised name match it.
    */
   fun startAdvertising(options: AdvertiseOptions, onResult: (error: String?) -> Unit) {
+    // Re-checked here as well as in `open`: the adapter can be turned off in between, and iOS reports the
+    // same situation as ERR_BLUETOOTH from its own readiness check.
     val adapter = bluetoothAdapter
-      ?: throw IllegalStateException("Bluetooth not available")
+      ?: throw GattServerException("ERR_BLUETOOTH", BLUETOOTH_UNSUPPORTED_MESSAGE)
+    if (!adapter.isEnabled) {
+      throw GattServerException("ERR_BLUETOOTH", BLUETOOTH_OFF_MESSAGE)
+    }
 
     if (options.setAdapterName && options.localName == null) {
       throw IllegalArgumentException(
@@ -752,8 +791,13 @@ class GattServerManager(
       applyAdapterName(adapter, options.localName)
     }
 
+    // Null only for an adapter with no multi-advertisement support, the enabled check above having ruled
+    // out the other cause. No amount of retrying makes it work, so it is reported as unsupported rather
+    // than as a failed advertisement.
     advertiser = adapter.bluetoothLeAdvertiser
-      ?: throw IllegalStateException("BLE advertising not supported on this device")
+      ?: throw GattServerException(
+        "ERR_UNSUPPORTED", "BLE advertising is not supported on this device"
+      )
 
     val settings = AdvertiseSettings.Builder()
       .setAdvertiseMode(options.mode)
@@ -891,15 +935,22 @@ class GattServerManager(
     requireSubscription: Boolean,
     onResult: (GattServerException?) -> Unit,
   ) {
-    val server = gattServer ?: throw IllegalStateException("Server not open")
+    val server = gattServer ?: throw serverUnavailable()
     val device = connectedDevices[deviceId]
-      ?: throw IllegalArgumentException("Device $deviceId not connected")
+      ?: throw GattServerException(
+        "ERR_DEVICE_DISCONNECTED", "Device $deviceId is not connected"
+      )
 
-    val service = server.getService(UUID.fromString(serviceUuid))
-      ?: throw IllegalArgumentException("Service $serviceUuid not found")
+    // An unknown service and an unknown characteristic collapse into one code, because an address that
+    // names nothing in the published database is the same mistake either way — and because that is the
+    // only distinction iOS can draw, where `CBATTRequest.characteristic.service` is a weak reference.
     val characteristicId = UUID.fromString(characteristicUuid)
-    val characteristic = service.getCharacteristic(characteristicId)
-      ?: throw IllegalArgumentException("Characteristic $characteristicUuid not found")
+    val characteristic = server.getService(UUID.fromString(serviceUuid))
+      ?.getCharacteristic(characteristicId)
+      ?: throw GattServerException(
+        "ERR_CHARACTERISTIC_NOT_FOUND",
+        "Characteristic $characteristicUuid was not found in service $serviceUuid"
+      )
 
     confirmError(characteristic, confirm)?.let { throw it }
 
@@ -967,7 +1018,7 @@ class GattServerManager(
    */
   @SuppressLint("MissingPermission")
   fun disconnect(deviceId: String) {
-    val server = gattServer ?: throw GattServerException("ERR_NO_SERVER", "Server not open")
+    val server = gattServer ?: throw serverUnavailable()
     val device = connectedDevices[deviceId]
       ?: throw GattServerException("ERR_DEVICE_DISCONNECTED", "Device $deviceId is not connected")
     Log.d(TAG, "Cancelling connection to $deviceId")
@@ -1102,8 +1153,7 @@ class GattServerManager(
 
   /** Returns `null` when the stack accepted the send and a callback is now expected. */
   private fun dispatchNotification(deviceId: String, entry: QueuedNotification): GattServerException? {
-    val server = gattServer
-      ?: return GattServerException("ERR_NO_SERVER", "Server not open")
+    val server = gattServer ?: return serverUnavailable()
     // Re-checked as well as at enqueue time: the MTU can change while an entry waits its turn, and the
     // payload must never reach the stack if it cannot be carried intact.
     mtuErrorFor(deviceId, entry.value.size)?.let { return it }
@@ -1347,12 +1397,11 @@ class GattServerManager(
    */
   @SuppressLint("MissingPermission")
   fun sendResponse(deviceId: String, requestId: Int, status: Int, offset: Int, value: ByteArray) {
-    val server = gattServer ?: throw IllegalStateException("Server not open")
-    val device = connectedDevices[deviceId]
-      ?: throw IllegalArgumentException("Device $deviceId not connected")
     // Everything that could reject the call is checked before the pending entry is touched, so a failed
     // attempt leaves the request answerable instead of stranding the central until its ATT transaction
-    // times out.
+    // times out. The request is looked up first, so answering one the server has already forgotten —
+    // which is what losing the database to a stop or a power cycle leaves behind — reports the same code
+    // iOS reports for it.
     val pending = pendingRequests[requestId]
       ?: throw GattServerException("REQUEST_NOT_FOUND", "Request $requestId not found or already responded")
     if (pending.deviceId != deviceId) {
@@ -1361,6 +1410,11 @@ class GattServerManager(
         "Request $requestId belongs to device ${pending.deviceId}, not $deviceId"
       )
     }
+    val server = gattServer ?: throw serverUnavailable()
+    val device = connectedDevices[deviceId]
+      ?: throw GattServerException(
+        "ERR_DEVICE_DISCONNECTED", "Device $deviceId is not connected"
+      )
     val payload = responsePayload(pending, requestId, offset, value)
 
     // The offset handed to the stack is the request's own, so it always describes where `payload` sits
@@ -1453,11 +1507,7 @@ class GattServerManager(
    * look exactly like a successful update while the characteristic keeps serving its old value.
    */
   fun updateCharacteristicValue(serviceUuid: String, characteristicUuid: String, value: ByteArray) {
-    val server = gattServer ?: throw GattServerException(
-      "ERR_NO_SERVER",
-      "The GATT server is not open, so it has no characteristic to update. Bluetooth may be turned " +
-        "off; services are re-published when it is re-enabled."
-    )
+    val server = gattServer ?: throw serverUnavailable()
     val characteristic = server.getService(UUID.fromString(serviceUuid))
       ?.getCharacteristic(UUID.fromString(characteristicUuid))
       ?: throw GattServerException(
@@ -1475,7 +1525,7 @@ class GattServerManager(
     stopAdvertising()
     databasePublished.set(false)
     pendingServices.clear()
-    finishOpen("Server stopped before it finished opening")
+    finishOpen(GattServerException("ERR_NO_SERVER", "Server was stopped before it finished opening"))
     gattServer?.close()
     gattServer = null
     connectedDevices.clear()

@@ -207,7 +207,8 @@ const state = await getBluetoothState(); // 'unsupported' when there is no BLE a
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `createServer` rejects with `ERR_PERMISSION` | `BLUETOOTH_CONNECT` not granted | Request runtime permission first (API 31+) |
-| `createServer` rejects with `ERR_CREATE_SERVER` saying Bluetooth is turned off | Android reports a powered-off adapter this way, where iOS uses `ERR_BLUETOOTH` | Check `getBluetoothState()` before calling, rather than branching on the code |
+| `createServer` rejects with `ERR_BLUETOOTH` | The adapter is off, or the device has no BLE support | Ask the user to enable Bluetooth. `getBluetoothState()` tells the two apart, and the module re-publishes the services when Bluetooth returns |
+| `sendNotification` rejects with `ERR_CHARACTERISTIC_NOT_FOUND` | The `serviceUuid` / `characteristicUuid` pair names nothing in the published database | Check both UUIDs against the `createServer` configuration. An unknown service reports this code too |
 | `createServer` or `disconnectDevice` rejects with `ERR_NO_CONTEXT` | No React context, so the permission could not be checked | Call after the app has finished mounting |
 | `startAdvertising` rejects with `ERR_PERMISSION` | `BLUETOOTH_ADVERTISE` not granted | Request runtime permission first (API 31+) |
 | `startAdvertising` rejects with `ERR_ADVERTISE` "Advertise data too large" | The advertisement is over its 31-byte budget | The service UUIDs, `manufacturerData` and `serviceData` share it. Prefer 16-bit service UUIDs, and move the name to the scan response with `android.includeDeviceName` |

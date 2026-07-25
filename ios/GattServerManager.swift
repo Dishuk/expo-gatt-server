@@ -471,6 +471,14 @@ class GattServerManager: NSObject {
     characteristicUuid: String, value: Data, confirm: Bool,
     completion: @escaping (Error?) -> Void
   ) throws {
+    // A database exists only while powered on — Apple documents that "the powered off state clears the
+    // local database" — so without this the lookup below reports a perfectly valid address as missing
+    // whenever Bluetooth is off. Android reports the same two situations under the same codes.
+    guard let peripheral = peripheralManager else { throw GattServerError.serverStopped }
+    guard peripheral.state == .poweredOn else {
+      throw GattServerError.bluetoothUnavailable(state: peripheral.state)
+    }
+
     let charUUID = CBUUID(string: characteristicUuid)
 
     guard let characteristic = findCharacteristic(

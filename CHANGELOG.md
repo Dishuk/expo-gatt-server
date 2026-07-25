@@ -210,6 +210,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The same failure reported a different `code` on each platform, so branching on one meant branching on
+  `Platform.OS` too. Every case now reports the more specific of the two codes on both platforms:
+  `sendNotification` with an unknown `deviceId` rejects with `ERR_DEVICE_DISCONNECTED` and with an
+  unknown `serviceUuid` or `characteristicUuid` with `ERR_CHARACTERISTIC_NOT_FOUND` (Android flattened
+  all three into `ERR_NOTIFY`); Bluetooth being off rejects with `ERR_BLUETOOTH` from `createServer`,
+  `startAdvertising`, `sendNotification`, `updateCharacteristicValue` and `disconnectDevice` (Android
+  reported `ERR_CREATE_SERVER` or `ERR_NO_SERVER`, and iOS reported `ERR_CHARACTERISTIC_NOT_FOUND` from
+  `sendNotification`); a `createServer` cancelled by a concurrent `stopServer` rejects with
+  `ERR_NO_SERVER` (Android reported `ERR_CREATE_SERVER`); `sendResponse` looks the request up first, so
+  an already-forgotten one reports `REQUEST_NOT_FOUND` rather than the reason the database went away,
+  and a vanished central reports `ERR_DEVICE_DISCONNECTED`; and an Android adapter with no BLE
+  advertising support rejects with `ERR_UNSUPPORTED` rather than the retryable `ERR_ADVERTISE`.
+  `ERR_NOTIFY`, `ERR_CREATE_SERVER`, `ERR_ADVERTISE`, `ERR_RESPONSE` and `ERR_UPDATE_VALUE` remain as
+  genuine fallbacks and no longer swallow a specific code
 - An automatically acknowledged write did not update the value a later read is answered from on
   Android, so the same central saw its own write reflected on iOS and the stale value on Android. Both
   platforms now store it, replacing the attribute value as `ATT_WRITE_REQ` requires — "the attribute

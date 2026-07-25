@@ -143,13 +143,17 @@ class ExpoGattServerModule : Module() {
         // attributes to expose and advertising it would be meaningless.
         mgr.open({ error ->
           if (error != null) {
-            promise.reject("ERR_CREATE_SERVER", error, null)
+            promise.reject(error.code, error.message, error)
           } else {
             promise.resolve(null)
           }
         }) {
           services.map { parseServiceConfig(it) }
         }
+      } catch (e: GattServerException) {
+        // Keeps a specific code such as ERR_BLUETOOTH, which the generic catch below would flatten into
+        // ERR_CREATE_SERVER.
+        promise.reject(e.code, e.message, e)
       } catch (e: Exception) {
         promise.reject("ERR_CREATE_SERVER", e.message, e)
       }
@@ -208,6 +212,8 @@ class ExpoGattServerModule : Module() {
             promise.resolve(null)
           }
         }
+      } catch (e: GattServerException) {
+        promise.reject(e.code, e.message, e)
       } catch (e: Exception) {
         promise.reject("ERR_ADVERTISE", e.message, e)
       }

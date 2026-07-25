@@ -156,12 +156,9 @@ callback".
 | `ERR_PERMISSION` | iOS: `CBManager.authorization` is denied or restricted. Android: `BLUETOOTH_CONNECT` is not granted (API 31+) |
 | `ERR_NO_CONTEXT` | Android only: no React context is available, so the permission could not be checked |
 | `ERR_UNSUPPORTED` | iOS only: the configuration asks for a property, permission or descriptor CoreBluetooth cannot express -- see the type tables below |
-| `ERR_BLUETOOTH` | iOS: Bluetooth is off, unsupported or unauthorized when the manager reports its state |
-| `ERR_CREATE_SERVER` | A service failed to publish, the configuration was malformed, or -- **on Android only** -- Bluetooth is off or the device has no adapter |
-
-> Bluetooth being off during `createServer` is reported as `ERR_BLUETOOTH` on iOS but as
-> `ERR_CREATE_SERVER` on Android. Check [`getBluetoothState`](#getbluetoothstate) first rather than
-> branching on the code.
+| `ERR_BLUETOOTH` | Bluetooth is off, or the device has no BLE support. Check [`getBluetoothState`](#getbluetoothstate) to tell which |
+| `ERR_NO_SERVER` | [`stopServer`](#stopserver) ran, or Bluetooth went off, before the database finished publishing |
+| `ERR_CREATE_SERVER` | A service failed to publish, or the configuration was malformed |
 
 Invalid configuration is rejected in the shared TypeScript layer before either platform sees it, as a
 plain `Error` rather than a coded one: a malformed UUID, a byte outside `0`--`255`, an unrecognised
@@ -236,8 +233,8 @@ On iOS the call **waits** for Bluetooth to reach a definitive state rather than 
 | `ERR_NO_SERVER` | No server exists -- call `createServer` first |
 | `ERR_PERMISSION` | Android: `BLUETOOTH_ADVERTISE` is not granted, or `BLUETOOTH_CONNECT` is not granted while `android.setAdapterName` is set (API 31+). iOS: Bluetooth is unauthorized |
 | `ERR_NO_CONTEXT` | Android only: no React context, so the permission could not be checked |
-| `ERR_UNSUPPORTED` | iOS only: `manufacturerData`, `serviceData` or `connectable: false` was supplied |
-| `ERR_BLUETOOTH` | iOS only: Bluetooth is off or unsupported |
+| `ERR_UNSUPPORTED` | iOS: `manufacturerData`, `serviceData` or `connectable: false` was supplied. Android: the adapter has no BLE advertising support, which no amount of retrying changes |
+| `ERR_BLUETOOTH` | Bluetooth is off, or the device has no BLE support |
 | `ERR_ADVERTISE` | The platform refused the advertisement -- data over the 31-byte budget, too many advertisers, already started, or `android.setAdapterName` without a `localName` |
 
 An invalid `mode`, `txPowerLevel`, `timeoutMs`, `companyId` or byte value is rejected in the shared
@@ -390,15 +387,11 @@ stream against the connection instead of overrunning it.
 | `ERR_CONFIRM_UNSUPPORTED` | The characteristic does not declare the property `confirm` asks for |
 | `ERR_NO_SUBSCRIBER` | The device has not enabled the transmission on the characteristic |
 | `ERR_NOTIFY_QUEUE_FULL` | 64 sends are already waiting for the same device (iOS: for the peripheral manager's transmit queue). Await earlier sends first |
-| `ERR_DEVICE_DISCONNECTED` | The central is not connected, or went away before a queued notification was delivered |
+| `ERR_DEVICE_DISCONNECTED` | `deviceId` names no connected central, or it went away before a queued notification was delivered |
+| `ERR_CHARACTERISTIC_NOT_FOUND` | The pair of UUIDs names nothing in the published GATT database. An unknown `serviceUuid` and an unknown `characteristicUuid` share this code |
 | `ERR_NOTIFY` | The stack refused the send, or reported it as undelivered |
 | `ERR_NO_SERVER` | No server exists, or it was stopped while the send was queued |
-| `ERR_BLUETOOTH` | Bluetooth was turned off while the send was queued |
-
-> **Android reports a bad address less specifically.** An unknown `deviceId`, `serviceUuid` or
-> `characteristicUuid` rejects with `ERR_NOTIFY` there, where iOS uses `ERR_DEVICE_DISCONNECTED` and
-> `ERR_CHARACTERISTIC_NOT_FOUND`. The message names the problem on both platforms; only the code
-> differs.
+| `ERR_BLUETOOTH` | Bluetooth is not powered on, or was turned off while the send was queued |
 
 ---
 
@@ -445,10 +438,15 @@ await sendResponse(deviceId, requestId, GATT_SUCCESS, event.offset, wholeValue.s
 **Rejects** with `REQUEST_NOT_FOUND` if the request ID is invalid, already responded to, or expired
 after `createServer`'s `requestTimeoutMs`; `REQUEST_DEVICE_MISMATCH` if the request belongs to a
 different device than `deviceId`; `ERR_RESPONSE_OFFSET` if `offset` is past the offset the request
-asked for -- which would leave the requested bytes missing from the response; `ERR_NO_SERVER` if no
-server exists; and `ERR_RESPONSE` if the Bluetooth stack does not accept the response. A `status`,
-`offset` or byte value outside its range is rejected as a plain `Error` before either platform sees
-it.
+asked for -- which would leave the requested bytes missing from the response;
+`ERR_DEVICE_DISCONNECTED` if the central went away; `ERR_NO_SERVER` if no server exists;
+`ERR_BLUETOOTH` if Bluetooth is off; and `ERR_RESPONSE` if the Bluetooth stack does not accept the
+response. A `status`, `offset` or byte value outside its range is rejected as a plain `Error` before
+either platform sees it.
+
+The request is looked up **first**, so answering one the server no longer holds -- which is what losing
+the database to a `stopServer` or a Bluetooth power cycle leaves behind -- reports `REQUEST_NOT_FOUND`
+rather than the reason the database went away.
 
 A rejected call leaves the request still answerable, rather than consuming it -- so a mistake here
 does not strand the central until its own ATT transaction times out.
@@ -477,12 +475,10 @@ and the cached value is only used as the payload of a notification.
 Does **not** send a notification. Use `sendNotification` to push updates to subscribed centrals.
 
 **Rejects** with `ERR_CHARACTERISTIC_NOT_FOUND` when the pair of UUIDs names nothing in the published
-GATT database, and with `ERR_NO_SERVER` when no server exists.
-
-While Bluetooth is not powered on there is no published database to update -- "the powered off state
-clears the local database" -- and the two platforms report that differently: iOS rejects with
-`ERR_BLUETOOTH`, Android with `ERR_NO_SERVER`. Check
-[`isServerRunning`](#isserverrunning) rather than branching on the code.
+GATT database, `ERR_NO_SERVER` when no server exists, and `ERR_BLUETOOTH` when Bluetooth is not powered
+on -- there is no published database to update then, since "the powered off state clears the local
+database". `ERR_BLUETOOTH` is the one worth retrying: the module re-publishes the services when
+Bluetooth comes back, which [`isServerRunning`](#isserverrunning) reports.
 
 ---
 
@@ -593,8 +589,9 @@ connection.
 **Rejects** on iOS with `ERR_UNSUPPORTED` always, before any other check -- there is no state in
 which the call can succeed there. On Android it rejects with `ERR_PERMISSION` when
 `BLUETOOTH_CONNECT` is not granted (API 31+), `ERR_NO_CONTEXT` when no React context is available to
-check that against, `ERR_NO_SERVER` when no server exists, `ERR_DEVICE_DISCONNECTED` when the device
-is not connected, and `ERR_DISCONNECT` if the stack raises anything else.
+check that against, `ERR_NO_SERVER` when no server exists, `ERR_BLUETOOTH` when Bluetooth is off,
+`ERR_DEVICE_DISCONNECTED` when the device is not connected, and `ERR_DISCONNECT` if the stack raises
+anything else.
 
 ---
 
@@ -650,8 +647,8 @@ For the same reason **no `onDeviceDisconnected` events are emitted** by `stopSer
 discards its own connection tracking without reporting a disconnection it did not observe, so
 `getConnectedDevices` goes empty while any actual links are still up.
 
-Pending work is settled rather than abandoned: an unresolved `createServer` rejects (with
-`ERR_NO_SERVER` on iOS, `ERR_CREATE_SERVER` on Android), queued notifications reject, unanswered
+Pending work is settled rather than abandoned: an unresolved `createServer` rejects with
+`ERR_NO_SERVER`, queued notifications reject, unanswered
 delegated requests are dropped without being answered, and a pending `startAdvertising` rejects with
 `ERR_ADVERTISE` (restoring the adapter name on
 Android if `android.setAdapterName` changed it). Both platforms unpublish the whole database and stop
@@ -1467,16 +1464,22 @@ meaning.
 Every rejection from this module carries a `code` property. Argument validation performed in the shared
 TypeScript layer -- malformed UUIDs, bytes outside `0`--`255`, out-of-range timeouts, offsets and
 statuses, unrecognised enum names -- throws a plain `Error` with a descriptive message and **no**
-`code`, since it never reaches a platform.
+`code`, since it never reaches a platform. So a rejection with a `code` always came from a platform, and
+one without it always means the arguments were wrong.
+
+**The same situation reports the same code on both platforms.** Where a code is marked as belonging to
+one platform below, it is because only that platform has the situation at all -- not because the other
+reports it differently -- so `code` can be branched on without also branching on `Platform.OS`. The
+messages are not part of that contract and do differ.
 
 | Code | Description |
 |------|-------------|
-| `ERR_UNSUPPORTED` | The configuration or advertising option cannot be expressed on this platform. **iOS only**, and raised by `disconnectDevice`, by `manufacturerData` / `serviceData` / `connectable: false`, by MITM and signed permissions, by the `broadcast` and `extendedProperties` properties, and by a descriptor other than `0x2901` / `0x2904` |
-| `ERR_NO_SERVER` | No server exists, or it was stopped while the call was in flight. Also how Android reports a missing database while Bluetooth is off |
+| `ERR_UNSUPPORTED` | The call, configuration or advertising option cannot be expressed on this platform, so retrying never helps. On iOS: `disconnectDevice`, `manufacturerData` / `serviceData` / `connectable: false`, MITM and signed permissions, the `broadcast` and `extendedProperties` properties, and any descriptor other than `0x2901` / `0x2904`. On Android: an adapter with no BLE advertising support |
+| `ERR_NO_SERVER` | No server exists, or it was stopped while the call was in flight. A database missing because Bluetooth is off is `ERR_BLUETOOTH` instead, on both platforms |
 | `ERR_PERMISSION` | Bluetooth permission is not granted -- `CBManager.authorization` on iOS, `BLUETOOTH_CONNECT` / `BLUETOOTH_ADVERTISE` on Android (API 31+) |
 | `ERR_NO_CONTEXT` | **Android only.** No React context was available, so the permission could not be checked. Treated as a failure rather than a pass, because assuming the grant only defers it to a `SecurityException` |
-| `ERR_BLUETOOTH` | Bluetooth is off, unsupported or otherwise not ready. On iOS this is also how `createServer` and `updateCharacteristicValue` report a powered-off adapter |
-| `ERR_CREATE_SERVER` | A service failed to publish, or the configuration was rejected by the native layer. Also how Android reports Bluetooth being off during `createServer` |
+| `ERR_BLUETOOTH` | Bluetooth is off, unsupported or otherwise not ready. This is how every call reports a powered-off adapter, including `createServer`, `startAdvertising`, `sendNotification`, `updateCharacteristicValue` and `disconnectDevice` -- the published database does not survive the adapter going down, and the module re-publishes it when Bluetooth returns, so this is the retryable one |
+| `ERR_CREATE_SERVER` | A service failed to publish, or the configuration was rejected by the native layer |
 | `ERR_ADVERTISE` | The platform refused the advertisement, or a pending `startAdvertising` was superseded by another one, by `stopAdvertising` or by `stopServer` |
 | `ERR_RESPONSE` | The Bluetooth stack did not accept a `sendResponse`, or its arguments were rejected by the native layer |
 | `ERR_DISCONNECT` | **Android only.** `disconnectDevice` failed for a reason the stack did not classify |
@@ -1484,10 +1487,10 @@ statuses, unrecognised enum names -- throws a plain `Error` with a descriptive m
 | `REQUEST_NOT_FOUND` | The `requestId` does not match a pending read or write request. It was never delegated, has already been answered, or expired after `requestTimeoutMs` |
 | `REQUEST_DEVICE_MISMATCH` | The `requestId` is pending, but for a different device than the `deviceId` supplied |
 | `ERR_RESPONSE_OFFSET` | The `offset` given to `sendResponse` is past the offset the request asked for, so the requested bytes would be missing |
-| `ERR_NOTIFY` | The Bluetooth stack refused the notification, or reported it as undelivered. On Android also raised for an unknown device, service or characteristic |
+| `ERR_NOTIFY` | The Bluetooth stack refused the notification, or reported it as undelivered. A bad address is `ERR_DEVICE_DISCONNECTED` or `ERR_CHARACTERISTIC_NOT_FOUND` instead |
 | `ERR_NOTIFY_QUEUE_FULL` | 64 notifications are already queued for the device. Await earlier sends before queueing more |
-| `ERR_DEVICE_DISCONNECTED` | The device is not connected, or disconnected -- or on iOS unsubscribed -- before a queued notification could be delivered. Also raised by `getMtu` and Android's `disconnectDevice` |
-| `ERR_CHARACTERISTIC_NOT_FOUND` | The characteristic is not part of the published GATT database |
+| `ERR_DEVICE_DISCONNECTED` | The device is not connected, or disconnected -- or on iOS unsubscribed -- before a queued notification could be delivered. Also raised by `getMtu`, `sendResponse` and Android's `disconnectDevice` |
+| `ERR_CHARACTERISTIC_NOT_FOUND` | The pair of UUIDs names nothing in the published GATT database. An unknown `serviceUuid` shares this code, since iOS cannot tell the two apart |
 | `ERR_UPDATE_VALUE` | An `updateCharacteristicValue` argument was rejected by the native layer |
 | `ERR_NO_SUBSCRIBER` | The device has not enabled the transmission `confirm` selects on the characteristic |
 | `ERR_CONFIRM_UNSUPPORTED` | `confirm` asks for a transmission the characteristic does not declare the property for -- `indicate` for `true`, `notify` for `false` |
