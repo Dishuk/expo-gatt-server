@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `getConnectedDevices`, with the type `ConnectedDevice`, for enumerating connected centrals. Reports
+  the module's own tracking rather than
+  `BluetoothManager.getConnectedDevices(BluetoothProfile.GATT_SERVER)`, which would include centrals
+  connected to other apps' GATT servers. On iOS "connected" is derived from ATT activity, because
+  CoreBluetooth declares no connection-level callback
+- `disconnectDevice`, backed by `BluetoothGattServer.cancelConnection`. **Android only** — the whole
+  of `CBPeripheralManager` contains no method that drops a central, and
+  `CBCentralManager.cancelPeripheralConnection` applies to a `CBPeripheral` in the central role, so
+  iOS rejects with `ERR_UNSUPPORTED` rather than approximating it
+- `isServerRunning` and `isAdvertising`. `isServerRunning` reports whether a GATT database is
+  currently published, so it goes false while Bluetooth is off and true again once the module
+  re-publishes. `isAdvertising` reads `CBPeripheralManager.isAdvertising` on iOS and is tracked
+  natively on Android, which offers no such query
 - Encrypted and authenticated `CharacteristicPermission` variants — `readEncrypted`,
   `readEncryptedMitm`, `writeEncrypted`, `writeEncryptedMitm`, `writeSigned`, `writeSignedMitm`.
   Previously only `readable` and `writeable` existed, so anything built on this package was

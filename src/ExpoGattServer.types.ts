@@ -320,6 +320,31 @@ export interface DeviceConnectedEvent {
   name?: string;
 }
 
+/**
+ * A central the module currently considers connected.
+ *
+ * **What "connected" means differs by platform, and cannot be made to agree.** Android reports
+ * connections directly, through `BluetoothGattServerCallback.onConnectionStateChange`, so the list is
+ * every central with a link to this server. iOS has no connection-level callback at all —
+ * `CBPeripheralManagerDelegate` declares none — so membership is derived from ATT activity: a
+ * central appears on its first subscribe, read request or write request, and is dropped when it
+ * unsubscribes from everything or Bluetooth leaves `poweredOn`. A central that connects to an iOS
+ * peripheral and never touches an attribute is invisible from the peripheral role, so it is absent
+ * from this list; one that unsubscribes but stays connected is dropped from it early.
+ *
+ * The list is the module's own tracking on both platforms, not a platform query.
+ * `BluetoothManager.getConnectedDevices(BluetoothProfile.GATT_SERVER)` would report centrals
+ * connected to *any* GATT server on the device, including other apps'.
+ */
+export interface ConnectedDevice {
+  deviceId: string;
+  /**
+   * From `BluetoothDevice.getName()` on Android. Always empty on iOS, which exposes no name for a
+   * remote central.
+   */
+  name?: string;
+}
+
 export interface DeviceDisconnectedEvent {
   deviceId: string;
 }

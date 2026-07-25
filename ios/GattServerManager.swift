@@ -248,6 +248,11 @@ class GattServerManager: NSObject {
   private var advertisingTimeout: DispatchWorkItem?
   private var addedServices: [CBUUID: CBMutableService] = [:]
 
+  /// Whether every configured service is currently published. Apple documents that "the powered off
+  /// state clears the local database", so this drops on any state below powered on and is set again
+  /// once the re-publish that follows powering on is acknowledged.
+  private var databasePublished = false
+
   /// Centrals the module believes are connected, keyed by `CBCentral.identifier`.
   ///
   /// `CBPeripheralManagerDelegate` declares no connection-level callback — the protocol is exactly
@@ -383,8 +388,10 @@ class GattServerManager: NSObject {
   /// Publishes every configured service and completes the pending open once CoreBluetooth has
   /// acknowledged all of them via `peripheralManager(_:didAdd:error:)`.
   private func publishConfiguredServices(on peripheral: CBPeripheralManager) {
+    databasePublished = false
     servicesAwaitingRegistration = Set(serviceConfiguration.map { $0.uuid })
     guard !servicesAwaitingRegistration.isEmpty else {
+      databasePublished = true
       completeOpen(nil)
       return
     }
@@ -737,6 +744,7 @@ class GattServerManager: NSObject {
     // back to life through either route.
     serviceConfiguration.removeAll()
     servicesAwaitingRegistration.removeAll()
+    databasePublished = false
     addedServices.removeAll()
     connectedCentrals.removeAll()
     centralPayloadLengths.removeAll()
@@ -810,6 +818,22 @@ class GattServerManager: NSObject {
     return DeviceMtu(maxNotificationPayload: central.maximumUpdateValueLength)
   }
 
+  /// The centrals the module has derived from ATT activity. CoreBluetooth declares no
+  /// connection-level callback, so this is every central that has subscribed, read or written and not
+  /// since been dropped — not every central holding a link.
+  var connectedDeviceIds: [String] {
+    Array(connectedCentrals.keys)
+  }
+
+  var isServerRunning: Bool {
+    databasePublished
+  }
+
+  /// Read straight from CoreBluetooth, which tracks this itself.
+  var isAdvertising: Bool {
+    peripheralManager?.isAdvertising ?? false
+  }
+
   /// Drops every trace of `deviceId` and reports the disconnection exactly once. A device that was
   /// never seen, or that has already been reported, produces nothing.
   private func markDisconnected(_ deviceId: String, reason: GattServerError) {
@@ -840,6 +864,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       // Any state below powered on drops the published database and disconnects every central,
       // so discard the mirrored state rather than letting it go stale.
       let error = GattServerError.bluetoothUnavailable(state: peripheral.state)
+      databasePublished = false
       servicesAwaitingRegistration.removeAll()
 
       // Every subscription dies with the database, so report each one as ended before the service
@@ -886,6 +911,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     servicesAwaitingRegistration.remove(service.uuid)
 
     if let error = error {
+      databasePublished = false
       servicesAwaitingRegistration.removeAll()
       completeOpen(GattServerError.serviceRegistrationFailed(
         uuid: service.uuid.uuidString,
@@ -898,6 +924,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       ?? CBMutableService(type: service.uuid, primary: service.isPrimary)
 
     if servicesAwaitingRegistration.isEmpty {
+      databasePublished = true
       completeOpen(nil)
     }
   }

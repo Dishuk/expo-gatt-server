@@ -216,10 +216,17 @@ class GattServerManager(
 
   private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
   private val bluetoothAdapter: BluetoothAdapter? = bluetoothManager.adapter
+  @Volatile
   private var gattServer: BluetoothGattServer? = null
   private var advertiser: BluetoothLeAdvertiser? = null
   private var advertiseCallback: AdvertiseCallback? = null
   private var pendingAdvertiseResult: ((String?) -> Unit)? = null
+
+  // Both answer public queries from the caller's thread while being written from the binder threads
+  // that deliver onServiceAdded, the adapter state broadcast and the advertising callbacks.
+  private val databasePublished = AtomicBoolean(false)
+  private val advertising = AtomicBoolean(false)
+  private val advertisingTimeout = AtomicReference<Runnable?>(null)
   // Set from the caller's thread, read again during a teardown that may be on another.
   private val originalAdapterName = AtomicReference<String?>(null)
   private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
@@ -380,9 +387,13 @@ class GattServerManager(
   @SuppressLint("MissingPermission")
   private fun handleAdapterOff() {
     Log.d(TAG, "Adapter off — closing GATT server")
+    databasePublished.set(false)
     pendingServices.clear()
     finishOpen("Bluetooth was turned off before the server finished opening")
 
+    // The adapter taking the stack down stops advertising without any AdvertiseCallback.
+    advertising.set(false)
+    cancelAdvertisingTimeout()
     advertiseCallback = null
     advertiser = null
     pendingAdvertiseResult?.invoke("Bluetooth was turned off")
@@ -695,6 +706,7 @@ class GattServerManager(
   @SuppressLint("MissingPermission")
   private fun openServer(): Boolean {
     val buildServices = serviceFactory.get() ?: return false
+    databasePublished.set(false)
     val server = bluetoothManager.openGattServer(context, gattServerCallback) ?: return false
     gattServer = server
     server.clearServices()
@@ -716,6 +728,7 @@ class GattServerManager(
     val next = pendingServices.poll()
     if (next == null) {
       Log.d(TAG, "All services registered")
+      databasePublished.set(true)
       finishOpen(null)
       return
     }
@@ -789,10 +802,13 @@ class GattServerManager(
     val callback = object : AdvertiseCallback() {
       override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
         Log.d(TAG, "Advertising started successfully")
+        advertising.set(true)
+        scheduleAdvertisingTimeout(options.timeoutMs)
         pendingAdvertiseResult?.invoke(null)
         pendingAdvertiseResult = null
       }
       override fun onStartFailure(errorCode: Int) {
+        advertising.set(false)
         val msg = when (errorCode) {
           ADVERTISE_FAILED_DATA_TOO_LARGE ->
             "Advertise data too large — the advertisement and the scan response are each limited " +
@@ -809,16 +825,35 @@ class GattServerManager(
       }
     }
     advertiseCallback = callback
+    cancelAdvertisingTimeout()
     advertiser?.startAdvertising(settings, advData.build(), scanResponse, callback)
   }
 
   @SuppressLint("MissingPermission")
   fun stopAdvertising() {
+    cancelAdvertisingTimeout()
+    advertising.set(false)
     advertiseCallback?.let { advertiser?.stopAdvertising(it) }
     advertiseCallback = null
     pendingAdvertiseResult?.invoke("Advertising stopped")
     pendingAdvertiseResult = null
     restoreAdapterName()
+  }
+
+  /**
+   * `AdvertiseSettings.setTimeout` stops advertising at the limit without invoking
+   * `AdvertiseCallback`, so [advertising] would otherwise stay set for the rest of the process. Only
+   * the flag is cleared — the platform has already stopped the advertisement itself.
+   */
+  private fun scheduleAdvertisingTimeout(timeoutMs: Int) {
+    if (timeoutMs <= 0) return
+    val expiry = Runnable { advertising.set(false) }
+    advertisingTimeout.set(expiry)
+    timeoutHandler.postDelayed(expiry, timeoutMs.toLong())
+  }
+
+  private fun cancelAdvertisingTimeout() {
+    advertisingTimeout.getAndSet(null)?.let { timeoutHandler.removeCallbacks(it) }
   }
 
   /**
@@ -933,6 +968,35 @@ class GattServerManager(
   fun mtuFor(deviceId: String): DeviceMtu? {
     if (!connectedDevices.containsKey(deviceId)) return null
     return DeviceMtu(deviceMtu[deviceId] ?: DEFAULT_ATT_MTU)
+  }
+
+  /**
+   * The centrals connected to *this* server, from the module's own tracking of
+   * `onConnectionStateChange`. `BluetoothManager.getConnectedDevices(GATT_SERVER)` is deliberately
+   * not used: it reports centrals connected to any GATT server on the device, including other apps'.
+   */
+  @SuppressLint("MissingPermission")
+  fun connectedDeviceList(): List<Pair<String, String?>> =
+    connectedDevices.values.map { it.address to it.name }
+
+  /** Whether a GATT database is currently published, which the adapter going down undoes. */
+  fun isServerRunning(): Boolean = databasePublished.get()
+
+  fun isAdvertising(): Boolean = advertising.get()
+
+  /**
+   * Asks the stack to drop [deviceId]. `cancelConnection` "disconnects an established connection, or
+   * cancels a connection attempt currently in progress" and returns nothing, so there is no outcome
+   * to report — the disconnection surfaces through `onConnectionStateChange`, which is what clears
+   * this device's state.
+   */
+  @SuppressLint("MissingPermission")
+  fun disconnect(deviceId: String) {
+    val server = gattServer ?: throw GattServerException("ERR_NO_SERVER", "Server not open")
+    val device = connectedDevices[deviceId]
+      ?: throw GattServerException("ERR_DEVICE_DISCONNECTED", "Device $deviceId is not connected")
+    Log.d(TAG, "Cancelling connection to $deviceId")
+    server.cancelConnection(device)
   }
 
   /** Two octets, little endian, as the descriptor value is defined. */
@@ -1448,6 +1512,7 @@ class GattServerManager(
     onStateChange = null
     serviceFactory.set(null)
     stopAdvertising()
+    databasePublished.set(false)
     pendingServices.clear()
     finishOpen("Server stopped before it finished opening")
     gattServer?.close()

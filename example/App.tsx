@@ -8,6 +8,10 @@ import {
   addDeviceDisconnectedListener,
   addNotificationSentListener,
   createServer,
+  disconnectDevice,
+  getConnectedDevices,
+  isAdvertising,
+  isServerRunning,
   sendNotification,
   sendResponse,
   startAdvertising,
@@ -177,6 +181,27 @@ export default function App() {
               [0, counter.current],
               false
             );
+          })}
+        />
+        <Button
+          label="getConnectedDevices"
+          onPress={run('getConnectedDevices', async () => {
+            append(JSON.stringify(await getConnectedDevices()));
+          })}
+        />
+        <Button
+          label="status"
+          onPress={run('status', async () => {
+            append(`running=${await isServerRunning()} advertising=${await isAdvertising()}`);
+          })}
+        />
+        <Button
+          label="disconnectDevice"
+          onPress={run('disconnectDevice', () => {
+            if (!deviceId) {
+              throw new Error('no connected device');
+            }
+            return disconnectDevice(deviceId);
           })}
         />
         <Button label="stopServer" onPress={run('stopServer', () => stopServer())} />

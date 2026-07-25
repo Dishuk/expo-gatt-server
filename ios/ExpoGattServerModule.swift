@@ -59,6 +59,52 @@ public class ExpoGattServerModule: Module {
       }
     }
 
+    AsyncFunction("getConnectedDevices") { (promise: Promise) in
+      guard let mgr = self.manager else {
+        promise.resolve([])
+        return
+      }
+      // The tracked centrals are only touched on the main queue, which is also the queue the
+      // peripheral manager delivers the activity they are derived from on.
+      DispatchQueue.main.async {
+        promise.resolve(mgr.connectedDeviceIds.map { ["deviceId": $0, "name": ""] })
+      }
+    }
+
+    // CBPeripheralManager has no disconnect. Its entire interface is startAdvertising,
+    // stopAdvertising, setDesiredConnectionLatency(_:for:), addService, removeService,
+    // removeAllServices, respond(to:withResult:), updateValue(_:for:onSubscribedCentrals:),
+    // publishL2CAPChannel(withEncryption:) and unpublishL2CAPChannel; CBCentral exposes only
+    // identifier and maximumUpdateValueLength. cancelPeripheralConnection(_:) belongs to
+    // CBCentralManager and takes a CBPeripheral, so it cannot be turned around on a central. Nothing
+    // here is approximated, because no documented CoreBluetooth call drops a central.
+    AsyncFunction("disconnectDevice") { (deviceId: String, promise: Promise) in
+      let error = GattServerError.configurationUnsupported(
+        option: "disconnectDevice",
+        reason: "CBPeripheralManager declares no method that drops a connected central, and " +
+          "CBCentralManager.cancelPeripheralConnection applies to a CBPeripheral in the central " +
+          "role. A peripheral can stop advertising and unpublish its services, but neither is " +
+          "documented as disconnecting anybody. Only the central can end the connection."
+      )
+      promise.reject(error.code, error.message)
+    }
+
+    AsyncFunction("isServerRunning") { (promise: Promise) in
+      guard let mgr = self.manager else {
+        promise.resolve(false)
+        return
+      }
+      DispatchQueue.main.async { promise.resolve(mgr.isServerRunning) }
+    }
+
+    AsyncFunction("isAdvertising") { (promise: Promise) in
+      guard let mgr = self.manager else {
+        promise.resolve(false)
+        return
+      }
+      DispatchQueue.main.async { promise.resolve(mgr.isAdvertising) }
+    }
+
     AsyncFunction("getBluetoothState") { (promise: Promise) in
       // `CBPeripheralManager.state` needs an instantiated manager, and instantiating one purely
       // to read state would trigger the Bluetooth permission prompt. Without a server, fall back

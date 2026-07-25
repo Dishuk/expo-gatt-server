@@ -25,6 +25,7 @@ import type {
   CharacteristicUnsubscribedEvent,
   BluetoothState,
   BluetoothStateChangedEvent,
+  ConnectedDevice,
   DeviceMtu,
   MtuChangedEvent,
 } from './ExpoGattServer.types';
@@ -56,6 +57,7 @@ export {
   type CharacteristicUnsubscribedEvent,
   type BluetoothState,
   type BluetoothStateChangedEvent,
+  type ConnectedDevice,
   type DeviceMtu,
   type MtuChangedEvent,
   type GattServerEvents,
@@ -442,6 +444,68 @@ export async function getBluetoothState(): Promise<BluetoothState> {
  */
 export async function getMtu(deviceId: string): Promise<DeviceMtu> {
   return ExpoGattServerModule.getMtu(deviceId);
+}
+
+/**
+ * Lists the centrals the module currently considers connected. Resolves to an empty array when no
+ * server exists.
+ *
+ * See `ConnectedDevice` for what "connected" means on each platform — Android reports connections
+ * directly, while iOS can only derive them from ATT activity, so the two are not equivalent.
+ */
+export async function getConnectedDevices(): Promise<ConnectedDevice[]> {
+  return ExpoGattServerModule.getConnectedDevices();
+}
+
+/**
+ * Drops a connected central. **Android only.**
+ *
+ * Android calls `BluetoothGattServer.cancelConnection`, which "disconnects an established
+ * connection, or cancels a connection attempt currently in progress". That method returns nothing
+ * and reports no outcome, so the promise resolves once the request has been handed to the Bluetooth
+ * stack, not once the central is gone — wait for `onDeviceDisconnected` for that.
+ *
+ * **iOS rejects with `ERR_UNSUPPORTED`, because CoreBluetooth cannot do this at all.** The whole of
+ * `CBPeripheralManager` is `startAdvertising`, `stopAdvertising`,
+ * `setDesiredConnectionLatency(_:for:)`, `addService`, `removeService`, `removeAllServices`,
+ * `respond(to:withResult:)`, `updateValue(_:for:onSubscribedCentrals:)`,
+ * `publishL2CAPChannel(withEncryption:)` and `unpublishL2CAPChannel` — there is no disconnect among
+ * them, and `CBCentral` exposes only `identifier` and `maximumUpdateValueLength`.
+ * `cancelPeripheralConnection(_:)` is a `CBCentralManager` method that takes a `CBPeripheral`, so it
+ * belongs to the central role and cannot be turned around. Nothing here is approximated: dropping
+ * the GATT database with `stopServer` is not documented as disconnecting anybody, so claiming it as
+ * an equivalent would be an invention.
+ *
+ * Rejects with `ERR_DEVICE_DISCONNECTED` when the device is not connected and `ERR_NO_SERVER` when
+ * no server exists.
+ */
+export async function disconnectDevice(deviceId: string): Promise<void> {
+  return ExpoGattServerModule.disconnectDevice(deviceId);
+}
+
+/**
+ * Whether a GATT database is currently published and usable.
+ *
+ * `false` before `createServer`, after `stopServer`, and while Bluetooth is not powered on — both
+ * platforms destroy the published database when the adapter goes down. The module re-publishes it on
+ * the next transition to `poweredOn`, at which point this becomes `true` again without any further
+ * call, so it is the right thing to check before advertising rather than remembering whether
+ * `createServer` was ever called.
+ */
+export async function isServerRunning(): Promise<boolean> {
+  return ExpoGattServerModule.isServerRunning();
+}
+
+/**
+ * Whether the peripheral is currently advertising.
+ *
+ * iOS reads `CBPeripheralManager.isAdvertising`. Android has no equivalent query —
+ * `BluetoothLeAdvertiser` exposes none — so the module tracks it from `AdvertiseCallback`, and
+ * additionally clears it when an `AdvertiseConfig.timeoutMs` elapses, because the platform stops
+ * advertising at that limit without reporting it.
+ */
+export async function isAdvertising(): Promise<boolean> {
+  return ExpoGattServerModule.isAdvertising();
 }
 
 /**

@@ -65,6 +65,44 @@ class ExpoGattServerModule : Module() {
       ))
     }
 
+    AsyncFunction("getConnectedDevices") { promise: Promise ->
+      val mgr = manager ?: run {
+        promise.resolve(emptyList<Any>())
+        return@AsyncFunction
+      }
+      promise.resolve(mgr.connectedDeviceList().map { (deviceId, name) ->
+        bundleOf("deviceId" to deviceId, "name" to (name ?: ""))
+      })
+    }
+
+    AsyncFunction("disconnectDevice") { deviceId: String, promise: Promise ->
+      permissionError(android.Manifest.permission.BLUETOOTH_CONNECT, "disconnectDevice")
+        ?.let { (code, message) ->
+          promise.reject(code, message, null)
+          return@AsyncFunction
+        }
+      val mgr = manager ?: run {
+        promise.reject("ERR_NO_SERVER", "Server not created", null)
+        return@AsyncFunction
+      }
+      try {
+        mgr.disconnect(deviceId)
+        promise.resolve(null)
+      } catch (e: GattServerException) {
+        promise.reject(e.code, e.message, e)
+      } catch (e: Exception) {
+        promise.reject("ERR_DISCONNECT", e.message, e)
+      }
+    }
+
+    AsyncFunction("isServerRunning") { promise: Promise ->
+      promise.resolve(manager?.isServerRunning() ?: false)
+    }
+
+    AsyncFunction("isAdvertising") { promise: Promise ->
+      promise.resolve(manager?.isAdvertising() ?: false)
+    }
+
     AsyncFunction("getBluetoothState") { promise: Promise ->
       val context = appContext.reactContext
       if (context == null) {

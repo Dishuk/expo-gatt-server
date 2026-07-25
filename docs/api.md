@@ -328,6 +328,95 @@ adding the three header octets back. Apple does not document that identity, so p
 
 ---
 
+### getConnectedDevices
+
+```typescript
+getConnectedDevices(): Promise<ConnectedDevice[]>
+```
+
+List the centrals the module currently considers connected. Resolves to `[]` when no server exists.
+
+**"Connected" does not mean the same thing on both platforms, and cannot be made to.** Android
+reports connections directly through `BluetoothGattServerCallback.onConnectionStateChange`, so the
+list is every central with a link to this server. iOS has no connection-level callback at all, so
+membership is derived from ATT activity: a central appears on its first subscribe, read request or
+write request, and is dropped when it unsubscribes from everything or Bluetooth leaves `poweredOn`.
+So on iOS a central that connects and never touches an attribute is **absent** from this list, and
+one that unsubscribes while staying connected is dropped from it early. This is the same tracking
+`onDeviceConnected` and `onDeviceDisconnected` report.
+
+The list is the module's own tracking on both platforms, not a platform query.
+`BluetoothManager.getConnectedDevices(BluetoothProfile.GATT_SERVER)` is deliberately not used: it
+reports centrals connected to *any* GATT server on the device, including other apps'.
+
+---
+
+### disconnectDevice
+
+```typescript
+disconnectDevice(deviceId: string): Promise<void>
+```
+
+Drop a connected central. **Android only.**
+
+Android calls `BluetoothGattServer.cancelConnection`, documented as "Disconnects an established
+connection, or cancels a connection attempt currently in progress". That method returns `void` and
+reports no outcome, so the promise resolves once the request reaches the Bluetooth stack, not once
+the central is gone -- wait for `onDeviceDisconnected` for that. Requires `BLUETOOTH_CONNECT`.
+
+**iOS rejects with `ERR_UNSUPPORTED`, because CoreBluetooth genuinely cannot do this.** The entire
+`CBPeripheralManager` interface is `startAdvertising`, `stopAdvertising`,
+`setDesiredConnectionLatency(_:for:)`, `addService`, `removeService`, `removeAllServices`,
+`respond(to:withResult:)`, `updateValue(_:for:onSubscribedCentrals:)`,
+`publishL2CAPChannel(withEncryption:)` and `unpublishL2CAPChannel` -- there is no disconnect among
+them. `CBCentral` exposes only `identifier` and `maximumUpdateValueLength`, so there is no handle to
+act on either. `cancelPeripheralConnection(_:)` exists, but it is a `CBCentralManager` method taking a
+`CBPeripheral`: it ends a connection *this* device opened in the central role, and cannot be turned
+around on a remote central.
+
+No approximation is offered. `stopAdvertising` prevents new connections but does not end existing
+ones, and neither `removeAllServices` nor `stopServer` is documented as disconnecting anybody --
+presenting either as an equivalent would be an invention. On iOS, only the central can end the
+connection.
+
+**Throws** `ERR_DEVICE_DISCONNECTED` when the device is not connected, `ERR_NO_SERVER` when no
+server exists, `ERR_UNSUPPORTED` on iOS.
+
+---
+
+### isServerRunning
+
+```typescript
+isServerRunning(): Promise<boolean>
+```
+
+Whether a GATT database is currently published and usable.
+
+`false` before `createServer`, after `stopServer`, and while Bluetooth is not powered on -- both
+platforms destroy the published database when the adapter goes down. The module re-publishes it on
+the next transition to `poweredOn`, at which point this becomes `true` again with no further call. It
+is therefore the right thing to check before advertising, rather than remembering whether
+`createServer` was ever called.
+
+---
+
+### isAdvertising
+
+```typescript
+isAdvertising(): Promise<boolean>
+```
+
+Whether the peripheral is currently advertising.
+
+iOS reads `CBPeripheralManager.isAdvertising`, which the platform maintains itself. Android has no
+equivalent query -- `BluetoothLeAdvertiser` exposes none -- so the module tracks it from
+`AdvertiseCallback.onStartSuccess` / `onStartFailure` and clears it on `stopAdvertising`, on the
+adapter going down, and when an `AdvertiseConfig.timeoutMs` elapses. That last case needs its own
+timer because `AdvertiseSettings.setTimeout` stops the advertisement at the limit without invoking
+`AdvertiseCallback` at all.
+
+---
+
 ### stopServer
 
 ```typescript
@@ -782,6 +871,19 @@ interface DeviceDisconnectedEvent {
   deviceId: string;
 }
 ```
+
+### ConnectedDevice
+
+```typescript
+interface ConnectedDevice {
+  deviceId: string;
+  name?: string;
+}
+```
+
+Returned by `getConnectedDevices`. `name` comes from `BluetoothDevice.getName()` on Android and is
+always empty on iOS, which exposes no name for a remote central. See `getConnectedDevices` for what
+"connected" means on each platform.
 
 ### CharacteristicReadRequestEvent
 
