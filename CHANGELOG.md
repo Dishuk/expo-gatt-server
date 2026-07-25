@@ -281,6 +281,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `startAdvertising` immediately after `createServer` failed on iOS, because `CBPeripheralManager.state`
   is `unknown` until its first callback arrives. The call now waits for a definitive state instead of
   sampling it
+- `startAdvertising` rejected with `ERR_NO_SERVER` on Android whenever the services were still
+  registering — an unawaited `createServer`, or the `poweredOn` event, which is delivered before the
+  re-registration it triggers has finished. The call now parks until the database is published, as it
+  already did on iOS, and is settled rather than stranded if the registration fails, the server is
+  stopped, or Bluetooth goes off. A pending start abandoned because Bluetooth went off now rejects with
+  `ERR_BLUETOOTH` rather than `ERR_ADVERTISE`
 - Turning Bluetooth off permanently broke the server. The published database is destroyed on both
   platforms, and nothing re-published it; the module now retains the configuration and re-publishes on
   the next transition to `poweredOn`, reporting the intervening subscription losses and disconnections.

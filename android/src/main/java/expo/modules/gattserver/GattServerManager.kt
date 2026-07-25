@@ -213,11 +213,10 @@ class GattServerManager(
   // that, a start and a stop both read the same completion and settle one Promise twice, which throws.
   private val advertiser = AtomicReference<BluetoothLeAdvertiser?>(null)
   private val advertiseCallback = AtomicReference<AdvertiseCallback?>(null)
-  private val pendingAdvertiseResult = AtomicReference<((String?) -> Unit)?>(null)
+  private val pendingAdvertiseResult = AtomicReference<((GattServerException?) -> Unit)?>(null)
 
-  // Both answer public queries from the caller's thread while being written from the binder threads that
-  // deliver onServiceAdded, the adapter state broadcast and the advertising callbacks.
-  private val databasePublished = AtomicBoolean(false)
+  // Answers public queries from the caller's thread while being written from the binder threads that
+  // deliver the adapter state broadcast and the advertising callbacks.
   private val advertising = AtomicBoolean(false)
   private val advertisingTimeout = AtomicReference<Runnable?>(null)
   // Set from the caller's thread, read again during a teardown that may be on another.
@@ -350,6 +349,26 @@ class GattServerManager(
   private val pendingServices = ConcurrentLinkedQueue<BluetoothGattService>()
   private val openCompletion = AtomicReference<((GattServerException?) -> Unit)?>(null)
 
+  /**
+   * How far the current round of `addService` calls has got. The adapter being disabled closes the
+   * server and discards its database, so this drops back to [IDLE] there and only reaches [PUBLISHED]
+   * once the re-registration that follows the next power-on is acknowledged.
+   */
+  private enum class DatabasePublication {
+    /** Nothing is published and a registration round is still expected. */
+    IDLE,
+    IN_PROGRESS,
+    PUBLISHED,
+    FAILED,
+  }
+
+  // The state and the callers parked on it share one monitor, so a caller cannot be appended in the
+  // window just after the transition that would have released it. Nothing that can re-enter the module
+  // runs under it: every parked caller is invoked after it is released.
+  private val publicationLock = Any()
+  private var publication = DatabasePublication.IDLE
+  private val readinessWaiters = mutableListOf<(GattServerException?) -> Unit>()
+
   // The adapter being disabled invalidates the whole server, so the configuration is retained as a
   // factory and fresh BluetoothGattService instances are built for every registration pass. Re-adding
   // the previously registered instances would reuse the instance IDs the framework assigned them, which
@@ -406,9 +425,10 @@ class GattServerManager(
   @SuppressLint("MissingPermission")
   private fun handleAdapterOff() {
     Log.d(TAG, "Adapter off — closing GATT server")
-    databasePublished.set(false)
     pendingServices.clear()
-    finishOpen(GattServerException(
+    // IDLE rather than FAILED: the next power-on re-registers the services, so a caller arriving in the
+    // window between the STATE_ON broadcast and that round has to park rather than be turned away.
+    finishOpen(DatabasePublication.IDLE, GattServerException(
       "ERR_BLUETOOTH", "Bluetooth was turned off before the server finished opening"
     ))
 
@@ -417,7 +437,7 @@ class GattServerManager(
     cancelAdvertisingTimeout()
     advertiseCallback.set(null)
     advertiser.set(null)
-    finishAdvertise("Bluetooth was turned off")
+    finishAdvertise(GattServerException("ERR_BLUETOOTH", "Bluetooth was turned off"))
 
     gattServer?.close()
     gattServer = null
@@ -441,6 +461,13 @@ class GattServerManager(
     Log.d(TAG, "Adapter on — reopening GATT server and re-registering services")
     if (!openServer()) {
       Log.e(TAG, "Failed to reopen GATT server after the adapter was re-enabled")
+      // Nothing retries until the adapter cycles again, so anyone parked is told rather than left there.
+      finishOpen(
+        DatabasePublication.FAILED,
+        GattServerException(
+          "ERR_CREATE_SERVER", "Could not reopen the GATT server after Bluetooth was turned back on"
+        )
+      )
     }
   }
 
@@ -689,7 +716,7 @@ class GattServerManager(
       if (status != BluetoothGatt.GATT_SUCCESS) {
         Log.e(TAG, "onServiceAdded: service=${service.uuid} failed with status=$status")
         pendingServices.clear()
-        finishOpen(GattServerException(
+        finishOpen(DatabasePublication.FAILED, GattServerException(
           "ERR_CREATE_SERVER", "Failed to add service ${service.uuid} (status $status)"
         ))
         return
@@ -729,14 +756,17 @@ class GattServerManager(
     registerStateReceiver()
 
     if (!openServer()) {
-      finishOpen(GattServerException("ERR_CREATE_SERVER", "Unable to open GATT server"))
+      finishOpen(
+        DatabasePublication.FAILED,
+        GattServerException("ERR_CREATE_SERVER", "Unable to open GATT server")
+      )
     }
   }
 
   @SuppressLint("MissingPermission")
   private fun openServer(): Boolean {
     val buildServices = serviceFactory.get() ?: return false
-    databasePublished.set(false)
+    synchronized(publicationLock) { publication = DatabasePublication.IN_PROGRESS }
     val server = bluetoothManager.openGattServer(context, gattServerCallback) ?: return false
     gattServer = server
     server.clearServices()
@@ -758,14 +788,13 @@ class GattServerManager(
     val next = pendingServices.poll()
     if (next == null) {
       Log.d(TAG, "All services registered")
-      databasePublished.set(true)
-      finishOpen(null)
+      finishOpen(DatabasePublication.PUBLISHED, null)
       return
     }
     val server = gattServer
     if (server == null) {
       pendingServices.clear()
-      finishOpen(GattServerException(
+      finishOpen(DatabasePublication.FAILED, GattServerException(
         "ERR_NO_SERVER", "The GATT server was closed before service ${next.uuid} could be registered"
       ))
       return
@@ -774,15 +803,68 @@ class GattServerManager(
     if (!server.addService(next)) {
       Log.e(TAG, "addService: could not initiate registration of ${next.uuid}")
       pendingServices.clear()
-      finishOpen(GattServerException(
+      finishOpen(DatabasePublication.FAILED, GattServerException(
         "ERR_CREATE_SERVER", "Could not initiate registration of service ${next.uuid}"
       ))
     }
   }
 
-  private fun finishOpen(error: GattServerException?) {
+  /**
+   * Ends the current registration round: [state] is what later readiness checks see, and both `open`'s
+   * completion and everyone parked in [whenDatabasePublished] are settled with [error].
+   */
+  private fun finishOpen(state: DatabasePublication, error: GattServerException?) {
+    val parked = synchronized(publicationLock) {
+      publication = state
+      val waiters = readinessWaiters.toList()
+      readinessWaiters.clear()
+      waiters
+    }
     openCompletion.getAndSet(null)?.invoke(error)
+    if (parked.isEmpty()) return
+    // Released on the main looper rather than on the binder thread that delivered the last
+    // `onServiceAdded`: a released caller goes straight on to make binder calls of its own — the
+    // advertising start, and possibly `setName` — and the GATT callback thread must not be held for
+    // those, since every later request on every connection queues behind it.
+    timeoutHandler.post { parked.forEach { it(error) } }
   }
+
+  /**
+   * Invokes [onReady] once the configured services are registered, rather than sampling the state
+   * synchronously: `createServer` reopens the server and re-adds every service asynchronously, and the
+   * `poweredOn` broadcast that starts a re-registration is delivered before it — so a synchronous check
+   * refused calls that were only early, not wrong. Mirrors iOS, whose state is not even meaningful until
+   * `CBPeripheralManager` reports it.
+   *
+   * A registration still running parks the caller; an adapter that cannot serve one, or a round that
+   * already failed, settles it immediately. May be invoked on the caller's thread or on the main looper.
+   */
+  fun whenDatabasePublished(onReady: (error: GattServerException?) -> Unit) {
+    // Checked before the publication state, so a powered-off adapter is still reported as the Bluetooth
+    // problem it is instead of parking a caller nothing is going to release.
+    bluetoothUnavailable()?.let {
+      onReady(it)
+      return
+    }
+    // Settled outside the monitor, so no caller ever runs while it is held.
+    val failure = synchronized(publicationLock) {
+      when (publication) {
+        DatabasePublication.PUBLISHED -> null
+        DatabasePublication.FAILED -> databaseNotPublished()
+        DatabasePublication.IDLE, DatabasePublication.IN_PROGRESS -> {
+          readinessWaiters.add(onReady)
+          return
+        }
+      }
+    }
+    onReady(failure)
+  }
+
+  private fun databaseNotPublished() = GattServerException(
+    "ERR_NO_SERVER",
+    "No GATT database is published, so there is nothing to advertise. isServerRunning reports " +
+      "whether the database is still there, which a failed registration or Bluetooth going down undoes."
+  )
 
   /**
    * The Bluetooth-level rejection that stops the server working at all, or `null` when it can work.
@@ -813,7 +895,7 @@ class GattServerManager(
    * [AdvertiseOptions.localName] is never advertised as given; only [AdvertiseOptions.setAdapterName]
    * makes the advertised name match it.
    */
-  fun startAdvertising(options: AdvertiseOptions, onResult: (error: String?) -> Unit) {
+  fun startAdvertising(options: AdvertiseOptions, onResult: (error: GattServerException?) -> Unit) {
     // Re-checked here as well as in `open`: the adapter can be turned off in between, and iOS reports the
     // same situation as ERR_BLUETOOTH from its own readiness check.
     val adapter = bluetoothAdapter
@@ -825,13 +907,8 @@ class GattServerManager(
     // A half-built or empty database is still a database scanners can connect to and discover, and a
     // registration that failed leaves exactly that behind. Checked after the adapter, so a powered-off
     // one is still reported as the Bluetooth problem it is — the order iOS uses too.
-    if (!databasePublished.get()) {
-      throw GattServerException(
-        "ERR_NO_SERVER",
-        "No GATT database is published, so there is nothing to advertise. Wait for createServer to " +
-          "resolve; isServerRunning reports whether the database is still there, which a failed " +
-          "registration or Bluetooth going down undoes."
-      )
+    if (!isServerRunning()) {
+      throw databaseNotPublished()
     }
 
     if (options.setAdapterName && options.localName == null) {
@@ -904,7 +981,7 @@ class GattServerManager(
           else -> "Advertising failed (error $errorCode)"
         }
         Log.e(TAG, "Advertising failed: $msg")
-        finishAdvertise(msg)
+        finishAdvertise(GattServerException("ERR_ADVERTISE", msg))
       }
     }
 
@@ -913,7 +990,8 @@ class GattServerManager(
     // because it is what `current()` tests: swapping the completion first leaves a window in which a
     // failure belonging to the displaced advertisement settles the completion this call just installed.
     val displaced = advertiseCallback.getAndSet(callback)
-    pendingAdvertiseResult.getAndSet(onResult)?.invoke("Advertising restarted")
+    pendingAdvertiseResult.getAndSet(onResult)
+      ?.invoke(GattServerException("ERR_ADVERTISE", "Advertising restarted"))
     // `BluetoothLeAdvertiser` keys its advertising sets on callback identity — `mLegacyAdvertisers` is a
     // map from the `AdvertiseCallback` to the set it started — so a start with a fresh callback adds a
     // second advertisement rather than replacing the first, and the displaced one keeps broadcasting
@@ -939,7 +1017,9 @@ class GattServerManager(
       leAdvertiser.stopAdvertising(callback)
       // That stop may have settled the *previous* completion, if it landed before this one was
       // installed, so this call is settled here rather than left pending for good.
-      if (pendingAdvertiseResult.compareAndSet(onResult, null)) onResult("Advertising stopped")
+      if (pendingAdvertiseResult.compareAndSet(onResult, null)) {
+        onResult(GattServerException("ERR_ADVERTISE", "Advertising stopped"))
+      }
     }
   }
 
@@ -950,12 +1030,16 @@ class GattServerManager(
     // Taken rather than read: only the caller that claims the callback hands it to the platform, and a start
     // still in flight learns from its absence that it has to stop the advertisement it just created.
     advertiseCallback.getAndSet(null)?.let { advertiser.get()?.stopAdvertising(it) }
-    finishAdvertise("Advertising stopped")
+    finishAdvertise(GattServerException("ERR_ADVERTISE", "Advertising stopped"))
     restoreAdapterName()
   }
 
-  /** Settles the outstanding start exactly once, whichever thread gets there first. */
-  private fun finishAdvertise(error: String?) {
+  /**
+   * Settles the outstanding start exactly once, whichever thread gets there first. The outcome carries a
+   * code as well as a message, so a start abandoned by something other than the advertiser — Bluetooth
+   * going down, the server being stopped — is not reported as an advertising failure.
+   */
+  private fun finishAdvertise(error: GattServerException?) {
     pendingAdvertiseResult.getAndSet(null)?.invoke(error)
   }
 
@@ -1114,7 +1198,8 @@ class GattServerManager(
     connectedDevices.values.map { it.address to it.name }
 
   /** Whether a GATT database is currently published, which the adapter going down undoes. */
-  fun isServerRunning(): Boolean = databasePublished.get()
+  fun isServerRunning(): Boolean =
+    synchronized(publicationLock) { publication == DatabasePublication.PUBLISHED }
 
   fun isAdvertising(): Boolean = advertising.get()
 
@@ -1813,9 +1898,11 @@ class GattServerManager(
     onStateChange = null
     serviceFactory.set(null)
     stopAdvertising()
-    databasePublished.set(false)
     pendingServices.clear()
-    finishOpen(GattServerException("ERR_NO_SERVER", "Server was stopped before it finished opening"))
+    finishOpen(
+      DatabasePublication.FAILED,
+      GattServerException("ERR_NO_SERVER", "Server was stopped before it finished opening")
+    )
     gattServer?.close()
     gattServer = null
     connectedDevices.clear()

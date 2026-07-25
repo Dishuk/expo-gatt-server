@@ -361,9 +361,9 @@ function assertOneOf<T extends string>(value: unknown, allowed: T[], field: stri
  * would expose it to scanners, which is worse than not advertising. `isServerRunning` reports the same
  * condition.
  *
- * A publication still in flight is waited for on iOS, so the call is safe before `createServer`
- * resolves and from a `poweredOn` event handler; Android rejects it with `ERR_NO_SERVER` instead, so
- * await `createServer` or retry once `isServerRunning` is `true` for behaviour that holds on both.
+ * A publication still in flight is waited for on both platforms, so the call is safe before
+ * `createServer` resolves and from a `poweredOn` event handler. A wait is settled rather than left
+ * pending if the publication fails, the server is stopped, or Bluetooth goes off.
  *
  * Calling it again replaces the current advertisement rather than adding a second one.
  */

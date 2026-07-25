@@ -248,16 +248,17 @@ and took the database with it. Advertising a half-built or empty database would 
 scanners, which is worse than not advertising at all. [`isServerRunning`](#isserverrunning) reports the
 same condition, so awaiting `createServer` is all that is normally needed.
 
-**A publication still in flight is waited for on iOS and rejected on Android.** On iOS the call parks
-until the database is published rather than sampling the state, because `CBPeripheralManager.state` is
-`unknown` until its first callback arrives and the services it then publishes are only acknowledged
-some callbacks later -- so `startAdvertising` is safe both immediately after awaiting `createServer` and
-alongside a `createServer` that has not resolved yet, and safe from a `poweredOn` event handler. A
-terminal Bluetooth state rejects with `ERR_BLUETOOTH`, or `ERR_PERMISSION` when Bluetooth is
-unauthorized, and a publication that failed rejects with `ERR_NO_SERVER`. Android has no such wait: a
-call made while the services are still registering rejects with `ERR_NO_SERVER` straight away. Await
-`createServer`, or retry once [`isServerRunning`](#isserverrunning) is `true`, for behaviour that holds
-on both.
+**A publication still in flight is waited for**, on both platforms. Neither platform can report
+readiness synchronously -- `CBPeripheralManager.state` is `unknown` until its first callback arrives and
+the services it then publishes are acknowledged some callbacks later, and Android registers each service
+through its own `onServiceAdded` -- so instead of sampling the state, the call parks until the database
+is published. `startAdvertising` is therefore safe immediately after awaiting `createServer`, alongside
+a `createServer` that has not resolved yet, and from a `poweredOn` event handler.
+
+A parked call is always settled: a terminal Bluetooth state rejects with `ERR_BLUETOOTH`, or
+`ERR_PERMISSION` when iOS reports Bluetooth as unauthorized; a publication that failed rejects with
+`ERR_NO_SERVER`; and [`stopServer`](#stopserver) or Bluetooth going off while the call waits rejects it
+rather than leaving it pending.
 
 Calling `startAdvertising` again **replaces** the current advertisement on both platforms rather than
 adding a second one, and settles the earlier call's promise with `ERR_ADVERTISE`.
@@ -266,7 +267,7 @@ adding a second one, and settles the earlier call's promise with `ERR_ADVERTISE`
 
 | Code | When |
 |---|---|
-| `ERR_NO_SERVER` | No server exists, or its database is not published -- a service failed to publish, or, on Android, `createServer` has not resolved yet |
+| `ERR_NO_SERVER` | No server exists, a service failed to publish, or the server was stopped while the call waited for the database |
 | `ERR_PERMISSION` | Android: `BLUETOOTH_ADVERTISE` is not granted, or `BLUETOOTH_CONNECT` is not granted while `android.setAdapterName` is set (API 31+). iOS: Bluetooth is unauthorized |
 | `ERR_NO_CONTEXT` | Android only: no React context, so the permission could not be checked |
 | `ERR_UNSUPPORTED` | iOS: `manufacturerData`, `serviceData` or `connectable: false` was supplied. Android: the adapter has no BLE advertising support, which no amount of retrying changes |
@@ -319,6 +320,8 @@ in which case nothing can be advertising anyway.
 
 Does **not** disconnect existing connections or remove services. A `startAdvertising` promise still
 in flight rejects with `ERR_ADVERTISE`, since the advertisement it was waiting on has been cancelled.
+A `startAdvertising` that is still waiting for the database is **not** cancelled by this, on either
+platform: it advertises once the services are published. Use [`stopServer`](#stopserver) to settle one.
 On Android this is also where the adapter name is restored if `android.setAdapterName` changed it.
 
 ---
@@ -717,8 +720,8 @@ discards its own connection tracking without reporting a disconnection it did no
 Pending work is settled rather than abandoned: an unresolved `createServer` rejects with
 `ERR_NO_SERVER`, queued notifications reject, unanswered
 delegated requests are dropped without being answered, and a pending `startAdvertising` rejects with
-`ERR_ADVERTISE` (restoring the adapter name on
-Android if `android.setAdapterName` changed it). Both platforms unpublish the whole database and stop
+`ERR_ADVERTISE` -- or with `ERR_NO_SERVER` if it was still waiting for the database -- restoring the
+adapter name on Android if `android.setAdapterName` changed it. Both platforms unpublish the whole database and stop
 listening for adapter state, so a later `createServer` starts from an empty GATT database rather than
 colliding with the previous one, and services are **not** re-published if Bluetooth is cycled
 afterwards.
@@ -1095,21 +1098,18 @@ module **re-publishes the services** on the next transition to `poweredOn`, at w
 [`isServerRunning`](#isserverrunning) goes `true` again -- but **advertising is not restarted**, so
 call `startAdvertising` again yourself.
 
-The event fires *before* that re-publication has finished, so the two platforms answer a
-`startAdvertising` made straight from the handler differently: iOS parks the call until the services
-are published and then advertises, while Android rejects it with `ERR_NO_SERVER` because the
-registration is still in flight. Retry there until [`isServerRunning`](#isserverrunning) is `true`:
+The event fires *before* that re-publication has finished, but `startAdvertising` parks until the
+services are published on both platforms, so calling it straight from the handler is enough:
 
 ```typescript
 addBluetoothStateChangedListener(async ({ state }) => {
   if (state !== 'poweredOn') return;
-  // iOS parks the call itself, so this loop exits on the first check there.
-  for (let attempt = 0; attempt < 20 && !(await isServerRunning()); attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
   await startAdvertising({ serviceUuids: [SERVICE_UUID] });
 });
 ```
+
+If Bluetooth goes off again before the re-publication finishes, that call rejects with `ERR_BLUETOOTH`
+rather than staying pending.
 
 **On iOS `resetting` does the same.** `CBManagerState.resetting` sorts *below* `poweredOff`, and Apple
 documents any state below it as clearing the local database and disconnecting every central, so the

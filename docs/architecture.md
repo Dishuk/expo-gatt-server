@@ -97,7 +97,7 @@ The module does not hold BLE state itself -- it delegates to `GattServerManager`
 | Delegations | `[CharacteristicAddress: CharacteristicDelegation]` | `ConcurrentHashMap<CharacteristicAddress, CharacteristicDelegation>` | Decide whether a read or write is answered natively or handed to JavaScript |
 | Notification queue | `[QueuedNotification]`, one queue for the peripheral manager's transmit queue | `ConcurrentHashMap<String, NotificationQueue>`, one per device | Keep at most one send outstanding, and resolve `sendNotification` on the platform's own callback |
 | Prepared writes | Not applicable -- CoreBluetooth does not expose them | `ConcurrentHashMap<String, MutableList<PreparedWrite>>` | Buffer a long or reliable write until its execute |
-| Published state | `databasePublished` plus the retained service configuration | `AtomicBoolean` plus a service factory | Answer `isServerRunning`, and rebuild the database when Bluetooth returns |
+| Published state | A four-state `publication` plus the retained service configuration | A four-state `publication` plus a service factory | Answer `isServerRunning`, park a `startAdvertising` until the database is published, and rebuild the database when Bluetooth returns |
 
 ### Lifecycle
 
