@@ -581,7 +581,15 @@ class ExpoGattServerModule : Module() {
    * nothing at all — so a fixed `PERMISSION_WRITE` here would let an unbonded client subscribe to a
    * characteristic the app marked encrypted-only and receive every later value in cleartext, while the
    * direct read it would have tried first was correctly refused. Enabling a subscription is what puts the
-   * value on the air, so the write inherits the strongest level declared in *either* direction.
+   * value on the air, so the write inherits the strongest level declared in *either* direction — which is
+   * the server's to decide, the CCCD being "Writable with authentication and authorization defined by a
+   * higher layer specification or is implementation specific" (Core Spec Vol 3, Part G, Table 3.10).
+   *
+   * The read inherits nothing, because the same table fixes it as "Readable with no authentication or
+   * authorization" — and the module answers a CCCD read from its own per-client map rather than from the
+   * shared descriptor, so refusing one would cost a conformant client its descriptor discovery to hide a
+   * value it is entitled to and that says nothing about anyone else. iOS cannot protect it either:
+   * CoreBluetooth owns the CCCD and applies encryption only to its write.
    *
    * The signed permissions deliberately contribute nothing: they constrain the form of an inbound write
    * PDU, and a CCCD is configured with an ordinary write request rather than a signed write command.
@@ -592,17 +600,12 @@ class ExpoGattServerModule : Module() {
     val writeEncryptedMitm = permissions and BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED_MITM != 0
     val writeEncrypted = permissions and BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED != 0
 
-    val read = when {
-      readEncryptedMitm -> BluetoothGattDescriptor.PERMISSION_READ_ENCRYPTED_MITM
-      readEncrypted -> BluetoothGattDescriptor.PERMISSION_READ_ENCRYPTED
-      else -> BluetoothGattDescriptor.PERMISSION_READ
-    }
     val write = when {
       readEncryptedMitm || writeEncryptedMitm -> BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED_MITM
       readEncrypted || writeEncrypted -> BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED
       else -> BluetoothGattDescriptor.PERMISSION_WRITE
     }
-    return read or write
+    return BluetoothGattDescriptor.PERMISSION_READ or write
   }
 
   /**

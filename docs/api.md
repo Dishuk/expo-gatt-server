@@ -1331,29 +1331,45 @@ A permission is enforced on the attribute that carries it and on nothing else. A
 `p_attr->permission` from the handle being read or written and inherits nothing from the parent
 characteristic (`gatts_write_attr_perm_check`, `system/stack/gatt/gatt_db.cc`), and
 `GATTS_HandleValueNotification` performs no permission, encryption or subscription check whatsoever.
-A notification therefore escapes every check a read of the same value would face — so the Client
-Characteristic Configuration descriptor, whose write is what opens the stream, carries permissions
-derived from the parent characteristic's rather than a fixed `PERMISSION_READ | PERMISSION_WRITE`:
+A notification therefore escapes every check a read of the same value would face — so the **write** of
+the Client Characteristic Configuration descriptor, which is what opens the stream, carries a permission
+derived from the parent characteristic's rather than a fixed `PERMISSION_WRITE`:
 
 | Characteristic declares | CCCD read | CCCD write |
 |---|---|---|
 | neither `readEncrypted*` nor `writeEncrypted*` | `PERMISSION_READ` | `PERMISSION_WRITE` |
-| `readEncrypted` | `PERMISSION_READ_ENCRYPTED` | `PERMISSION_WRITE_ENCRYPTED` |
+| `readEncrypted` | `PERMISSION_READ` | `PERMISSION_WRITE_ENCRYPTED` |
 | `writeEncrypted` | `PERMISSION_READ` | `PERMISSION_WRITE_ENCRYPTED` |
-| `readEncryptedMitm` | `PERMISSION_READ_ENCRYPTED_MITM` | `PERMISSION_WRITE_ENCRYPTED_MITM` |
+| `readEncryptedMitm` | `PERMISSION_READ` | `PERMISSION_WRITE_ENCRYPTED_MITM` |
 | `writeEncryptedMitm` | `PERMISSION_READ` | `PERMISSION_WRITE_ENCRYPTED_MITM` |
 
-The strongest level wins when several are combined: the descriptor's read mirrors the characteristic's
-strongest read permission, and its write demands the strongest encryption level declared in *either*
-direction, because enabling a subscription is what puts the value on the air. `writeSigned` and
-`writeSignedMitm` contribute nothing — they constrain the form of an inbound write PDU, and a CCCD is
-configured with an ordinary write request rather than a signed write command.
+Only the write is derived, and the strongest level wins when several are combined: it demands the
+strongest encryption level declared in *either* direction, because enabling a subscription is what puts
+the value on the air. `writeSigned` and `writeSignedMitm` contribute nothing — they constrain the form
+of an inbound write PDU, and a CCCD is configured with an ordinary write request rather than a signed
+write command.
+
+**The read is never protected**, on either platform, because the specification says it is not to be.
+The Client Characteristic Configuration declaration carries fixed attribute permissions (Vol 3, Part G,
+Table 3.10):
+
+> Readable with no authentication or authorization.
+> Writable with authentication and authorization defined by a higher layer specification or is
+> implementation specific.
+
+The asymmetry is deliberate: the specification settles the read and delegates only the write to the
+server. Nothing is lost by honouring it here. The module answers a CCCD read from its own per-client
+map — "reads of the Client Characteristic Configuration only shows the configuration for that client"
+(§3.3.3.3) — so the read reveals nothing about the value or about any other client, and an unsubscribed
+client reads back the specified default of `0x0000`. Refusing it would only break the descriptor
+discovery a conformant central performs before it subscribes, while the subscription itself stays
+refused by the write permission above.
 
 A characteristic declaring only `readable` and `writeable` keeps the plain
 `PERMISSION_READ | PERMISSION_WRITE` it always had. One declaring an encrypted permission is a
-**behaviour change**: a client that has not reached that level is now refused at the CCCD with
+**behaviour change**: a client that has not reached that level is now refused at the CCCD *write* with
 `GATT_INSUF_ENCRYPTION` or `GATT_INSUF_AUTHENTICATION`, where before it could subscribe and receive
-every value in cleartext.
+every value in cleartext. Its CCCD *read* still succeeds, on Android as on iOS.
 
 iOS reaches the same place by a different mechanism. CoreBluetooth owns the CCCD and never exposes it,
 and `CBAttributePermissions` guards only a read or a write of the value — so the gate on subscribing is
