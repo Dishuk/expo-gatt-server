@@ -322,6 +322,14 @@ class GattServerManager: NSObject {
     let completion: (Error?) -> Void
   }
 
+  /// One value a partially delegated write batch withheld, kept with what the attribute held when the
+  /// batch was assembled — the only thing a later commit can tell a stale value apart by.
+  private struct DeferredWrite {
+    let value: Data
+    /// `nil` when the attribute had no value at all, which is distinct from an empty one.
+    let baseline: Data?
+  }
+
   private struct PendingRequest {
     let request: CBATTRequest
     /// Only a read response carries a value back to the central. A write request's `value` is the
@@ -331,7 +339,7 @@ class GattServerManager: NSObject {
     /// withheld until the batch is accepted. Apple documents the batch as an atomic unit — "if the
     /// execution of one of the requests would cause a failure [...] none of the requests should be
     /// executed" — so half of it must not be committed while JavaScript may still reject the rest.
-    let deferredValues: [CharacteristicAddress: Data]
+    let deferredValues: [CharacteristicAddress: DeferredWrite]
     /// The armed expiry, kept so answering or discarding the request can cancel it.
     let timeout: DispatchWorkItem?
   }
@@ -641,7 +649,7 @@ class GattServerManager: NSObject {
   /// is emitted, so a listener that responds synchronously still finds the request.
   private func registerPendingRequest(
     _ requestId: Int, request: CBATTRequest, isRead: Bool,
-    deferredValues: [CharacteristicAddress: Data] = [:]
+    deferredValues: [CharacteristicAddress: DeferredWrite] = [:]
   ) {
     var timeout: DispatchWorkItem?
     if requestTimeoutMs > 0 {
@@ -738,8 +746,11 @@ class GattServerManager: NSObject {
     // sees what it wrote. Only a success commits them: any ATT error rejects the whole batch, which
     // Apple documents as all-or-nothing.
     if result == .success {
-      for (address, value) in pending.deferredValues {
-        characteristicValues[address] = value
+      for (address, deferred) in pending.deferredValues {
+        // Anything written while the batch was outstanding — by updateCharacteristicValue or by another
+        // central — is the newer intent, and reverting it here is what nothing could recover from.
+        guard characteristicValues[address] == deferred.baseline else { continue }
+        characteristicValues[address] = deferred.value
       }
     }
     // Deliberately not size-checked: the central continues a value longer than one `ATT_READ_RSP` with
@@ -1248,7 +1259,11 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       }
       peripheral.respond(to: first, withResult: .success)
     } else {
-      registerPendingRequest(batchId, request: first, isRead: false, deferredValues: automatic)
+      var deferred: [CharacteristicAddress: DeferredWrite] = [:]
+      for (address, value) in automatic {
+        deferred[address] = DeferredWrite(value: value, baseline: characteristicValues[address])
+      }
+      registerPendingRequest(batchId, request: first, isRead: false, deferredValues: deferred)
     }
 
     for (request, address) in zip(requests, addresses) {

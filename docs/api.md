@@ -537,6 +537,10 @@ This is the **only** call that changes what a read returns, besides an automatic
 It does **not** send a notification, and [`sendNotification`](#sendnotification) does not do this -- the
 two are independent, so use both to push a value and make it readable.
 
+A value stored here is never overwritten by a write batch that was already outstanding when it
+resolved: that batch's held value is dropped instead. See
+[a batch that is only partly delegated](#a-batch-that-is-only-partly-delegated).
+
 **Rejects** with `ERR_CHARACTERISTIC_NOT_FOUND` when the pair of UUIDs names nothing in the published
 GATT database, `ERR_NO_SERVER` when no server exists, and `ERR_BLUETOOTH` when Bluetooth is not powered
 on -- there is no published database to update then, since "the powered off state clears the local
@@ -894,6 +898,11 @@ decided **per characteristic**, and the batch stays atomic:
   answered with `GATT_SUCCESS`. An `ATT_ERROR_*` answer, or letting the request expire after
   `requestTimeoutMs`, discards them.
 - If nothing in the batch delegates, it is applied and acknowledged immediately, as before.
+- A held value is **dropped rather than committed** if anything wrote that characteristic while the
+  batch was outstanding -- an [`updateCharacteristicValue`](#updatecharacteristicvalue) call, or another
+  central's write. The newer value stands; the batch is still answered with the status you passed, since
+  by then the write has been accepted and there is nothing in ATT that reports "applied, then
+  superseded".
 
 Deferring rather than applying immediately is what keeps the batch all-or-nothing, which both platforms
 require: CoreBluetooth documents that "if the execution of one of the requests would cause a failure
@@ -1193,8 +1202,8 @@ Both behave identically on Android and iOS, with three notes:
   it is delegated like any other write. See
   [addCharacteristicWriteRequestListener](#addcharacteristicwriterequestlistener).
 - Delegation is decided **per characteristic**, so a batch touching a delegated and a plain
-  characteristic applies the plain one's value once the batch is accepted, and discards it if the
-  delegated one is rejected. See
+  characteristic applies the plain one's value once the batch is accepted, discards it if the delegated
+  one is rejected, and leaves it alone if something wrote that characteristic in the meantime. See
   [addCharacteristicWriteRequestListener](#addcharacteristicwriterequestlistener).
 - On iOS a batch of writes delivered in one callback shares a single `requestId`, so one
   `sendResponse` answers all of it. An Android reliable-write execute is a single request and behaves

@@ -363,6 +363,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advertisement is now stopped before the new one starts, as iOS has always done implicitly, since a
   `CBPeripheralManager` holds a single advertisement. A failure belonging to the superseded
   advertisement can also no longer settle the new call's promise
+- A partly delegated write batch could silently undo a newer value. The values it holds for the
+  characteristics that did not opt in were committed unconditionally when the batch was answered with
+  `GATT_SUCCESS`, so an `updateCharacteristicValue` — or another central's write — that landed while the
+  batch was outstanding was overwritten by what the batch had assembled, after resolving successfully.
+  A held value is now committed only if that characteristic still holds what it did when the batch was
+  assembled, and dropped otherwise; the batch is still answered with the status JavaScript passed. On
+  Android a response the stack refuses also puts the held values back, rather than leaving them applied
+  for a write the central was never told about
 
 ### Removed
 

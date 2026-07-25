@@ -249,6 +249,16 @@ class GattServerManager(
   private data class RequestKey(val deviceId: String, val requestId: Int)
 
   /**
+   * One value a partially delegated execute withheld, kept with what the attribute held when the execute
+   * was assembled — the only thing a later commit can tell a stale value apart by.
+   */
+  private class DeferredWrite(
+    val value: ByteArray,
+    /** `null` when the attribute had no value at all, which is distinct from an empty one. */
+    val baseline: ByteArray?,
+  )
+
+  /**
    * A request awaiting `sendResponse`. [offset] is the offset the central asked for, retained so a
    * response can be rebased onto it and so the offset handed back to the stack is the one the request
    * carried rather than whatever the caller happened to pass.
@@ -261,7 +271,7 @@ class GattServerManager(
      * withheld until the batch is accepted. The queued-write procedure is atomic, so half of it must not
      * be committed while JavaScript may still reject the rest.
      */
-    val deferredValues: Map<BluetoothGattCharacteristic, ByteArray> = emptyMap(),
+    val deferredValues: Map<BluetoothGattCharacteristic, DeferredWrite> = emptyMap(),
   ) {
     // Assigned once, immediately after construction, because the expiry has to name the entry it expires.
     // Volatile because it is armed on a binder thread and read from the main looper and the caller's.
@@ -1370,7 +1380,7 @@ class GattServerManager(
     /** The characteristics of this execute that hand their writes to JavaScript. */
     val delegated: Set<BluetoothGattCharacteristic> = emptySet(),
     /** Values withheld until JavaScript accepts the execute; empty unless it is partially delegated. */
-    val deferredValues: Map<BluetoothGattCharacteristic, ByteArray> = emptyMap(),
+    val deferredValues: Map<BluetoothGattCharacteristic, DeferredWrite> = emptyMap(),
   )
 
   /**
@@ -1438,12 +1448,19 @@ class GattServerManager(
       // holds, and neither class overrides equals.
       val characteristicValues = LinkedHashMap<BluetoothGattCharacteristic, ByteArray>()
       val descriptorValues = LinkedHashMap<BluetoothGattDescriptor, ByteArray>()
+      // What each characteristic held when this execute was assembled, so a commit deferred until
+      // JavaScript answers can tell whether anything has written it since.
+      val baselines = HashMap<BluetoothGattCharacteristic, ByteArray?>()
 
       for (write in queued) {
         @Suppress("DEPRECATION")
         val current = when (write) {
-          is PreparedWrite.ToCharacteristic ->
-            characteristicValues[write.characteristic] ?: write.characteristic.value
+          is PreparedWrite.ToCharacteristic -> {
+            if (!baselines.containsKey(write.characteristic)) {
+              baselines[write.characteristic] = write.characteristic.value
+            }
+            characteristicValues[write.characteristic] ?: baselines[write.characteristic]
+          }
           is PreparedWrite.ToDescriptor ->
             descriptorValues[write.descriptor] ?: write.descriptor.value
         } ?: ByteArray(0)
@@ -1495,7 +1512,13 @@ class GattServerManager(
         characteristicValues = characteristicValues,
         clientConfigurations = clientConfigurations,
         delegated = delegated,
-        deferredValues = if (delegated.isEmpty()) emptyMap() else automatic,
+        deferredValues = if (delegated.isEmpty()) {
+          emptyMap()
+        } else {
+          automatic.mapValues { (characteristic, value) ->
+            DeferredWrite(value, baselines[characteristic])
+          }
+        },
       )
     }
 
@@ -1530,7 +1553,7 @@ class GattServerManager(
     deviceId: String,
     offset: Int,
     isRead: Boolean,
-    deferredValues: Map<BluetoothGattCharacteristic, ByteArray> = emptyMap(),
+    deferredValues: Map<BluetoothGattCharacteristic, DeferredWrite> = emptyMap(),
   ) {
     val key = RequestKey(deviceId, requestId)
     val pending = PendingRequest(offset, isRead, deferredValues)
@@ -1611,19 +1634,62 @@ class GattServerManager(
     // Committed before the response goes out, so a central that reads straight after its write response
     // sees what it wrote. Only a success commits them: any ATT error rejects the whole execute, which the
     // queued-write procedure treats as one atomic operation.
-    if (status == BluetoothGatt.GATT_SUCCESS) {
-      for ((characteristic, value) in pending.deferredValues) {
-        storeCharacteristicValue(characteristic, value)
-      }
+    val committed = if (status == BluetoothGatt.GATT_SUCCESS) {
+      commitDeferredValues(pending.deferredValues)
+    } else {
+      emptyMap()
     }
 
     // The offset handed to the stack is the request's own, so it always describes where `payload` sits
     // within the attribute regardless of what the caller passed.
     if (!server.sendResponse(device, requestId, status, pending.offset, payload)) {
+      // The central never received the response, so the execute did not complete for it either.
+      revertDeferredValues(committed)
       throw GattServerException(
         "ERR_RESPONSE",
         "The Bluetooth stack did not accept the response for request $requestId"
       )
+    }
+  }
+
+  /**
+   * Applies the values a partially delegated execute withheld, and reports which of them were actually
+   * applied.
+   *
+   * An attribute something else has written since the execute was assembled — `updateCharacteristicValue`
+   * or another client — keeps that newer value: silently undoing a write the application already
+   * completed successfully is the one outcome nothing downstream could detect or recover from.
+   */
+  private fun commitDeferredValues(
+    deferred: Map<BluetoothGattCharacteristic, DeferredWrite>,
+  ): Map<BluetoothGattCharacteristic, DeferredWrite> {
+    if (deferred.isEmpty()) return emptyMap()
+    val committed = LinkedHashMap<BluetoothGattCharacteristic, DeferredWrite>()
+    synchronized(attributeValueLock) {
+      for ((characteristic, write) in deferred) {
+        @Suppress("DEPRECATION")
+        if (!characteristic.value.contentEquals(write.baseline)) {
+          Log.d(TAG, "Deferred write to ${characteristic.uuid} was superseded, keeping the newer value")
+          continue
+        }
+        @Suppress("DEPRECATION")
+        characteristic.value = write.value
+        committed[characteristic] = write
+      }
+    }
+    return committed
+  }
+
+  /** Undoes [commitDeferredValues] where nothing has written the attribute since. */
+  private fun revertDeferredValues(committed: Map<BluetoothGattCharacteristic, DeferredWrite>) {
+    if (committed.isEmpty()) return
+    synchronized(attributeValueLock) {
+      for ((characteristic, write) in committed) {
+        @Suppress("DEPRECATION")
+        if (!characteristic.value.contentEquals(write.value)) continue
+        @Suppress("DEPRECATION")
+        characteristic.value = write.baseline
+      }
     }
   }
 

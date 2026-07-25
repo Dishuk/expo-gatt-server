@@ -19,7 +19,9 @@ export interface CharacteristicDelegateConfig {
    *
    * Decided per characteristic, so a plain characteristic written in the same batch as a delegated one
    * still has its value applied. Because that batch is atomic, the plain characteristic's value is held
-   * until the batch is answered with `GATT_SUCCESS` and discarded if it is rejected.
+   * until the batch is answered with `GATT_SUCCESS`, discarded if it is rejected, and dropped if
+   * `updateCharacteristicValue` or another central wrote that characteristic while the batch was
+   * outstanding — a newer value is never reverted to what the batch assembled.
    *
    * Apple requires exactly one response per write callback, taken from the first request of the
    * batch, so on iOS every event produced by one batch shares a single `requestId` and the first

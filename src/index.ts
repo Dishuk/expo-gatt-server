@@ -529,6 +529,9 @@ export async function sendResponse(
  * Replaces the value a read of this characteristic is answered from. Does not notify anybody, and
  * `sendNotification` does not do this — use both to push a value and make it readable.
  *
+ * A value stored here is never overwritten by a delegated write batch that was already outstanding: the
+ * value that batch held for this characteristic is dropped instead.
+ *
  * Rejects with `ERR_CHARACTERISTIC_NOT_FOUND` when the pair of UUIDs names nothing in the published
  * database, and with `ERR_NO_SERVER` when no server exists, rather than resolving silently and
  * leaving a mistyped UUID indistinguishable from a working update.
