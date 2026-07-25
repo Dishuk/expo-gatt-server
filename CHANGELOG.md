@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> ### Read this before upgrading
+>
+> **This release reworks the public API, and a large number of the changes are breaking.** Every one is
+> marked **Breaking** below. The most likely to break an existing integration:
+>
+> - `GATT_FAILURE` and the `MTU_SMALL` error code are **removed**
+> - event payloads now report every UUID as the lowercase 128-bit form, so a `===` against a short or
+>   uppercase spelling that used to match on one platform no longer does
+> - `sendNotification` rejects instead of resolving when nothing is subscribed, when the characteristic
+>   does not declare the property `confirm` asks for, or when the payload exceeds the MTU
+> - `updateCharacteristicValue` returns a promise and rejects on an unknown characteristic
+> - `CharacteristicWriteRequestEvent.responseNeeded` now means "the module is waiting for you", not
+>   "the central asked for an acknowledgement"
+> - a mistyped property or permission name throws instead of being ignored
+> - Android no longer renames the device's Bluetooth adapter, no longer declares
+>   `ACCESS_FINE_LOCATION` at all, and no longer declares `android.hardware.bluetooth_le` as required
+
 ### Added
 
 - An Expo config plugin, so the package configures its own build-time requirements instead of leaving
@@ -39,6 +56,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   currently published, so it goes false while Bluetooth is off and true again once the module
   re-publishes. `isAdvertising` reads `CBPeripheralManager.isAdvertising` on iOS and is tracked
   natively on Android, which offers no such query
+- `getBluetoothState`, the `onBluetoothStateChanged` event with `addBluetoothStateChangedListener`, and
+  the types `BluetoothState` and `BluetoothStateChangedEvent`. The adapter state is normalised to one
+  union across `CBManagerState` and `BluetoothAdapter`, so a consumer never branches on platform.
+  `getBluetoothState` is safe before `createServer` and resolves to `unsupported` where the native
+  module is absent; the event is delivered only while a server exists, because state monitoring is tied
+  to the server lifecycle on both platforms. On iOS the query cannot report more than `unknown` or
+  `unauthorized` before a server exists, since `CBPeripheralManager.state` needs an instantiated manager
+  and instantiating one would trigger the permission prompt
+- `getMtu`, the `onMtuChanged` event with `addMtuChangedListener`, and the types `DeviceMtu` and
+  `MtuChangedEvent`. The link budget was previously invisible from JavaScript, so a payload could only
+  be sized by trial and rejection. `mtu` is the ATT MTU in octets and `maxNotificationPayload` is
+  `mtu - 3`, the figure to size a `sendNotification` against. Android reports the ATT MTU exactly and
+  the module derives the payload; iOS exposes only `CBCentral.maximumUpdateValueLength`, so there the
+  payload is exact and the MTU is derived. iOS has no MTU callback at all, so the value is sampled at
+  the central's next ATT activity and the first event arrives with `onDeviceConnected`
+- `GattCharacteristicConfig.delegate`, with the type `CharacteristicDelegateConfig`. `delegate.read`
+  keeps every read coming to JavaScript however current the cached value is, which is what a computed or
+  dynamic read needs — previously a characteristic stopped emitting read events as soon as it had a
+  value. `delegate.write` withholds the automatic acknowledgement so `sendResponse` can accept the write
+  with `GATT_SUCCESS` or reject it with an `ATT_ERROR_*` code, which was not previously possible at all.
+  Both default to off, so the module keeps answering requests itself
+- The `ATT_ERROR_*` constants, one per ATT error code the specification defines from `0x01` to `0x11`
+  (Core Specification, Vol 3, Part F, Table 3.4). Only that range is exposed, because `CBATTError.Code`
+  stops there and anything beyond it would be downgraded to Unlikely Error on iOS
+- The `EventSubscription` type, re-exported from `expo-modules-core`, and every `add*Listener` annotated
+  with it, so a stored subscription can be typed without depending on `expo-modules-core` directly
 - Encrypted and authenticated `CharacteristicPermission` variants — `readEncrypted`,
   `readEncryptedMitm`, `writeEncrypted`, `writeEncryptedMitm`, `writeSigned`, `writeSignedMitm`.
   Previously only `readable` and `writeable` existed, so anything built on this package was
@@ -63,14 +106,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `addCharacteristicSubscribedListener` and `addCharacteristicUnsubscribedListener`
 - Per-device, per-characteristic Client Characteristic Configuration tracking on Android, as the
   Bluetooth specification requires
-- `sendNotification` option `requireSubscription` for sending without a subscription on Android
+- `sendNotification` option `requireSubscription`, with the type `SendNotificationOptions`, for sending
+  without a subscription on Android. It changes nothing on iOS, where
+  `updateValue(_:for:onSubscribedCentrals:)` ignores unsubscribed centrals, so there is no send to force
 - Error codes `ERR_NO_SUBSCRIBER`, `ERR_NOTIFY_QUEUE_FULL`, `ERR_DEVICE_DISCONNECTED`,
-  `ERR_CHARACTERISTIC_NOT_FOUND`, `ERR_CONFIRM_UNSUPPORTED`
+  `ERR_CHARACTERISTIC_NOT_FOUND`, `ERR_CONFIRM_UNSUPPORTED`, `REQUEST_DEVICE_MISMATCH`,
+  `ERR_RESPONSE_OFFSET`, `ERR_NO_CONTEXT` and `ERR_DISCONNECT`
 - `AdvertiseConfig.android` with `includeDeviceName` and `setAdapterName`
 - `AdvertiseConfig` options `mode`, `txPowerLevel`, `timeoutMs`, `manufacturerData` and
   `serviceData`, with the types `AdvertisingMode`, `AdvertisingTxPower`, `ManufacturerDataEntry` and
-  `ServiceDataEntry`
-- Error code `ERR_UNSUPPORTED`, for advertising options iOS cannot express
+  `ServiceDataEntry`. `timeoutMs` is bounded at 180000 on both platforms, the limit
+  `AdvertiseSettings.Builder.setTimeout` enforces, and is **emulated** on iOS by a module timer that
+  calls `stopAdvertising` — the same observable outcome, but only while the process is alive
+- Error code `ERR_UNSUPPORTED`, for configuration and advertising options iOS cannot express
+- Short-form UUIDs: every UUID the API accepts may now be written as 4 hex digits (16-bit) or 8 hex
+  digits (32-bit) as well as the hyphenated 128-bit form, on both platforms
+- A runnable `example/` harness app, unit tests for the TypeScript layer in `src/__tests__/`, and a
+  `LICENSE` file
 
 ### Changed
 
@@ -98,17 +150,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `android.setAdapterName` to opt back in to the rename, which is now undone when advertising stops
 - **Breaking:** Android advertises in `lowPower` mode by default, matching the platform's own
   default, instead of the hardcoded `lowLatency`. Pass `mode: 'lowLatency'` for the old behaviour
-- **Breaking:** the Android manifest no longer declares `ACCESS_FINE_LOCATION`, which a peripheral
-  does not need and every consuming app inherited. Apps that also scan must declare it themselves
 - **Breaking:** `android.hardware.bluetooth_le` is declared `required="false"`, so the module no
   longer filters consuming apps off Google Play on non-BLE devices. Declare it `required="true"` in
-  your own manifest to restore the old behaviour
+  your own manifest, or pass the config plugin's `requireBluetoothLeHardware`, to restore the old
+  behaviour
 - **Breaking:** iOS rejects `manufacturerData`, `serviceData` and `connectable: false` with
   `ERR_UNSUPPORTED` instead of ignoring them; `mode`, `txPowerLevel` and `includeTxPowerLevel` are
   still ignored there but now log a warning
-
+- **Breaking:** `CharacteristicWriteRequestEvent.responseNeeded` reports whether the **module** is
+  waiting for JavaScript to answer the request, not whether the central asked for an acknowledgement. It
+  was previously hardcoded per platform and meant neither. It is `true` only for a characteristic
+  configured with `delegate.write` whose write carries a response; every other write is acknowledged
+  before the event is emitted. `CharacteristicReadRequestEvent.requestId` and the write event's
+  `requestId` are likewise real request identifiers now, rather than fixed values
+- **Breaking:** a byte outside `0`–`255` anywhere in a `number[]` argument throws instead of being
+  silently truncated or clamped into a different value. Affects characteristic and descriptor `value`,
+  `sendNotification`, `sendResponse`, `manufacturerData` and `serviceData`
+- **Breaking:** an out-of-range `sendResponse` `status` or `offset` throws. An ATT error code is a single
+  octet, and Android narrowed a wider status to its low byte on the way into the Bluetooth stack, so it
+  went out on the wire as an unrelated error rather than being reported
+- **Breaking:** `sendResponse` honours `offset` as "where `value` begins within the attribute" and
+  rebases the response onto the offset the request actually asked for, identically on both platforms. So
+  passing `offset: 0` with the whole value answers a Read Blob continuation correctly, and passing the
+  request's own offset with an already-sliced value works too. `offset` past the requested offset — which
+  would leave the requested bytes missing — rejects with `ERR_RESPONSE_OFFSET`. iOS previously ignored
+  the offset entirely
+- **Breaking:** `createServer` resolves only once every service is confirmed published, rather than as
+  soon as the request was handed to the platform. A resolved promise now means the database really is
+  there to advertise
+- **Breaking:** `sendNotification` rejects with `PAYLOAD_EXCEEDS_MTU` before transmitting anything when
+  the payload exceeds what one notification can carry, and no longer sends a truncated payload. It is
+  re-checked if the MTU shrinks while the send is queued. Conversely, `sendResponse` is no longer
+  size-checked at all: a read response longer than one PDU is normal ATT, which the central continues
+  with a Read Blob request
+- **Breaking:** `onDeviceConnected` on iOS fires on the central's first ATT activity of any kind — a
+  subscribe, read or write — rather than only on its first subscription, and connections are tracked
+  separately from subscriptions. A read/write-only central is therefore reported, where previously it was
+  invisible. Its disconnection generally still is not: CoreBluetooth reports none, so the module infers
+  one from the loss of the last subscription or from Bluetooth leaving `poweredOn`
 - `sendNotification` resolves when the platform reports the notification as delivered, and queues
-  sends behind one still in flight instead of letting the platform drop them
+  sends behind one still in flight instead of letting the platform drop them. A device may have 64 sends
+  waiting before `ERR_NOTIFY_QUEUE_FULL`
 - `sendNotification` rejects with `ERR_NO_SUBSCRIBER` instead of resolving when nothing is
   subscribed to the characteristic
 - **Breaking:** `updateCharacteristicValue` returns `Promise<void>` instead of `void`, and rejects
@@ -128,6 +210,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A malformed UUID string crashed the app on iOS. `CBUUID(string:)` raises an uncatchable
+  Objective-C exception for anything but a 16-bit, 32-bit or hyphenated 128-bit spelling, so every UUID
+  is validated before it reaches CoreBluetooth
+- A characteristic declared with a `value` was published read-only on iOS, and adding it with any other
+  property or permission raised "Characteristics with cached values must be read-only". Characteristics
+  are now always published with a dynamic value and the initial value served from the module's own
+  cache, so any configuration Android accepts works on iOS too
+- Android registered services concurrently, although `BluetoothGattServer.addService` documents "do not
+  add another service before this callback". They are now queued and added one at a time
+- `startAdvertising` immediately after `createServer` failed on iOS, because `CBPeripheralManager.state`
+  is `unknown` until its first callback arrives. The call now waits for a definitive state instead of
+  sampling it
+- Turning Bluetooth off permanently broke the server. The published database is destroyed on both
+  platforms, and nothing re-published it; the module now retains the configuration and re-publishes on
+  the next transition to `poweredOn`, reporting the intervening subscription losses and disconnections.
+  Advertising is still the consumer's to restart
+- A read whose offset was past the end of the cached value was handed to a listener the characteristic
+  never opted in to, leaving the central to wait out its ATT transaction timeout. It is now answered
+  with ATT `0x07` "Invalid Offset". An offset equal to the value's length is in range and answers with an
+  empty value
+- `sendResponse` consumed a pending request without checking it belonged to the device supplied,
+  so one device's response could answer another's request. The owner is validated, and a rejected call
+  now leaves the request answerable rather than discarding it
+- A request delegated to JavaScript and never answered was retained forever, stalling the central until
+  its own 30 s ATT transaction timeout — after which no further request, command, indication or
+  notification could be sent on that bearer at all. See `requestTimeoutMs` above
+- Notifying a central that had not subscribed resolved as a successful send on both platforms, although
+  nothing was transmitted
+- Android dropped a notification issued while an earlier one was still in flight, while the promise
+  still resolved. Sends are now queued per device and handed over one at a time
+- `onNotificationSent` reported a characteristic the notification may not have belonged to.
+  `BluetoothGattServerCallback.onNotificationSent` names only the device, so the characteristic is now
+  taken from the queue entry the callback actually completes
+- iOS resent every subscribed central's cached value when the transmit queue drained, delivering
+  unsolicited updates to centrals whose sends had never been refused. Only the refused payloads are
+  resent, in order
+- `updateCharacteristicValue` mutated the peripheral manager's state from the JavaScript thread on iOS;
+  it now runs on the main queue, which is the queue CoreBluetooth delivers its callbacks on
 - `stopServer` left services published on iOS. It unpublished only the services CoreBluetooth had
   already acknowledged, so anything still awaiting `didAdd` — or whose `didAdd` reported an error —
   stayed in the shared GATT database and collided with the next `createServer`. It now calls
@@ -140,6 +260,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   iOS is unaffected — CoreBluetooth does not expose prepared writes to the peripheral role
 - Android treated an unavailable React context as "permission granted" and carried on into a
   `SecurityException`. `createServer` and `startAdvertising` now reject with `ERR_NO_CONTEXT`
+
+### Removed
+
+- **Breaking:** `GATT_FAILURE`. It was `257`, a GATT *status* rather than an ATT error code, and an ATT
+  error code is a single octet — Android narrowed it to its low byte, so it went out on the wire as
+  `0x01` "Invalid Handle", and iOS could not represent it at all. Use the `ATT_ERROR_*` constant that
+  describes the actual failure; `ATT_ERROR_UNLIKELY_ERROR` (`0x0e`) is the closest general-purpose
+  replacement
+- **Breaking:** the `MTU_SMALL` error code. An oversized `sendNotification` payload now rejects with
+  `PAYLOAD_EXCEEDS_MTU`, which is the same condition under one name, and an oversized `sendResponse` is
+  no longer an error at all
+- **Breaking:** `ACCESS_FINE_LOCATION` from the Android manifest, which a peripheral does not need and
+  every consuming app inherited. Location is a *scanning* concern, and this module never scans. An app
+  that also scans must declare it — or `BLUETOOTH_SCAN` with
+  `usesPermissionFlags="neverForLocation"` — itself
 
 ## [0.1.0] - 2025-05-23
 
