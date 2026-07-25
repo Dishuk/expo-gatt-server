@@ -220,7 +220,7 @@ class GattServerManager(
   private val originalAdapterName = AtomicReference<String?>(null)
   private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
   private val deviceMtu = ConcurrentHashMap<String, Int>()
-  private val pendingRequests = ConcurrentHashMap<Int, PendingRequest>()
+  private val pendingRequests = ConcurrentHashMap<RequestKey, PendingRequest>()
   // Expiry tasks are posted here from the binder threads that register the requests, and run on the main
   // looper, which always exists for the lifetime of the process.
   private val timeoutHandler = Handler(Looper.getMainLooper())
@@ -237,16 +237,27 @@ class GattServerManager(
   private val preparedWrites = ConcurrentHashMap<String, MutableList<PreparedWrite>>()
 
   /**
+   * Identifies one pending request. The device is part of the key because Android's `requestId` is the raw
+   * ATT transaction id, which AOSP assigns from a counter on the per-connection transport control block
+   * (`p_cmd->trans_id = ++tcb.trans_id` in `system/stack/gatt/gatt_sr.cc`) and `BluetoothGattServer` passes
+   * through untouched — so two connected centrals both produce 1, 2, 3 and would otherwise collide.
+   */
+  private data class RequestKey(val deviceId: String, val requestId: Int)
+
+  /**
    * A request awaiting `sendResponse`. [offset] is the offset the central asked for, retained so a
    * response can be rebased onto it and so the offset handed back to the stack is the one the request
    * carried rather than whatever the caller happened to pass.
    */
-  private data class PendingRequest(
-    val deviceId: String,
+  private class PendingRequest(
     val offset: Int,
     val isRead: Boolean,
-    val timeout: Runnable? = null,
-  )
+  ) {
+    // Assigned once, immediately after construction, because the expiry has to name the entry it expires.
+    // Volatile because it is armed on a binder thread and read from the main looper and the caller's.
+    @Volatile
+    var timeout: Runnable? = null
+  }
 
   /**
    * One `ATT_PREPARE_WRITE_REQ` held until its execute arrives. The attribute must not change until the
@@ -1436,8 +1447,16 @@ class GattServerManager(
    * emitted, so a listener that responds synchronously still finds the request.
    */
   private fun registerPendingRequest(requestId: Int, deviceId: String, offset: Int, isRead: Boolean) {
-    val timeout = if (requestTimeoutMs > 0) Runnable { expireRequest(requestId) } else null
-    pendingRequests[requestId] = PendingRequest(deviceId, offset, isRead, timeout)
+    val key = RequestKey(deviceId, requestId)
+    val pending = PendingRequest(offset, isRead)
+    // The expiry names the entry it was armed for, so one already dispatched onto the main looper when its
+    // request was answered or displaced cannot remove — and answer — whatever took its place.
+    val timeout = if (requestTimeoutMs > 0) Runnable { expireRequest(key, pending) } else null
+    pending.timeout = timeout
+    val displaced = pendingRequests.put(key, pending)
+    // A displaced entry can no longer be answered, and leaving its expiry armed would let it answer this
+    // one instead.
+    displaced?.timeout?.let { timeoutHandler.removeCallbacks(it) }
     if (timeout != null) {
       timeoutHandler.postDelayed(timeout, requestTimeoutMs.toLong())
     }
@@ -1451,18 +1470,18 @@ class GattServerManager(
    * simply failed to produce a response, which none of the more specific codes describes.
    */
   @SuppressLint("MissingPermission")
-  private fun expireRequest(requestId: Int) {
-    val pending = pendingRequests.remove(requestId) ?: return
-    Log.w(TAG, "Request $requestId unanswered after ${requestTimeoutMs}ms, answering with an ATT error")
-    val device = connectedDevices[pending.deviceId] ?: return
-    gattServer?.sendResponse(device, requestId, ATT_ERROR_UNLIKELY_ERROR, pending.offset, null)
+  private fun expireRequest(key: RequestKey, pending: PendingRequest) {
+    if (!pendingRequests.remove(key, pending)) return
+    Log.w(TAG, "Request ${key.requestId} unanswered after ${requestTimeoutMs}ms, answering with an ATT error")
+    val device = connectedDevices[key.deviceId] ?: return
+    gattServer?.sendResponse(device, key.requestId, ATT_ERROR_UNLIKELY_ERROR, pending.offset, null)
   }
 
-  private fun discardPendingRequests(predicate: (PendingRequest) -> Boolean) {
+  private fun discardPendingRequests(predicate: (RequestKey) -> Boolean) {
     val iterator = pendingRequests.entries.iterator()
     while (iterator.hasNext()) {
-      val pending = iterator.next().value
-      if (!predicate(pending)) continue
+      val (key, pending) = iterator.next()
+      if (!predicate(key)) continue
       pending.timeout?.let { timeoutHandler.removeCallbacks(it) }
       iterator.remove()
     }
@@ -1483,25 +1502,26 @@ class GattServerManager(
    */
   @SuppressLint("MissingPermission")
   fun sendResponse(deviceId: String, requestId: Int, status: Int, offset: Int, value: ByteArray) {
-    // Everything that could reject the call is checked before the pending entry is touched, so a failed
-    // attempt leaves the request answerable instead of stranding the central until its ATT transaction
-    // times out. The request is looked up first, so answering one the server has already forgotten —
+    // Every rejection the caller could have caused is checked before the pending entry is touched, so a
+    // rejected attempt leaves the request answerable instead of stranding the central until its ATT
+    // transaction times out. The request is looked up first, so answering one the server has forgotten —
     // which is what losing the database to a stop or a power cycle leaves behind — reports the same code
     // iOS reports for it.
-    val pending = pendingRequests[requestId]
-      ?: throw GattServerException("REQUEST_NOT_FOUND", "Request $requestId not found or already responded")
-    if (pending.deviceId != deviceId) {
-      throw GattServerException(
-        "REQUEST_DEVICE_MISMATCH",
-        "Request $requestId belongs to device ${pending.deviceId}, not $deviceId"
-      )
-    }
+    val key = RequestKey(deviceId, requestId)
+    val pending = pendingRequests[key] ?: throw unknownRequest(deviceId, requestId)
     val server = gattServer ?: throw serverUnavailable()
     val device = connectedDevices[deviceId]
       ?: throw GattServerException(
         "ERR_DEVICE_DISCONNECTED", "Device $deviceId is not connected"
       )
     val payload = responsePayload(pending, requestId, offset, value)
+
+    // Claimed before the response goes out, not after: once the stack has it the transaction is answered,
+    // and an expiry already dispatched onto the main looper would answer it a second time —
+    // `removeCallbacks` cannot recall one that has left the queue. A refused send therefore leaves the
+    // request unanswerable, which is the lesser fault, since the stack that refused it is gone anyway.
+    if (!pendingRequests.remove(key, pending)) throw unknownRequest(deviceId, requestId)
+    pending.timeout?.let { timeoutHandler.removeCallbacks(it) }
 
     // The offset handed to the stack is the request's own, so it always describes where `payload` sits
     // within the attribute regardless of what the caller passed.
@@ -1511,11 +1531,22 @@ class GattServerManager(
         "The Bluetooth stack did not accept the response for request $requestId"
       )
     }
-    // Two-argument remove, so a request id the framework has already reissued to another device is not
-    // consumed by this call.
-    if (pendingRequests.remove(requestId, pending)) {
-      pending.timeout?.let { timeoutHandler.removeCallbacks(it) }
+  }
+
+  /**
+   * Distinguishes a request id this device never had from one another connected device holds, which a
+   * per-connection transaction id makes an ordinary occurrence rather than a corner case.
+   */
+  private fun unknownRequest(deviceId: String, requestId: Int): GattServerException {
+    pendingRequests.keys.firstOrNull { it.requestId == requestId }?.let { other ->
+      return GattServerException(
+        "REQUEST_DEVICE_MISMATCH",
+        "Request $requestId belongs to device ${other.deviceId}, not $deviceId"
+      )
     }
+    return GattServerException(
+      "REQUEST_NOT_FOUND", "Request $requestId not found or already responded"
+    )
   }
 
   /**
