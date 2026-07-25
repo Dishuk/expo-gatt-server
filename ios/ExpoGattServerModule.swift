@@ -40,7 +40,7 @@ public class ExpoGattServerModule: Module {
         promise.reject("ERR_NO_SERVER", "Server not created")
         return
       }
-      // `connectedCentrals` is only touched on the main queue, which is also the queue the
+      // The tracked centrals are only ever touched on the main queue, which is also the queue the
       // peripheral manager dispatches its callbacks on.
       DispatchQueue.main.async {
         guard let mtu = mgr.mtu(for: deviceId) else {
@@ -64,20 +64,15 @@ public class ExpoGattServerModule: Module {
         promise.resolve([])
         return
       }
-      // The tracked centrals are only touched on the main queue, which is also the queue the
-      // peripheral manager delivers the activity they are derived from on.
+      // Main queue for the same reason as `getMtu`.
       DispatchQueue.main.async {
         promise.resolve(mgr.connectedDeviceIds.map { ["deviceId": $0, "name": ""] })
       }
     }
 
-    // CBPeripheralManager has no disconnect. Its entire interface is startAdvertising,
-    // stopAdvertising, setDesiredConnectionLatency(_:for:), addService, removeService,
-    // removeAllServices, respond(to:withResult:), updateValue(_:for:onSubscribedCentrals:),
-    // publishL2CAPChannel(withEncryption:) and unpublishL2CAPChannel; CBCentral exposes only
-    // identifier and maximumUpdateValueLength. cancelPeripheralConnection(_:) belongs to
+    // No CBPeripheralManager method drops a central, and cancelPeripheralConnection(_:) belongs to
     // CBCentralManager and takes a CBPeripheral, so it cannot be turned around on a central. Nothing
-    // here is approximated, because no documented CoreBluetooth call drops a central.
+    // is approximated here, because no documented CoreBluetooth call does this.
     AsyncFunction("disconnectDevice") { (deviceId: String, promise: Promise) in
       let error = GattServerError.configurationUnsupported(
         option: "disconnectDevice",
@@ -106,9 +101,8 @@ public class ExpoGattServerModule: Module {
     }
 
     AsyncFunction("getBluetoothState") { (promise: Promise) in
-      // `CBPeripheralManager.state` needs an instantiated manager, and instantiating one purely
-      // to read state would trigger the Bluetooth permission prompt. Without a server, fall back
-      // to the statically available authorization status.
+      // `CBPeripheralManager.state` needs an instantiated manager, and instantiating one purely to
+      // read state would trigger the Bluetooth permission prompt.
       guard let mgr = self.manager else {
         switch CBManager.authorization {
         case .denied, .restricted:
@@ -161,8 +155,8 @@ public class ExpoGattServerModule: Module {
           }
         }
       } catch let error as GattServerError {
-        // Keeps a specific code such as ERR_UNSUPPORTED, which the generic catch below would
-        // otherwise flatten into ERR_CREATE_SERVER.
+        // Keeps a specific code such as ERR_UNSUPPORTED, which the generic catch below flattens into
+        // ERR_CREATE_SERVER.
         promise.reject(error.code, error.message)
       } catch {
         promise.reject("ERR_CREATE_SERVER", error.localizedDescription)
@@ -196,9 +190,9 @@ public class ExpoGattServerModule: Module {
       // Already range-checked in JavaScript against the same bound Android enforces.
       let timeoutMs = (config["timeoutMs"] as? NSNumber)?.intValue ?? 0
 
-      // Waits for a definitive powered-on state instead of sampling it. A synchronous read is
-      // `.unknown` until peripheralManagerDidUpdateState fires, which used to reject perfectly
-      // healthy calls made straight after createServer with "Bluetooth not ready".
+      // Waits for a definitive powered-on state rather than sampling it: a synchronous read is
+      // `.unknown` until peripheralManagerDidUpdateState fires, which rejected perfectly healthy
+      // calls made straight after createServer.
       mgr.whenPoweredOn { readinessError in
         if let readinessError = readinessError as? GattServerError {
           promise.reject(readinessError.code, readinessError.message)
@@ -246,14 +240,10 @@ public class ExpoGattServerModule: Module {
         promise.reject("ERR_NOTIFY", error.localizedDescription)
         return
       }
-      // `requireSubscription` has no iOS counterpart: CoreBluetooth only ever transmits to
-      // subscribed centrals, so an unsubscribed send cannot be forced through. `confirm` is checked
-      // against the characteristic's declared properties, which is all CoreBluetooth leaves room for.
+      // `requireSubscription` has no iOS counterpart: CoreBluetooth only ever transmits to subscribed
+      // centrals, so an unsubscribed send cannot be forced through.
       DispatchQueue.main.async {
         do {
-          // Resolves once CoreBluetooth has accepted the payload for transmission. A payload the
-          // transmit queue could not take stays queued and resolves when it is resent, so a caller
-          // that awaits it paces itself against the link instead of overrunning it.
           try mgr.sendNotification(
             deviceId: deviceId,
             serviceUuid: serviceUuid,
@@ -362,12 +352,12 @@ public class ExpoGattServerModule: Module {
     }
   }
 
-  /// `CBPeripheralManager.startAdvertising` silently ignores every key but the local name and
-  /// service UUIDs. Only the options that change what a scanner *observes* are rejected here, since
-  /// dropping those yields a peripheral that appears to advertise yet can never be found by a
-  /// central filtering on them. `mode`, `txPowerLevel` and `includeTxPowerLevel` are merely radio
-  /// hints, so they are warned about in JavaScript instead — rejecting them would force every
-  /// cross-platform caller to branch on the platform just to tune Android's battery use.
+  /// `CBPeripheralManager.startAdvertising` silently ignores every key but the local name and service
+  /// UUIDs. Only the options that change what a scanner *observes* are rejected here, since dropping
+  /// those yields a peripheral that appears to advertise yet can never be found by a central filtering
+  /// on them. `mode`, `txPowerLevel` and `includeTxPowerLevel` are merely radio hints, warned about in
+  /// JavaScript instead — rejecting them would force every cross-platform caller to branch on platform
+  /// just to tune Android's battery use.
   private func rejectUnsupportedAdvertisingOptions(_ config: [String: Any]) throws {
     if let entries = config["manufacturerData"] as? [[String: Any]], !entries.isEmpty {
       throw GattServerError.advertisingOptionUnsupported(
@@ -389,9 +379,8 @@ public class ExpoGattServerModule: Module {
     }
   }
 
-  /// `CBUUID(string:)` raises an uncatchable Objective-C exception for anything other than a
-  /// 16-bit (4 hex digits), 32-bit (8 hex digits) or hyphenated 128-bit (8-4-4-4-12) string,
-  /// so every string has to be checked before it reaches CoreBluetooth.
+  /// `CBUUID(string:)` raises an uncatchable Objective-C exception for anything other than a 16-bit,
+  /// 32-bit or hyphenated 128-bit string, so every string is checked before it reaches CoreBluetooth.
   private func isValidUuid(_ string: String) -> Bool {
     func isHex(_ characters: Substring) -> Bool {
       !characters.isEmpty && characters.allSatisfy { $0.isASCII && $0.isHexDigit }
@@ -427,8 +416,7 @@ public class ExpoGattServerModule: Module {
     return CBUUID(string: string)
   }
 
-  /// Byte arrays arrive from JS as `[Int]`. Anything outside 0...255 would be silently
-  /// corrupted by a clamping or truncating conversion, so reject it instead.
+  /// Anything outside 0...255 would be silently corrupted by a clamping or truncating conversion.
   private func parseBytes(_ value: [Int], field: String) throws -> Data {
     var bytes: [UInt8] = []
     bytes.reserveCapacity(value.count)
@@ -459,8 +447,7 @@ public class ExpoGattServerModule: Module {
     return millis
   }
 
-  /// Collects the characteristics that opted out of the module's automatic responses. Absent or
-  /// empty `delegate` configuration produces no entry, so the default stays fully automatic.
+  /// Absent or empty `delegate` configuration produces no entry, so the default stays fully automatic.
   private func parseDelegations(
     _ services: [[String: Any]]
   ) throws -> [CharacteristicAddress: CharacteristicDelegation] {
@@ -520,15 +507,13 @@ public class ExpoGattServerModule: Module {
     let properties = try parseProperties(map["properties"] as? [String])
     let permissions = try parsePermissions(map["permissions"] as? [String])
 
-    // A CBMutableCharacteristic created with a non-nil value is forced read-only by
-    // CoreBluetooth, and adding it with any other properties/permissions raises
-    // "Characteristics with cached values must be read-only". Always publish the
-    // characteristic with a dynamic (nil) value and serve the initial value from our own
-    // cache instead, so that any configuration Android accepts also works here.
-    // An empty array is a configured value, not an absent one: `[]` declares a present but
-    // zero-length attribute, which is a legitimate GATT state and what Android already cached and
-    // auto-answered reads from. Skipping it here made the same configuration delegate every read to
-    // JavaScript on iOS instead.
+    // A CBMutableCharacteristic created with a non-nil value is forced read-only by CoreBluetooth, and
+    // adding it with any other properties or permissions raises "Characteristics with cached values
+    // must be read-only" — so the characteristic is always published with a dynamic (nil) value and the
+    // initial value served from this cache, letting any configuration Android accepts work here too.
+    //
+    // `[]` is a configured value, not an absent one: it declares a present but zero-length attribute,
+    // which Android caches and auto-answers reads from.
     if let bytes = map["value"] as? [Int] {
       initialValues[uuid] = try parseBytes(bytes, field: "characteristic")
     }
@@ -547,19 +532,17 @@ public class ExpoGattServerModule: Module {
     return characteristic
   }
 
-  /// `CBMutableDescriptor` is documented as supporting "only the `Characteristic User Description`
-  /// and `Characteristic Presentation Format` descriptors", and the Client Characteristic
-  /// Configuration and Characteristic Extended Properties descriptors as being "created
-  /// automatically upon publication of the parent service". Anything else is refused rather than
-  /// handed to CoreBluetooth, which would reject the whole service at publication time.
+  /// `CBMutableDescriptor` is documented as supporting "only the `Characteristic User Description` and
+  /// `Characteristic Presentation Format` descriptors". Anything else is refused rather than handed to
+  /// CoreBluetooth, which would reject the whole service at publication time.
   private func parseDescriptorConfig(_ map: [String: Any]) throws -> CBMutableDescriptor {
     let uuid = try parseUuid(map["uuid"], field: "descriptor")
     let bytes = try parseBytes(map["value"] as? [Int] ?? [], field: "descriptor")
 
     switch uuid {
     case CBUUID(string: CBUUIDCharacteristicUserDescriptionString):
-      // Apple models this descriptor's value as an NSString, so the configured bytes are the UTF-8
-      // encoding of it; anything else has no representation to publish.
+      // Apple models this descriptor's value as an NSString, so anything but UTF-8 has no
+      // representation to publish.
       guard let text = String(data: bytes, encoding: .utf8) else {
         throw GattServerError.configurationUnsupported(
           option: "descriptor \(uuid.uuidString)",
@@ -582,8 +565,8 @@ public class ExpoGattServerModule: Module {
   }
 
   /// Apple annotates `CBCharacteristicPropertyBroadcast` and
-  /// `CBCharacteristicPropertyExtendedProperties` as "Not allowed for local characteristics", so
-  /// both are refused here instead of being set and rejected at publication time.
+  /// `CBCharacteristicPropertyExtendedProperties` as "Not allowed for local characteristics", so both are
+  /// refused here instead of being set and rejected at publication time.
   private func parseProperties(_ list: [String]?) throws -> CBCharacteristicProperties {
     var props: CBCharacteristicProperties = []
     for str in list ?? [] {
@@ -608,10 +591,9 @@ public class ExpoGattServerModule: Module {
   }
 
   /// `CBAttributePermissions` has exactly four members, so Android's MITM and signed variants have
-  /// nothing to map onto. Every near equivalent is *weaker* than what was asked for — an MITM
-  /// variant requires authenticated pairing rather than any encrypted link, and a signed variant
-  /// requires a signature over an unencrypted one — so they are refused rather than approximated
-  /// into a less protected attribute than the configuration declared.
+  /// nothing to map onto. Every near equivalent is *weaker* than what was asked for — an MITM variant
+  /// requires authenticated pairing rather than any encrypted link, a signed variant a signature over an
+  /// unencrypted one — so they are refused rather than approximated into a less protected attribute.
   private func parsePermissions(_ list: [String]?) throws -> CBAttributePermissions {
     var perms: CBAttributePermissions = []
     for str in list ?? [] {

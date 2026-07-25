@@ -34,8 +34,8 @@ import {
   View,
 } from 'react-native';
 
-// Short forms on purpose: both platforms now accept them, expanded onto the Bluetooth Base UUID in
-// the shared layer. Event payloads report the 128-bit form regardless.
+// Short forms on purpose: the shared layer expands them onto the Bluetooth Base UUID, so both
+// platforms accept them. Event payloads report the 128-bit form regardless.
 const SERVICE_UUID = '180d';
 const CHARACTERISTIC_UUID = '2a37';
 const USER_DESCRIPTION_UUID = '2901';
@@ -67,7 +67,6 @@ export default function App() {
     setLog((prev) => [`${new Date().toISOString().slice(11, 19)}  ${line}`, ...prev].slice(0, 200));
   }, []);
 
-  // Exercises every add*Listener helper from the public API.
   useEffect(() => {
     const subscriptions: EventSubscription[] = [
       addDeviceConnectedListener((event) => {

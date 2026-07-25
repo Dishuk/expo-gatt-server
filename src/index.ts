@@ -88,11 +88,8 @@ export {
 /**
  * Whether the native module is present, and therefore whether anything else here can work.
  *
- * `false` on web, and in any binary that does not contain the module — Expo Go being the common
- * case, since Expo Go ships a fixed set of native modules and cannot load this one. Synchronous and
- * safe to call anywhere, including at module scope, so a consuming app can branch on it before
- * touching the rest of the API.
- *
+ * `false` on web, and in any binary that does not contain the module — Expo Go being the common case,
+ * since it ships a fixed set of native modules. Synchronous and safe to call at module scope.
  * Importing this package never throws, whatever this returns.
  */
 export function isSupported(): boolean {
@@ -125,8 +122,8 @@ function nativeModule(): ExpoGattServerModuleType {
 
 /**
  * Stands in for a real subscription when there is no native module to subscribe to. Returned rather
- * than thrown, because a listener registered in an effect is paired with a `remove()` in that
- * effect's teardown, and throwing would leave the teardown to crash on a value it never received.
+ * than thrown: a listener registered in an effect is paired with a `remove()` in that effect's
+ * teardown, which would otherwise crash on a value it never received.
  */
 const NOOP_SUBSCRIPTION: EventSubscription = { remove() {} };
 
@@ -143,29 +140,21 @@ const SHORT_UUID_RE = /^(?:[0-9a-fA-F]{4}|[0-9a-fA-F]{8})$/;
 const LONG_UUID_RE =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
-/**
- * The Bluetooth Base UUID, `00000000-0000-1000-8000-00805F9B34FB` — Bluetooth Core Specification,
- * Vol 3, Part B, Section 2.5.1.
- */
+/** The Bluetooth Base UUID — Core Spec Vol 3, Part B, §2.5.1. */
 const BLUETOOTH_BASE_UUID = '00000000-0000-1000-8000-00805f9b34fb';
 
 /**
  * Validates a UUID and returns it as the lowercase 128-bit form, expanding a 16-bit or 32-bit alias
- * onto the Bluetooth Base UUID.
- *
- * The specification defines the aliases arithmetically as
- * `128_bit_value = 16_bit_value * 2^96 + Bluetooth_Base_UUID` and
- * `128_bit_value = 32_bit_value * 2^96 + Bluetooth_Base_UUID` (Vol 3, Part B, Section 2.5.1). `2^96`
- * lands the value in the leading 32 bits either way — a 16-bit alias being first zero-extended to
- * 32 bits — so the expansion is exactly "left-pad to eight hex digits and append the base UUID's
- * remaining four groups", which is why the suffix is taken from the constant rather than repeated.
+ * onto the Bluetooth Base UUID. The specification defines the aliases as
+ * `short_value * 2^96 + Bluetooth_Base_UUID` (Vol 3, Part B, §2.5.1), which lands the value in the
+ * leading 32 bits — so the expansion is exactly a left-pad to eight hex digits plus the base UUID's
+ * remaining groups.
  *
  * Normalising here rather than per platform is what makes one configuration portable: `CBUUID`
  * accepts all three forms, but Java's `UUID.fromString` requires the 8-4-4-4-12 form, so `'180D'`
- * used to be accepted on iOS and throw on Android. The specification also requires this conversion
- * before comparing UUIDs of different sizes — "the shorter UUID must be converted to the longer UUID
- * format before comparison" — so the long form is the only representation in which the module's own
- * lookups and a consumer's `===` against an event payload agree.
+ * used to be accepted on iOS and throw on Android. The specification also requires the conversion
+ * before comparing UUIDs of different sizes, so the long form is the only spelling in which the
+ * module's own lookups and a consumer's `===` against an event payload agree.
  */
 function normalizeUuid(uuid: unknown, field: string): string {
   if (typeof uuid !== 'string' || (!SHORT_UUID_RE.test(uuid) && !LONG_UUID_RE.test(uuid))) {
@@ -234,7 +223,6 @@ function assertEachOneOf<T extends string>(values: unknown, allowed: T[], field:
   }
 }
 
-/** Validates a characteristic and returns it with every UUID in the 128-bit form. */
 function normalizeCharacteristic(
   characteristic: GattCharacteristicConfig,
 ): GattCharacteristicConfig {
@@ -304,7 +292,7 @@ export async function createServer(
 }
 
 /**
- * The longest duration `AdvertiseSettings.Builder.setTimeout` accepts. Applied on both platforms, so
+ * The longest duration `AdvertiseSettings.Builder.setTimeout` accepts, applied on both platforms so
  * one configuration behaves the same either side.
  */
 const MAX_ADVERTISING_TIMEOUT_MS = 180_000;
@@ -323,9 +311,9 @@ function assertOneOf<T extends string>(value: unknown, allowed: T[], field: stri
 }
 
 export async function startAdvertising(config: AdvertiseConfig = {}): Promise<void> {
-  // Expanding an advertised UUID costs nothing on the wire: Android encodes it with
-  // `BluetoothUuid.uuidToBytes`, documented as returning "the shortest representation", and sizes the
-  // 31-byte budget the same way — so a 16-bit alias still goes out as two octets.
+  // Expanding an advertised UUID costs nothing on the wire: Android encodes it as "the shortest
+  // representation" and sizes the 31-byte budget the same way, so a 16-bit alias still goes out as
+  // two octets.
   const serviceUuids = config.serviceUuids?.map((uuid) => normalizeUuid(uuid, 'service'));
   if (config.mode !== undefined) {
     assertOneOf(config.mode, ADVERTISING_MODES, 'advertising mode');
@@ -384,8 +372,8 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
 }
 
 /**
- * Does nothing when the module is unsupported: nothing can be advertising, and a teardown path is
- * the wrong place to raise a configuration error the setup path already reported.
+ * Does nothing when the module is unsupported: nothing can be advertising, and a teardown path is the
+ * wrong place to raise a configuration error the setup path already reported.
  */
 export function stopAdvertising(): void {
   ExpoGattServerModule?.stopAdvertising();
@@ -394,21 +382,17 @@ export function stopAdvertising(): void {
 /**
  * Sends a notification, or an indication when `confirm` is set, to a connected central.
  *
- * An indication is acknowledged by the central with an `ATT_HANDLE_VALUE_CFM` and only one may be
- * outstanding at a time; a notification is fire-and-forget. The characteristic must declare the
- * property that matches — `indicate` for `confirm: true`, `notify` for `confirm: false` — or the
- * call rejects with `ERR_CONFIRM_UNSUPPORTED`. The Bluetooth Core Specification permits each
- * transmission only when its property is set (Vol 3, Part G, Table 3.5), and lets a client enable
- * the corresponding descriptor bit only then (Table 3.11), so a mismatch could never have been
- * legitimately requested by any client.
+ * The characteristic must declare the matching property — `indicate` for `confirm: true`, `notify`
+ * for `confirm: false` — or the call rejects with `ERR_CONFIRM_UNSUPPORTED`. The Core Specification
+ * permits each transmission only when its property is set (Vol 3, Part G, Table 3.5) and lets a
+ * client enable the corresponding descriptor bit only then (Table 3.11), so a mismatch could never
+ * have been legitimately requested by any client.
  *
- * **iOS never receives the flag.** `CBPeripheralManager.updateValue(_:for:onSubscribedCentrals:)`
- * has no confirm parameter; CoreBluetooth derives notification versus indication from the declared
- * properties alone. Because the property check above is enforced on both platforms, a characteristic
- * that declares exactly one of `notify` and `indicate` behaves identically either side. A
- * characteristic that declares **both** is the one case iOS cannot honour: Android sends what
- * `confirm` asks for, while iOS sends whatever CoreBluetooth chooses. Declare only the one you
- * intend to use if that matters.
+ * **iOS never receives the flag**: `updateValue(_:for:onSubscribedCentrals:)` has no confirm
+ * parameter, and CoreBluetooth derives notification versus indication from the declared properties
+ * alone. A characteristic declaring exactly one of the two therefore behaves identically either side;
+ * one declaring **both** is the case iOS cannot honour, since Android sends what `confirm` asks for
+ * while iOS sends whatever CoreBluetooth chooses.
  *
  * The promise settles when the platform reports the notification as delivered, not when the call
  * reaches the Bluetooth stack. A device may only have one notification outstanding at a time, so
@@ -416,8 +400,7 @@ export function stopAdvertising(): void {
  * awaiting the promise is what paces a stream against the link.
  *
  * Rejects with `ERR_NO_SUBSCRIBER` when the device has not enabled the transmission on the
- * characteristic — a notification to nobody is a failure, not a success. See
- * `options.requireSubscription` to send anyway where the platform allows it.
+ * characteristic. See `options.requireSubscription` to send anyway where the platform allows it.
  */
 export async function sendNotification(
   deviceId: string,
@@ -461,17 +444,16 @@ export async function sendResponse(
   offset: number,
   value: number[],
 ): Promise<void> {
-  // An ATT error code is a single octet, and Android narrows the status to a byte on its way into
-  // the Bluetooth stack, so a wider value would be truncated into an unrelated error rather than
-  // rejected. Catch it here instead.
+  // Android narrows the status to a byte on its way into the Bluetooth stack, so a wider value would
+  // be truncated into an unrelated ATT error rather than rejected.
   if (!Number.isInteger(status) || status < 0 || status > 255) {
     throw new Error(
       `Invalid response status ${JSON.stringify(status)}. An ATT error code is a single byte, ` +
         'so it must be an integer between 0 and 255.',
     );
   }
-  // An ATT offset is an unsigned 16-bit value, and a negative one would be rebased into a slice
-  // beyond the value's end on both platforms rather than reported.
+  // A negative offset would be rebased into a slice beyond the value's end on both platforms rather
+  // than reported.
   if (!Number.isInteger(offset) || offset < 0 || offset > 0xffff) {
     throw new Error(
       `Invalid response offset ${JSON.stringify(offset)}. An ATT offset is an unsigned 16-bit ` +
@@ -487,8 +469,8 @@ export async function sendResponse(
  * `sendNotification` to push the new value to subscribed centrals.
  *
  * Rejects with `ERR_CHARACTERISTIC_NOT_FOUND` when the pair of UUIDs names nothing in the published
- * database, and with `ERR_NO_SERVER` when no server exists — previously both were silent no-ops, so
- * a mistyped UUID was indistinguishable from a working update.
+ * database, and with `ERR_NO_SERVER` when no server exists, rather than resolving silently and
+ * leaving a mistyped UUID indistinguishable from a working update.
  */
 export async function updateCharacteristicValue(
   serviceUuid: string,
@@ -509,33 +491,23 @@ export function stopServer(): void {
 }
 
 /**
- * Reads the current Bluetooth adapter state. Safe to call before `createServer`, though iOS
- * cannot report anything more specific than `unknown` or `unauthorized` until a server exists,
- * because `CBPeripheralManager.state` requires an instantiated manager.
+ * Reads the current Bluetooth adapter state. Safe to call before `createServer`, though iOS cannot
+ * report anything more specific than `unknown` or `unauthorized` until a server exists, because
+ * `CBPeripheralManager.state` requires an instantiated manager.
  *
- * Resolves to `unsupported` where the native module is absent, which is what that state already
- * means — no BLE peripheral support on this device — so a consumer branching on the state needs no
- * separate check.
+ * Resolves to `unsupported` where the native module is absent, which is what that state already means,
+ * so a consumer branching on the state needs no separate check.
  */
 export async function getBluetoothState(): Promise<BluetoothState> {
   return ExpoGattServerModule?.getBluetoothState() ?? 'unsupported';
 }
 
 /**
- * Fires once per connected central, independently of any subscription.
- *
- * Android reports the connection itself, via `onConnectionStateChange`. iOS has no equivalent —
- * `CBPeripheralManagerDelegate` declares no connection-level callback — so a central is reported on
- * its first ATT activity instead: a subscribe, a read request or a write request. A central that
- * connects and never touches an attribute is not observable from the peripheral role at all.
- */
-/**
  * Reads the current ATT MTU for a connected device, so payloads can be sized before they are sent.
  *
- * Rejects with `ERR_DEVICE_DISCONNECTED` when the device is not connected, and with
- * `ERR_NO_SERVER` when no server exists. A device that has not negotiated an MTU reports the
- * specification default of 23 rather than failing — that default is what the link carries until a
- * negotiation happens.
+ * Rejects with `ERR_DEVICE_DISCONNECTED` when the device is not connected, and with `ERR_NO_SERVER`
+ * when no server exists. A device that has not negotiated an MTU reports the specification default of
+ * 23 rather than failing — that default is what the link carries until a negotiation happens.
  */
 export async function getMtu(deviceId: string): Promise<DeviceMtu> {
   return nativeModule().getMtu(deviceId);
@@ -543,12 +515,10 @@ export async function getMtu(deviceId: string): Promise<DeviceMtu> {
 
 /**
  * Lists the centrals the module currently considers connected. Resolves to an empty array when no
- * server exists.
+ * server exists, and where the native module is absent.
  *
  * See `ConnectedDevice` for what "connected" means on each platform — Android reports connections
  * directly, while iOS can only derive them from ATT activity, so the two are not equivalent.
- *
- * Also resolves to an empty array where the native module is absent — nothing can be connected.
  */
 export async function getConnectedDevices(): Promise<ConnectedDevice[]> {
   return ExpoGattServerModule?.getConnectedDevices() ?? [];
@@ -557,21 +527,14 @@ export async function getConnectedDevices(): Promise<ConnectedDevice[]> {
 /**
  * Drops a connected central. **Android only.**
  *
- * Android calls `BluetoothGattServer.cancelConnection`, which "disconnects an established
- * connection, or cancels a connection attempt currently in progress". That method returns nothing
- * and reports no outcome, so the promise resolves once the request has been handed to the Bluetooth
- * stack, not once the central is gone — wait for `onDeviceDisconnected` for that.
+ * Android calls `BluetoothGattServer.cancelConnection`, which reports no outcome, so the promise
+ * resolves once the request has been handed to the Bluetooth stack, not once the central is gone —
+ * wait for `onDeviceDisconnected` for that.
  *
- * **iOS rejects with `ERR_UNSUPPORTED`, because CoreBluetooth cannot do this at all.** The whole of
- * `CBPeripheralManager` is `startAdvertising`, `stopAdvertising`,
- * `setDesiredConnectionLatency(_:for:)`, `addService`, `removeService`, `removeAllServices`,
- * `respond(to:withResult:)`, `updateValue(_:for:onSubscribedCentrals:)`,
- * `publishL2CAPChannel(withEncryption:)` and `unpublishL2CAPChannel` — there is no disconnect among
- * them, and `CBCentral` exposes only `identifier` and `maximumUpdateValueLength`.
- * `cancelPeripheralConnection(_:)` is a `CBCentralManager` method that takes a `CBPeripheral`, so it
- * belongs to the central role and cannot be turned around. Nothing here is approximated: dropping
- * the GATT database with `stopServer` is not documented as disconnecting anybody, so claiming it as
- * an equivalent would be an invention.
+ * **iOS rejects with `ERR_UNSUPPORTED`, because CoreBluetooth cannot do this at all.** No
+ * `CBPeripheralManager` method drops a central, and `cancelPeripheralConnection(_:)` is a
+ * `CBCentralManager` method taking a `CBPeripheral`, so it belongs to the central role. Nothing is
+ * approximated: `stopServer` is not documented as disconnecting anybody.
  *
  * Rejects with `ERR_DEVICE_DISCONNECTED` when the device is not connected and `ERR_NO_SERVER` when
  * no server exists.
@@ -583,11 +546,11 @@ export async function disconnectDevice(deviceId: string): Promise<void> {
 /**
  * Whether a GATT database is currently published and usable.
  *
- * `false` before `createServer`, after `stopServer`, and while Bluetooth is not powered on — both
- * platforms destroy the published database when the adapter goes down. The module re-publishes it on
- * the next transition to `poweredOn`, at which point this becomes `true` again without any further
- * call, so it is the right thing to check before advertising rather than remembering whether
- * `createServer` was ever called. Also `false` where the native module is absent.
+ * `false` before `createServer`, after `stopServer`, while Bluetooth is not powered on — both
+ * platforms destroy the published database when the adapter goes down — and where the native module
+ * is absent. The module re-publishes on the next transition to `poweredOn`, at which point this
+ * becomes `true` again without any further call, so it is the right thing to check before advertising
+ * rather than remembering whether `createServer` was called.
  */
 export async function isServerRunning(): Promise<boolean> {
   return ExpoGattServerModule?.isServerRunning() ?? false;
@@ -596,10 +559,10 @@ export async function isServerRunning(): Promise<boolean> {
 /**
  * Whether the peripheral is currently advertising.
  *
- * iOS reads `CBPeripheralManager.isAdvertising`. Android has no equivalent query —
- * `BluetoothLeAdvertiser` exposes none — so the module tracks it from `AdvertiseCallback`, and
- * additionally clears it when an `AdvertiseConfig.timeoutMs` elapses, because the platform stops
- * advertising at that limit without reporting it. Also `false` where the native module is absent.
+ * iOS reads `CBPeripheralManager.isAdvertising`. Android exposes no equivalent query, so the module
+ * tracks it from `AdvertiseCallback` and additionally clears it when an `AdvertiseConfig.timeoutMs`
+ * elapses, because the platform stops advertising at that limit without reporting it. Also `false`
+ * where the native module is absent.
  */
 export async function isAdvertising(): Promise<boolean> {
   return ExpoGattServerModule?.isAdvertising() ?? false;
@@ -607,8 +570,8 @@ export async function isAdvertising(): Promise<boolean> {
 
 /**
  * Fires when a connection's MTU changes. See `MtuChangedEvent` for the difference in timing between
- * Android, which reports the change as it happens, and iOS, which can only sample the value when
- * the central next produces activity.
+ * Android, which reports the change as it happens, and iOS, which can only sample the value when the
+ * central next produces activity.
  */
 export function addMtuChangedListener(
   listener: (event: MtuChangedEvent) => void,
@@ -616,6 +579,13 @@ export function addMtuChangedListener(
   return addListener('onMtuChanged', listener);
 }
 
+/**
+ * Fires once per connected central, independently of any subscription.
+ *
+ * Android reports the connection itself, via `onConnectionStateChange`. iOS has no connection-level
+ * callback, so a central is reported on its first ATT activity instead — a subscribe, read or write.
+ * One that connects and never touches an attribute is not observable from the peripheral role at all.
+ */
 export function addDeviceConnectedListener(
   listener: (event: DeviceConnectedEvent) => void,
 ): EventSubscription {
@@ -626,11 +596,11 @@ export function addDeviceConnectedListener(
  * Fires once when a central goes away.
  *
  * Android reports the disconnection itself. On iOS it is inferred, because CoreBluetooth never
- * reports one: losing the last subscription is treated as a disconnection, and every known central
- * is reported as disconnected when Bluetooth leaves `poweredOn`. A central that only ever read or
- * wrote therefore may not produce this event until Bluetooth is turned off or the server stops, and
- * a central that deliberately unsubscribes but stays connected produces it early — CoreBluetooth
- * delivers the same callback for both and offers nothing to tell them apart.
+ * reports one: losing the last subscription is treated as a disconnection, and every known central is
+ * reported as disconnected when Bluetooth leaves `poweredOn`. So a central that only ever read or
+ * wrote may not produce this event until Bluetooth is turned off or the server stops, and one that
+ * deliberately unsubscribes but stays connected produces it early — CoreBluetooth delivers the same
+ * callback for both and offers nothing to tell them apart.
  */
 export function addDeviceDisconnectedListener(
   listener: (event: DeviceDisconnectedEvent) => void,
@@ -657,9 +627,9 @@ export function addNotificationSentListener(
 }
 
 /**
- * Fires when a central enables notifications or indications on a characteristic. This is the
- * signal to start streaming: before it arrives the central receives nothing, and on Android
- * `sendNotification` has no subscriber to send to.
+ * Fires when a central enables notifications or indications on a characteristic — the signal to start
+ * streaming. Before it arrives the central receives nothing, and `sendNotification` has no subscriber
+ * to send to.
  */
 export function addCharacteristicSubscribedListener(
   listener: (event: CharacteristicSubscribedEvent) => void,

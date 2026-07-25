@@ -49,9 +49,8 @@ export type { ExpoGattServerModuleType };
  * `null` wherever the native module was never installed — on web, and in a binary that does not
  * contain it, such as Expo Go.
  *
- * `requireNativeModule` throws from this line, which runs at *import* time, so merely importing this
- * package used to take down any bundle that reached the import — including one that only ever calls
- * into it behind a platform check. The optional variant defers that to the call, where the public
- * API can report it properly.
+ * The optional variant is required because this line runs at *import* time: `requireNativeModule`
+ * would throw from it, taking down any bundle that reached the import even if it only ever calls in
+ * behind a platform check.
  */
 export default requireOptionalNativeModule<ExpoGattServerModuleType>('ExpoGattServer');

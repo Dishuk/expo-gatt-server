@@ -19,8 +19,8 @@ class ExpoGattServerModule : Module() {
    * The rejection [permission] warrants, as a code and message, or `null` when it is held.
    *
    * A missing React context is an error rather than a pass: with nothing to check the grant against,
-   * assuming it was granted only defers the failure to a `SecurityException` from the Bluetooth
-   * stack, which surfaces as an unrelated crash rather than as a permission problem.
+   * assuming it was granted only defers the failure to a `SecurityException` from the Bluetooth stack,
+   * which surfaces as an unrelated crash rather than as a permission problem.
    */
   private fun permissionError(permission: String, requiredBy: String? = null): Pair<String, String>? {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
@@ -139,8 +139,8 @@ class ExpoGattServerModule : Module() {
         services.forEach { parseServiceConfig(it) }
         mgr.setDelegations(parseDelegations(services))
         manager = mgr
-        // Resolves only once every service is confirmed registered — until then the server has
-        // no attributes to expose and advertising it would be meaningless.
+        // Resolves only once every service is confirmed registered — until then the server has no
+        // attributes to expose and advertising it would be meaningless.
         mgr.open({ error ->
           if (error != null) {
             promise.reject("ERR_CREATE_SERVER", error, null)
@@ -173,8 +173,8 @@ class ExpoGattServerModule : Module() {
       val includeDeviceName =
         androidOptions?.get("includeDeviceName") as? Boolean ?: (localName != null)
 
-      // `BluetoothAdapter.setName` enforces BLUETOOTH_CONNECT on API 31+; checked here so the opt-in
-      // fails with a permission error rather than a SecurityException from the Bluetooth stack.
+      // `BluetoothAdapter.setName` enforces BLUETOOTH_CONNECT on API 31+, so checking here makes the
+      // opt-in fail with a permission error rather than a SecurityException from the Bluetooth stack.
       if (setAdapterName) {
         permissionError(
           android.Manifest.permission.BLUETOOTH_CONNECT, "android.setAdapterName"
@@ -231,8 +231,8 @@ class ExpoGattServerModule : Module() {
       }
       try {
         val bytes = toByteArray(value, "notification")
-        // Resolves once the platform has confirmed the notification was delivered, so a caller
-        // that awaits it can pace itself against the link instead of overrunning it.
+        // Resolves once the platform confirms delivery, so a caller that awaits it paces itself against
+        // the link instead of overrunning it.
         mgr.sendNotification(
           deviceId, serviceUuid, characteristicUuid, bytes, confirm, requireSubscription
         ) { error ->
@@ -382,10 +382,7 @@ class ExpoGattServerModule : Module() {
     }
   }
 
-  /**
-   * Byte arrays arrive from JS as numbers. Anything outside 0..255 would be silently
-   * truncated by [Int.toByte], so reject it instead.
-   */
+  /** Anything outside 0..255 would be silently truncated by [Int.toByte]. */
   private fun toByteArray(value: List<*>, field: String): ByteArray {
     val bytes = ByteArray(value.size)
     value.forEachIndexed { index, element ->
@@ -405,8 +402,8 @@ class ExpoGattServerModule : Module() {
   }
 
   /**
-   * Checked before `AdvertiseSettings.Builder.setTimeout` sees it, whose own message
-   * ("timeoutMillis invalid") does not say which option was wrong.
+   * Checked before `AdvertiseSettings.Builder.setTimeout` sees it, whose own message ("timeoutMillis
+   * invalid") does not say which option was wrong.
    */
   private fun parseAdvertisingTimeout(value: Any?): Int {
     if (value == null) return 0
@@ -471,10 +468,7 @@ class ExpoGattServerModule : Module() {
     }
   }
 
-  /**
-   * Collects the characteristics that opted out of the module's automatic responses. Absent or
-   * empty `delegate` configuration produces no entry, so the default stays fully automatic.
-   */
+  /** Absent or empty `delegate` configuration produces no entry, so the default stays fully automatic. */
   private fun parseDelegations(
     services: List<Map<String, Any?>>
   ): Map<CharacteristicAddress, CharacteristicDelegation> {
@@ -546,9 +540,8 @@ class ExpoGattServerModule : Module() {
   }
 
   /**
-   * The CCCD is rejected here as well as in JavaScript, because a second instance of it would be
-   * published alongside the module's own and shadow the per-client subscription tracking that
-   * answers it.
+   * The CCCD is rejected here as well as in JavaScript, because a second instance would be published
+   * alongside the module's own and shadow the per-client subscription tracking that answers it.
    */
   private fun parseDescriptorConfig(map: Map<*, *>): BluetoothGattDescriptor {
     val uuid = UUID.fromString(map["uuid"] as String)
@@ -588,8 +581,8 @@ class ExpoGattServerModule : Module() {
   }
 
   /**
-   * An unrecognised name throws rather than being skipped: dropping a permission silently publishes
-   * an attribute less protected than the configuration asked for.
+   * An unrecognised name throws rather than being skipped: dropping a permission silently publishes an
+   * attribute less protected than the configuration asked for.
    */
   private fun parsePermissions(list: List<*>?): Int {
     var perms = 0

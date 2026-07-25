@@ -22,30 +22,26 @@ import java.util.concurrent.atomic.AtomicReference
 
 private const val TAG = "ExpoGattServer"
 
-/** Default ATT_MTU, in octets — Bluetooth Core Specification, Vol 3, Part G, Section 5.2.1. */
+/** Default ATT_MTU, in octets — Core Spec Vol 3, Part G, §5.2.1. */
 const val DEFAULT_ATT_MTU = 23
 
 /**
- * Octets an `ATT_HANDLE_VALUE_NTF` / `ATT_HANDLE_VALUE_IND` PDU spends before the value: a
- * one-octet Attribute Opcode plus a two-octet Attribute Handle (Core Specification, Vol 3, Part F,
- * Sections 3.4.7.1 and 3.4.7.2). The value it carries is therefore at most `ATT_MTU - 3` octets.
+ * Octets an `ATT_HANDLE_VALUE_NTF` / `ATT_HANDLE_VALUE_IND` PDU spends before the value: a one-octet
+ * Attribute Opcode plus a two-octet Attribute Handle (Core Spec Vol 3, Part F, §§3.4.7.1–3.4.7.2).
  */
 const val ATT_NOTIFICATION_HEADER_SIZE = 3
 
 /**
- * Upper bound on notifications waiting behind the one the platform is still delivering. Only one
- * notification may be outstanding per the `onNotificationSent` contract, so without a bound a
- * producer that outruns the link would grow the queue forever. Exceeding it fails the call rather
- * than dropping a payload silently.
+ * Upper bound on notifications waiting behind the one the platform is still delivering. Only one may be
+ * outstanding per the `onNotificationSent` contract, so without a bound a producer that outruns the
+ * link would grow the queue forever.
  */
 private const val MAX_QUEUED_NOTIFICATIONS_PER_DEVICE = 64
 
 /**
- * Client Characteristic Configuration descriptor — Bluetooth Core Specification, Vol 3, Part G,
- * Section 3.3.3.3. Its value "shall be two octets in length"; bit 0 enables notifications and bit 1
- * enables indications (Table 3.11), which is the little-endian encoding Android exposes as
- * `BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE` = `{0x01, 0x00}` and
- * `ENABLE_INDICATION_VALUE` = `{0x02, 0x00}`. The default is 0x0000.
+ * Client Characteristic Configuration descriptor — Core Spec Vol 3, Part G, §3.3.3.3. Its value is two
+ * octets, little endian: bit 0 enables notifications and bit 1 indications (Table 3.11), defaulting to
+ * 0x0000.
  */
 val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 private const val CCCD_VALUE_LENGTH = 2
@@ -58,48 +54,42 @@ private const val CCCD_INDICATE_BIT = 0x0002
  */
 const val MAX_ADVERTISING_TIMEOUT_MS = 180_000
 
-/** ATT "Invalid Attribute Value Length" — Core Specification, Vol 3, Part F, Table 3.4. */
+/** ATT "Invalid Attribute Value Length" — Core Spec Vol 3, Part F, Table 3.4. */
 private const val ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH = 0x0D
 
-/** ATT "Prepare Queue Full" — Core Specification, Vol 3, Part F, Table 3.4. */
+/** ATT "Prepare Queue Full" — Core Spec Vol 3, Part F, Table 3.4. */
 private const val ATT_ERROR_PREPARE_QUEUE_FULL = 0x09
 
 /**
- * Prepared writes one device may queue before an execute. "A server may limit the number of prepared
- * writes that it can queue. A higher layer specification should define this limit" (Core
- * Specification, Vol 3, Part F, Section 3.4.6.1), and exceeding it is answered with
+ * Prepared writes one device may queue before an execute. The specification leaves the limit to "a
+ * higher layer specification" (Core Spec Vol 3, Part F, §3.4.6.1) and answers an overrun with
  * [ATT_ERROR_PREPARE_QUEUE_FULL]. 64 covers a 512-octet attribute written in the smallest parts the
  * default ATT_MTU allows, with room to spare for a reliable write spanning several attributes.
  */
 private const val MAX_PREPARED_WRITES_PER_DEVICE = 64
 
-/** ATT "Unlikely Error" — Core Specification, Vol 3, Part F, Table 3.4. */
+/** ATT "Unlikely Error" — Core Spec Vol 3, Part F, Table 3.4. */
 private const val ATT_ERROR_UNLIKELY_ERROR = 0x0E
 
 /**
- * The ATT transaction timeout. "A transaction not completed within 30 seconds shall time out. Such a
- * transaction shall be considered to have failed [...] No more Attribute Protocol requests,
- * commands, indications or notifications shall be sent to the target device on this ATT bearer" —
- * recovering then costs a whole new bearer (Core Specification, Vol 3, Part F, Section 3.3.3). A
- * module timeout at or above it could never answer before the peer gives up, so it is the exclusive
- * upper bound on [DEFAULT_REQUEST_TIMEOUT_MS] and on the configured value.
+ * The ATT transaction timeout. A transaction not completed within 30 s fails, and no further request,
+ * command, indication or notification may then be sent on that ATT bearer — recovering costs a whole
+ * new bearer (Core Spec Vol 3, Part F, §3.3.3). A module timeout at or above it could never answer
+ * before the peer gives up, so it is the exclusive upper bound on the request timeout.
  */
 const val ATT_TRANSACTION_TIMEOUT_MS = 30_000
 
 /**
  * How long a request delegated to JavaScript may go unanswered before the module answers it itself.
- *
- * Chosen to sit well inside [ATT_TRANSACTION_TIMEOUT_MS] — the peer is left 20 s of margin, so it
- * receives a real ATT error response and its bearer stays usable, instead of the transaction failing
- * and taking every subsequent notification and indication with it. It is still long enough for a
- * handler doing genuine asynchronous work.
+ * Sits well inside [ATT_TRANSACTION_TIMEOUT_MS], leaving the peer 20 s of margin so it receives a real
+ * ATT error response and its bearer stays usable, while still allowing a handler to do genuine
+ * asynchronous work.
  */
 const val DEFAULT_REQUEST_TIMEOUT_MS = 10_000
 
 open class GattServerException(val code: String, message: String) : Exception(message)
 class MtuException(code: String, message: String) : GattServerException(code, message)
 
-/** Identifies a characteristic within the configured GATT database. */
 data class CharacteristicAddress(val service: UUID, val characteristic: UUID)
 
 class ManufacturerData(val companyId: Int, val data: ByteArray)
@@ -143,20 +133,15 @@ fun advertiseTxPowerFor(name: String?): Int = when (name) {
 }
 
 /**
- * The link budget for one device, expressed in the units the public API uses.
- *
- * Android reports the ATT_MTU directly through `onMtuChanged`, so [mtu] is exact and the payload
- * capacity is derived from it.
+ * The link budget for one device. Android reports the ATT_MTU directly through `onMtuChanged`, so
+ * [mtu] is exact and the payload capacity is derived from it.
  */
 data class DeviceMtu(val mtu: Int) {
   /** Octets that fit in one notification or indication: `ATT_MTU - 3`. */
   val maxNotificationPayload: Int = mtu - ATT_NOTIFICATION_HEADER_SIZE
 }
 
-/**
- * Per-characteristic opt-in delegation of ATT request handling to JavaScript. Every flag defaults
- * to `false`, which keeps the module answering the request itself.
- */
+/** Every flag defaults to `false`, which keeps the module answering the request itself. */
 data class CharacteristicDelegation(
   val read: Boolean = false,
   val write: Boolean = false,
@@ -167,9 +152,9 @@ data class CharacteristicDelegation(
 }
 
 /**
- * Maps a [BluetoothAdapter] state constant onto the platform-neutral state union shared with iOS.
- * The two transitional states are reported as `resetting` because the platform documents both as
- * not yet usable, which is exactly what `resetting` means to a consumer.
+ * Maps a [BluetoothAdapter] state constant onto the platform-neutral state union shared with iOS. The
+ * two transitional states are reported as `resetting` because the platform documents both as not yet
+ * usable, which is exactly what `resetting` means to a consumer.
  */
 fun normalizedBluetoothState(state: Int): String = when (state) {
   BluetoothAdapter.STATE_ON -> "poweredOn"
@@ -186,10 +171,9 @@ fun currentBluetoothState(context: Context): String {
 }
 
 /**
- * `MissingPermission` is suppressed per function rather than for the whole class. The permissions
- * are checked in [ExpoGattServerModule] before anything here is reachable, but a class-level
- * suppression also hid every *new* violation — including the module's own broken check — so each
- * function that genuinely calls a guarded API opts out by name instead.
+ * `MissingPermission` is suppressed per function rather than for the whole class: the permissions are
+ * checked in [ExpoGattServerModule] before anything here is reachable, but a class-level suppression
+ * also hid every *new* violation, including the module's own broken check.
  */
 class GattServerManager(
   private val context: Context,
@@ -222,8 +206,8 @@ class GattServerManager(
   private var advertiseCallback: AdvertiseCallback? = null
   private var pendingAdvertiseResult: ((String?) -> Unit)? = null
 
-  // Both answer public queries from the caller's thread while being written from the binder threads
-  // that deliver onServiceAdded, the adapter state broadcast and the advertising callbacks.
+  // Both answer public queries from the caller's thread while being written from the binder threads that
+  // deliver onServiceAdded, the adapter state broadcast and the advertising callbacks.
   private val databasePublished = AtomicBoolean(false)
   private val advertising = AtomicBoolean(false)
   private val advertisingTimeout = AtomicReference<Runnable?>(null)
@@ -232,31 +216,25 @@ class GattServerManager(
   private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
   private val deviceMtu = ConcurrentHashMap<String, Int>()
   private val pendingRequests = ConcurrentHashMap<Int, PendingRequest>()
-  // Expiry tasks are posted here from the binder threads that register the requests, and run on the
-  // main looper, which always exists for the lifetime of the process.
+  // Expiry tasks are posted here from the binder threads that register the requests, and run on the main
+  // looper, which always exists for the lifetime of the process.
   private val timeoutHandler = Handler(Looper.getMainLooper())
-  // Android delivers one notification at a time: "When multiple notifications are to be sent, an
-  // application must wait for this callback to be received before sending additional
-  // notifications" (BluetoothGattServerCallback.onNotificationSent). Sends are therefore queued
-  // per device and handed to the stack one at a time, each waiting for its own callback. The map
-  // is touched from the caller's thread and from the binder thread that delivers the callback.
+  // Android delivers one notification at a time: an application "must wait for this callback to be
+  // received before sending additional notifications" (onNotificationSent). Sends are therefore queued
+  // per device and handed to the stack one at a time. The map is touched from the caller's thread and
+  // from the binder thread that delivers the callback.
   private val notificationQueues = ConcurrentHashMap<String, NotificationQueue>()
 
   // "Each client's queued values are separate; the execution of one queue shall not affect the
-  // preparation or execution of any other client's queued values" (Core Specification, Vol 3,
-  // Part F, Section 3.4.6.1), so the queue is keyed by device. Every mutation goes through
-  // `compute`, whose bin lock is what makes the lists safe against the binder threads that deliver
-  // prepares, executes and disconnects.
+  // preparation or execution of any other client's queued values" (Core Spec Vol 3, Part F, §3.4.6.1),
+  // so the queue is keyed by device. Every mutation goes through `compute`, whose bin lock is what makes
+  // the lists safe against the binder threads that deliver prepares, executes and disconnects.
   private val preparedWrites = ConcurrentHashMap<String, MutableList<PreparedWrite>>()
 
   /**
-   * A request awaiting `sendResponse`.
-   *
-   * [offset] is the offset the central asked for. It is retained so a response can be rebased onto
-   * it, and so the offset handed back to the stack is the one the request carried rather than
-   * whatever the caller happened to pass.
-   *
-   * [timeout] is the armed expiry task, kept so answering or discarding the request can cancel it.
+   * A request awaiting `sendResponse`. [offset] is the offset the central asked for, retained so a
+   * response can be rebased onto it and so the offset handed back to the stack is the one the request
+   * carried rather than whatever the caller happened to pass.
    */
   private data class PendingRequest(
     val deviceId: String,
@@ -266,10 +244,9 @@ class GattServerManager(
   )
 
   /**
-   * One `ATT_PREPARE_WRITE_REQ` held until its execute arrives. "The server shall not change the
-   * value of the attribute until an ATT_EXECUTE_WRITE_REQ PDU is received", and repeats of the same
-   * handle "will then be executed in the order received" rather than replacing one another (Core
-   * Specification, Vol 3, Part F, Section 3.4.6.1).
+   * One `ATT_PREPARE_WRITE_REQ` held until its execute arrives. The attribute must not change until the
+   * execute, and repeats of the same handle are executed in the order received rather than replacing one
+   * another (Core Spec Vol 3, Part F, §3.4.6.1).
    */
   private sealed class PreparedWrite {
     abstract val offset: Int
@@ -288,7 +265,6 @@ class GattServerManager(
     ) : PreparedWrite()
   }
 
-  /** One notification waiting for, or occupying, the single outstanding slot a device has. */
   private class QueuedNotification(
     val device: BluetoothDevice,
     val characteristic: BluetoothGattCharacteristic,
@@ -298,48 +274,45 @@ class GattServerManager(
     val onResult: (GattServerException?) -> Unit,
   )
 
-  /** Per-device send queue. Every field is read and written under the instance's own monitor. */
+  /** Every field is read and written under the instance's own monitor. */
   private class NotificationQueue {
     val waiting = ArrayDeque<QueuedNotification>()
     var inFlight: QueuedNotification? = null
   }
 
-  // "Each client has its own instantiation of the Client Characteristic Configuration. Reads of
-  // the Client Characteristic Configuration only shows the configuration for that client and
-  // writes only affect the configuration of that client" (Core Specification, Vol 3, Part G,
-  // Section 3.3.3.3). The framework hands out one shared BluetoothGattDescriptor per
-  // characteristic, so the per-client configuration is kept here instead: device address, then
-  // characteristic UUID, then the raw two-octet configuration bits.
+  // "Each client has its own instantiation of the Client Characteristic Configuration" and reads and
+  // writes of it only concern that client (Core Spec Vol 3, Part G, §3.3.3.3). The framework hands out
+  // one shared BluetoothGattDescriptor per characteristic, so the per-client configuration is kept here
+  // instead: device address, then characteristic UUID, then the raw two-octet configuration bits.
   private val subscriptions = ConcurrentHashMap<String, ConcurrentHashMap<UUID, Int>>()
 
   // The pre-33 `notifyCharacteristicChanged` overload reads the payload from the shared
-  // `characteristic.value` field, so the write and the call have to be atomic with respect to a
-  // send for another device that targets the same characteristic.
+  // `characteristic.value` field, so the write and the call have to be atomic with respect to a send for
+  // another device that targets the same characteristic.
   private val legacyNotifyLock = Any()
 
-  // Delegation is fixed for the lifetime of a server but is read from the binder threads that
-  // deliver the GATT callbacks, so both maps are concurrent.
+  // Delegation is fixed for the lifetime of a server but is read from the binder threads that deliver
+  // the GATT callbacks, so both maps are concurrent.
   private val delegations = ConcurrentHashMap<CharacteristicAddress, CharacteristicDelegation>()
   // Fallback for a characteristic whose owning service cannot be identified. Only populated for
   // characteristic UUIDs that occur exactly once in the configuration, so a hit is unambiguous.
   private val delegationsByCharacteristic = ConcurrentHashMap<UUID, CharacteristicDelegation>()
 
-  // `BluetoothGattServer.addService` is asynchronous and documents "Do not add another service
-  // before this callback", so services are queued and added strictly one at a time as
-  // `onServiceAdded` acknowledges each one. Both fields are touched from the caller's thread and
-  // from the binder thread that delivers `onServiceAdded`.
+  // `BluetoothGattServer.addService` is asynchronous and documents "Do not add another service before
+  // this callback", so services are queued and added strictly one at a time. Both fields are touched
+  // from the caller's thread and from the binder thread that delivers `onServiceAdded`.
   private val pendingServices = ConcurrentLinkedQueue<BluetoothGattService>()
   private val openCompletion = AtomicReference<((String?) -> Unit)?>(null)
 
-  // The adapter being disabled invalidates the whole server, so the service configuration is
-  // retained as a factory and fresh BluetoothGattService instances are built for every
-  // registration pass. Re-adding the previously registered instances would reuse the instance IDs
-  // the framework assigned them, and the platform does not document that as supported.
+  // The adapter being disabled invalidates the whole server, so the configuration is retained as a
+  // factory and fresh BluetoothGattService instances are built for every registration pass. Re-adding
+  // the previously registered instances would reuse the instance IDs the framework assigned them, which
+  // the platform does not document as supported.
   private val serviceFactory = AtomicReference<(() -> List<BluetoothGattService>)?>(null)
 
   /**
-   * Records which characteristics hand their ATT requests to JavaScript. Call before [open]; the
-   * configuration is retained across the server rebuilds that an adapter power cycle triggers.
+   * Call before [open]. The configuration is retained across the server rebuilds that an adapter power
+   * cycle triggers.
    */
   fun setDelegations(map: Map<CharacteristicAddress, CharacteristicDelegation>) {
     delegations.clear()
@@ -380,9 +353,9 @@ class GattServerManager(
   }
 
   /**
-   * Disabling the adapter tears down the Bluetooth stack, which invalidates the server interface
-   * this process registered. Close it explicitly so the next power-on starts from a clean server
-   * rather than relying on undocumented survival of the old one.
+   * Disabling the adapter tears down the Bluetooth stack, which invalidates the server interface this
+   * process registered. Closing it explicitly means the next power-on starts from a clean server rather
+   * than relying on undocumented survival of the old one.
    */
   @SuppressLint("MissingPermission")
   private fun handleAdapterOff() {
@@ -408,7 +381,7 @@ class GattServerManager(
     discardPendingRequests { true }
     preparedWrites.clear()
     failAllNotifications(GattServerException("ERR_BLUETOOTH", "Bluetooth was turned off"))
-    // The server is gone, so no onConnectionStateChange callbacks will arrive for these.
+    // The server is gone, so no onConnectionStateChange callback will arrive for any of these.
     disconnected.forEach {
       clearSubscriptions(it)
       listener?.onDeviceDisconnected(it)
@@ -416,7 +389,6 @@ class GattServerManager(
     subscriptions.clear()
   }
 
-  /** Re-opens the server and re-registers the retained configuration. */
   private fun handleAdapterOn() {
     if (serviceFactory.get() == null) return
     Log.d(TAG, "Adapter on — reopening GATT server and re-registering services")
@@ -450,9 +422,8 @@ class GattServerManager(
           connectedDevices.remove(id)
           deviceMtu.remove(id)
           discardPendingRequests { it.deviceId == id }
-          // "If all ATT bearers belonging to the same client are lost while a number of pending
-          // prepare write values have been queued, the queue will be cleared and no writes will be
-          // executed" (Core Specification, Vol 3, Part F, Section 3.4.6.1).
+          // Losing every ATT bearer for a client clears its prepare queue without executing any of it
+          // (Core Spec Vol 3, Part F, §3.4.6.1).
           preparedWrites.remove(id)
           // Nothing will ever acknowledge these now, so fail them instead of leaking the queue.
           failNotifications(id, GattServerException("ERR_DEVICE_DISCONNECTED", "Device $id disconnected"))
@@ -473,11 +444,10 @@ class GattServerManager(
       val delegated = delegationFor(characteristic).read
 
       if (!delegated && value != null) {
-        // An offset past the end of the value is answered with the error the specification
-        // requires — 0x07 "Invalid Offset", `BluetoothGatt.GATT_INVALID_OFFSET` (Core
-        // Specification, Vol 3, Part F, Section 3.4.1.1) — rather than handed to a listener the
-        // characteristic never opted in to, which left the central waiting for its ATT transaction
-        // to time out. An offset equal to the length is in range and answered with an empty value.
+        // An offset past the end is answered with `GATT_INVALID_OFFSET`, 0x07 (Core Spec Vol 3, Part F,
+        // §3.4.1.1), rather than handed to a listener the characteristic never opted in to, which left
+        // the central waiting for its ATT transaction to time out. An offset equal to the length is in
+        // range and answered with an empty value.
         if (offset > value.size) {
           Log.w(TAG, "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset past end of ${value.size}-byte value, rejecting")
           gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null)
@@ -520,8 +490,8 @@ class GattServerManager(
         return
       }
 
-      // A write without a response cannot be answered at all, so it is never delegated even when
-      // the characteristic opted in — there is nothing for JavaScript to reply to.
+      // A write without a response cannot be answered at all, so it is never delegated even when the
+      // characteristic opted in — there is nothing for JavaScript to reply to.
       val delegated = delegationFor(characteristic).write && responseNeeded
       Log.d(TAG, "onCharacteristicWriteRequest: device=${device.address} char=${characteristic.uuid} offset=$offset responseNeeded=$responseNeeded delegated=$delegated")
 
@@ -554,8 +524,8 @@ class GattServerManager(
       }
 
       if (descriptor.uuid == CCCD_UUID) {
-        // The specification fixes the length at two octets, so anything else is malformed and is
-        // rejected rather than parsed into a guess at what the client meant.
+        // The specification fixes the length at two octets, so anything else is malformed and rejected
+        // rather than parsed into a guess at what the client meant.
         if (offset != 0 || value == null || value.size != CCCD_VALUE_LENGTH) {
           Log.w(TAG, "onDescriptorWriteRequest: rejecting malformed CCCD write from ${device.address}")
           if (responseNeeded) {
@@ -586,8 +556,8 @@ class GattServerManager(
       device: BluetoothDevice, requestId: Int, offset: Int,
       descriptor: BluetoothGattDescriptor
     ) {
-      // A CCCD read "only shows the configuration for that client", so it is answered from this
-      // device's own configuration rather than from the descriptor instance every client shares.
+      // A CCCD read "only shows the configuration for that client", so it is answered from this device's
+      // own configuration rather than from the descriptor instance every client shares.
       val value = if (descriptor.uuid == CCCD_UUID) {
         cccdValue(clientConfiguration(device.address, descriptor.characteristic.uuid))
       } else {
@@ -601,10 +571,9 @@ class GattServerManager(
     override fun onNotificationSent(device: BluetoothDevice, status: Int) {
       val deviceId = device.address
 
-      // The outstanding slot is free again as soon as this callback arrives, so release the
-      // in-flight entry before letting the queue move on. That entry is also the only thing that
-      // identifies which characteristic this callback belongs to — `onNotificationSent` reports
-      // the device but not the characteristic, and the queue holds exactly one send per device.
+      // The in-flight entry is the only thing that identifies which characteristic this callback belongs
+      // to: `onNotificationSent` reports the device but not the characteristic, and the queue holds
+      // exactly one send per device.
       val queue = notificationQueues[deviceId]
       val finished = queue?.let {
         synchronized(it) {
@@ -625,9 +594,8 @@ class GattServerManager(
         }
         finished.onResult(error)
       } else {
-        // The queue was already torn down — by a disconnect or a stop racing this callback — so
-        // the characteristic it belonged to is unknowable. Reporting a guess would be worse than
-        // reporting nothing.
+        // The queue was already torn down — by a disconnect or a stop racing this callback — so the
+        // characteristic it belonged to is unknowable, and a guess would be worse than nothing.
         Log.w(TAG, "onNotificationSent: no in-flight notification for device=$deviceId status=$status")
       }
       pumpNotifications(deviceId)
@@ -636,11 +604,9 @@ class GattServerManager(
     /**
      * Applies or discards everything the device prepared, as the execute's flag directs.
      *
-     * Flag 0x01 writes "all pending prepare write values that are currently queued [...] in the
-     * order they were received"; flag 0x00 discards them. Either way "the queue shall then be
-     * cleared and an ATT_EXECUTE_WRITE_RSP PDU shall be sent" — including when nothing was queued
-     * (Core Specification, Vol 3, Part F, Section 3.4.6.3). Android surfaces the flag as [execute]
-     * and requires the response like any other request.
+     * Either way the queue is cleared and a response must be sent, including when nothing was queued
+     * (Core Spec Vol 3, Part F, §3.4.6.3) — Android surfaces the flag as [execute] and requires the
+     * response like any other request.
      */
     @SuppressLint("MissingPermission")
     override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
@@ -675,12 +641,12 @@ class GattServerManager(
   }
 
   /**
-   * Opens the GATT server and registers the services produced by [buildServices]. [onReady] is
-   * invoked exactly once — with `null` once every service is confirmed registered, or with a
-   * message describing the first registration failure. It may be called on a binder thread.
+   * Opens the GATT server and registers the services produced by [buildServices]. [onReady] is invoked
+   * exactly once — with `null` once every service is confirmed registered, or with the first
+   * registration failure — and may be called on a binder thread.
    *
-   * [buildServices] is retained and called again whenever the server has to be rebuilt, such as
-   * after the adapter is disabled and re-enabled, so it must return freshly constructed services.
+   * [buildServices] is retained and called again whenever the server has to be rebuilt, such as after
+   * the adapter is disabled and re-enabled, so it must return freshly constructed services.
    */
   fun open(onReady: (error: String?) -> Unit, buildServices: () -> List<BluetoothGattService>) {
     val adapter = bluetoothAdapter
@@ -702,7 +668,6 @@ class GattServerManager(
     }
   }
 
-  /** Opens a fresh [BluetoothGattServer] and starts registering the configured services. */
   @SuppressLint("MissingPermission")
   private fun openServer(): Boolean {
     val buildServices = serviceFactory.get() ?: return false
@@ -720,8 +685,8 @@ class GattServerManager(
   }
 
   /**
-   * Adds the next queued service, or completes the open once the queue drains. Only ever called
-   * from [open] or from `onServiceAdded`, so at most one `addService` is ever in flight.
+   * Only ever called from [open] or from `onServiceAdded`, so at most one `addService` is ever in
+   * flight — which is what the platform requires.
    */
   @SuppressLint("MissingPermission")
   private fun addNextService() {
@@ -738,7 +703,7 @@ class GattServerManager(
       finishOpen("GATT server closed before service ${next.uuid} could be registered")
       return
     }
-    // A false return means the request was never even initiated, so no callback will arrive.
+    // A false return means the registration was never initiated, so no callback will arrive.
     if (!server.addService(next)) {
       Log.e(TAG, "addService: could not initiate registration of ${next.uuid}")
       pendingServices.clear()
@@ -752,10 +717,9 @@ class GattServerManager(
 
   /**
    * Android has no per-advertisement local name: `AdvertiseData.Builder` offers only
-   * `setIncludeDeviceName(boolean)`, and the name that includes is the adapter's own — the platform
-   * sizes the field from `BluetoothAdapter.getNameLengthForAdvertise()`. So
-   * [AdvertiseOptions.localName] is never advertised as given; only
-   * [AdvertiseOptions.setAdapterName] makes the advertised name match it.
+   * `setIncludeDeviceName(boolean)`, and the name that includes is the adapter's own. So
+   * [AdvertiseOptions.localName] is never advertised as given; only [AdvertiseOptions.setAdapterName]
+   * makes the advertised name match it.
    */
   fun startAdvertising(options: AdvertiseOptions, onResult: (error: String?) -> Unit) {
     val adapter = bluetoothAdapter
@@ -784,8 +748,8 @@ class GattServerManager(
       .setTimeout(options.timeoutMs)
       .build()
 
-    // Anything a passive scanner has to see goes in the advertisement and shares its 31-byte budget;
-    // the name and transmit power go in the scan response so they do not compete for it.
+    // Anything a passive scanner has to see goes in the advertisement and shares its 31-byte budget; the
+    // name and transmit power go in the scan response so they do not compete for it.
     val advData = AdvertiseData.Builder()
       .setIncludeDeviceName(false)
       .setIncludeTxPowerLevel(false)
@@ -841,9 +805,9 @@ class GattServerManager(
   }
 
   /**
-   * `AdvertiseSettings.setTimeout` stops advertising at the limit without invoking
-   * `AdvertiseCallback`, so [advertising] would otherwise stay set for the rest of the process. Only
-   * the flag is cleared — the platform has already stopped the advertisement itself.
+   * `AdvertiseSettings.setTimeout` stops advertising at the limit without invoking `AdvertiseCallback`,
+   * so [advertising] would otherwise stay set for the rest of the process. Only the flag is cleared —
+   * the platform has already stopped the advertisement itself.
    */
   private fun scheduleAdvertisingTimeout(timeoutMs: Int) {
     if (timeoutMs <= 0) return
@@ -864,8 +828,8 @@ class GattServerManager(
    */
   @SuppressLint("MissingPermission")
   private fun applyAdapterName(adapter: BluetoothAdapter, name: String) {
-    // compareAndSet, so repeatedly restarting advertising still restores the device's own name
-    // rather than the previous advertisement's.
+    // compareAndSet, so repeatedly restarting advertising still restores the device's own name rather
+    // than the previous advertisement's.
     val previous = adapter.name
     if (previous == null) {
       Log.w(TAG, "The current adapter name is unavailable, so it cannot be restored later")
@@ -884,26 +848,25 @@ class GattServerManager(
     if (adapter.setName(previous)) {
       originalAdapterName.compareAndSet(previous, null)
     } else {
-      // Retained for a later attempt: `setName` fails while the adapter is off, which is exactly
-      // when a teardown is most likely to run.
+      // Retained for a later attempt: `setName` fails while the adapter is off, which is exactly when a
+      // teardown is most likely to run.
       Log.w(TAG, "Could not restore the adapter name to \"$previous\" yet")
     }
   }
 
   /**
-   * Queues a notification for [deviceId] and reports the outcome through [onResult] — with `null`
-   * once the platform confirms delivery through `onNotificationSent`, or with the failure that
-   * stopped it. Throws only for problems detectable before the send is accepted into the queue.
+   * Queues a notification for [deviceId] and reports the outcome through [onResult] — with `null` once
+   * the platform confirms delivery through `onNotificationSent`. Throws only for problems detectable
+   * before the send is accepted into the queue.
    *
-   * The call no longer completes as soon as the payload is handed to the stack: a device may have
-   * one notification outstanding at a time, so anything sent while an earlier notification is
-   * still in flight waits its turn instead of being discarded by the stack.
+   * The call deliberately does not complete as soon as the payload is handed to the stack: a device may
+   * have one notification outstanding at a time, so anything sent while an earlier one is still in
+   * flight waits its turn instead of being discarded by the stack.
    *
    * [confirm] selects an indication over a notification, which the characteristic must declare the
-   * matching property for; [requireSubscription] additionally refuses the send when the device has
-   * not enabled that same transmission in its own CCCD. Clearing it sends anyway — the platform
-   * does not consult the CCCD before transmitting, so a caller that knows better than the
-   * descriptor keeps that option. The property check is not optional either way.
+   * matching property for; [requireSubscription] additionally refuses the send when the device has not
+   * enabled that same transmission in its own CCCD. Clearing it sends anyway, since the platform does
+   * not consult the CCCD before transmitting. The property check is not optional either way.
    */
   fun sendNotification(
     deviceId: String,
@@ -935,7 +898,7 @@ class GattServerManager(
       )
     }
 
-    // Refused before the send is even queued, so an oversized payload never reaches the stack.
+    // Refused before the send is queued, so an oversized payload never reaches the stack.
     mtuErrorFor(deviceId, value.size)?.let { throw it }
 
     val entry = QueuedNotification(device, characteristic, characteristicUuid, confirm, value, onResult)
@@ -950,8 +913,8 @@ class GattServerManager(
       }
       queue.waiting.addLast(entry)
     }
-    // The device may have gone away between the check above and the queue being registered, in
-    // which case nothing will ever drain it.
+    // The device may have gone away between the check above and the queue being registered, in which
+    // case nothing would ever drain it.
     if (!connectedDevices.containsKey(deviceId)) {
       failNotifications(deviceId, GattServerException("ERR_DEVICE_DISCONNECTED", "Device $deviceId disconnected"))
       return
@@ -960,10 +923,9 @@ class GattServerManager(
   }
 
   /**
-   * The current link budget for [deviceId], or `null` when the device is not connected.
-   *
-   * A device that has not negotiated an MTU is reported at the specification default rather than as
-   * unknown — that default is what the link actually carries until a negotiation happens.
+   * The current link budget for [deviceId], or `null` when the device is not connected. A device that
+   * has not negotiated an MTU is reported at the specification default rather than as unknown, because
+   * that default is what the link actually carries until a negotiation happens.
    */
   fun mtuFor(deviceId: String): DeviceMtu? {
     if (!connectedDevices.containsKey(deviceId)) return null
@@ -971,9 +933,9 @@ class GattServerManager(
   }
 
   /**
-   * The centrals connected to *this* server, from the module's own tracking of
-   * `onConnectionStateChange`. `BluetoothManager.getConnectedDevices(GATT_SERVER)` is deliberately
-   * not used: it reports centrals connected to any GATT server on the device, including other apps'.
+   * The centrals connected to *this* server, from the module's own tracking of `onConnectionStateChange`.
+   * `BluetoothManager.getConnectedDevices(GATT_SERVER)` is deliberately not used: it reports centrals
+   * connected to any GATT server on the device, including other apps'.
    */
   @SuppressLint("MissingPermission")
   fun connectedDeviceList(): List<Pair<String, String?>> =
@@ -985,10 +947,9 @@ class GattServerManager(
   fun isAdvertising(): Boolean = advertising.get()
 
   /**
-   * Asks the stack to drop [deviceId]. `cancelConnection` "disconnects an established connection, or
-   * cancels a connection attempt currently in progress" and returns nothing, so there is no outcome
-   * to report — the disconnection surfaces through `onConnectionStateChange`, which is what clears
-   * this device's state.
+   * Asks the stack to drop [deviceId]. `cancelConnection` returns nothing, so there is no outcome to
+   * report — the disconnection surfaces through `onConnectionStateChange`, which is what clears this
+   * device's state.
    */
   @SuppressLint("MissingPermission")
   fun disconnect(deviceId: String) {
@@ -999,7 +960,6 @@ class GattServerManager(
     server.cancelConnection(device)
   }
 
-  /** Two octets, little endian, as the descriptor value is defined. */
   private fun cccdBits(value: ByteArray): Int =
     (value[0].toInt() and 0xFF) or ((value[1].toInt() and 0xFF) shl 8)
 
@@ -1011,22 +971,19 @@ class GattServerManager(
     subscriptions[deviceId]?.get(characteristicUuid) ?: 0
 
   /**
-   * Reports whether [deviceId] has asked to receive updates for [characteristicUuid], by having
-   * set either the notification or the indication bit of its own CCCD. This is the coarse question
-   * the subscribe and unsubscribe events answer; a send asks [hasEnabled] about one specific bit.
+   * Whether [deviceId] set either the notification or the indication bit of its own CCCD. This is the
+   * coarse question the subscribe and unsubscribe events answer; a send asks [hasEnabled] about one
+   * specific bit.
    */
   private fun isSubscribed(deviceId: String, characteristicUuid: UUID): Boolean =
     clientConfiguration(deviceId, characteristicUuid) and
       (CCCD_NOTIFY_BIT or CCCD_INDICATE_BIT) != 0
 
   /**
-   * Reports whether [deviceId] enabled exactly the transmission [confirm] selects — the indication
-   * bit for an indication, the notification bit for a notification.
-   *
-   * "When a bit is set, that action shall be enabled, otherwise it will not be used" (Core
-   * Specification, Vol 3, Part G, Section 3.3.3.3), so a client that enabled only indications must
-   * not be handed a notification, and vice versa. Gating on either bit sent whichever the caller
-   * asked for regardless of what the client had actually configured.
+   * Whether [deviceId] enabled exactly the transmission [confirm] selects. "When a bit is set, that
+   * action shall be enabled, otherwise it will not be used" (Core Spec Vol 3, Part G, §3.3.3.3), so a
+   * client that enabled only indications must not be handed a notification, and vice versa — gating on
+   * either bit would send whichever the caller asked for regardless of the client's configuration.
    */
   private fun hasEnabled(deviceId: String, characteristicUuid: UUID, confirm: Boolean): Boolean {
     val required = if (confirm) CCCD_INDICATE_BIT else CCCD_NOTIFY_BIT
@@ -1034,14 +991,10 @@ class GattServerManager(
   }
 
   /**
-   * Refuses a transmission type the characteristic never declared.
-   *
-   * The Notify property "permits notifications of a Characteristic Value without acknowledgment"
-   * and Indicate "permits indications [...] with acknowledgment" (Core Specification, Vol 3,
-   * Part G, Table 3.5), and a client may set a CCCD bit "only [...] if the characteristic's
-   * properties have the [matching] bit set" (Table 3.11). Android's `notifyCharacteristicChanged`
-   * checks neither, so without this the stack would emit a PDU no client could legally have asked
-   * for.
+   * Refuses a transmission type the characteristic never declared. The specification permits each
+   * transmission only when its property is set (Core Spec Vol 3, Part G, Table 3.5) and lets a client
+   * enable the matching CCCD bit only then (Table 3.11). Android's `notifyCharacteristicChanged` checks
+   * neither, so without this the stack would emit a PDU no client could legally have asked for.
    */
   private fun confirmError(
     characteristic: BluetoothGattCharacteristic,
@@ -1067,7 +1020,7 @@ class GattServerManager(
 
   /**
    * Records a client's new CCCD value and reports the transition. Only the change from "receiving
-   * nothing" to "receiving something" and back is surfaced — switching between notifications and
+   * nothing" to "receiving something" and back is surfaced, because switching between notifications and
    * indications leaves the client subscribed throughout.
    */
   private fun applyClientConfiguration(
@@ -1099,7 +1052,6 @@ class GattServerManager(
     }
   }
 
-  /** Forgets a device's subscriptions and reports each one it still held as ended. */
   private fun clearSubscriptions(deviceId: String) {
     val forDevice = subscriptions.remove(deviceId) ?: return
     val server = gattServer
@@ -1113,9 +1065,9 @@ class GattServerManager(
   }
 
   /**
-   * Hands the next queued notification to the stack if the device's single outstanding slot is
-   * free. Entries the stack refuses outright never produce a callback, so they are completed here
-   * and the loop moves on to the next one.
+   * Hands the next queued notification to the stack if the device's single outstanding slot is free.
+   * Entries the stack refuses outright never produce a callback, so they are completed here and the loop
+   * moves on to the next one.
    */
   private fun pumpNotifications(deviceId: String) {
     val queue = notificationQueues[deviceId] ?: return
@@ -1138,13 +1090,12 @@ class GattServerManager(
   private fun dispatchNotification(deviceId: String, entry: QueuedNotification): GattServerException? {
     val server = gattServer
       ?: return GattServerException("ERR_NO_SERVER", "Server not open")
-    // Re-checked as well as at enqueue time: the MTU can change while an entry waits its turn, and
-    // the payload must never reach the stack if it cannot be carried intact.
+    // Re-checked as well as at enqueue time: the MTU can change while an entry waits its turn, and the
+    // payload must never reach the stack if it cannot be carried intact.
     mtuErrorFor(deviceId, entry.value.size)?.let { return it }
     return notifyValue(server, entry.device, entry.characteristic, entry.confirm, entry.value)
   }
 
-  /** Fails every queued and in-flight notification for [deviceId] and forgets the queue. */
   private fun failNotifications(deviceId: String, error: GattServerException) {
     val queue = notificationQueues.remove(deviceId) ?: return
     val abandoned = synchronized(queue) {
@@ -1163,13 +1114,10 @@ class GattServerManager(
   }
 
   /**
-   * Refuses a payload the link cannot carry in one notification, before anything is transmitted.
-   *
-   * The platform silently truncates an oversized notification rather than failing it — the stack
-   * logs "attribute value too long, to be truncated to N" while building the
-   * `ATT_HANDLE_VALUE_NTF` PDU — and a notification has no continuation mechanism, unlike a read
-   * that the central can finish with a Read Blob request. Sending it would therefore lose the tail
-   * with nothing to recover it.
+   * Refuses a payload the link cannot carry in one notification, before anything is transmitted. The
+   * platform silently truncates an oversized notification rather than failing it, and a notification has
+   * no continuation mechanism — unlike a read, which the central can finish with a Read Blob request —
+   * so sending it would lose the tail with nothing to recover it.
    */
   private fun mtuErrorFor(deviceId: String, size: Int): MtuException? {
     val negotiatedMtu = deviceMtu[deviceId]
@@ -1190,12 +1138,11 @@ class GattServerManager(
   }
 
   /**
-   * Holds one part of a long or reliable write until the execute arrives, and echoes it back.
-   *
-   * The response's handle, offset and part value "shall be set to the same value as in the
-   * corresponding ATT_PREPARE_WRITE_REQ PDU" (Core Specification, Vol 3, Part F, Section 3.4.6.2) —
-   * a Reliable Write client compares them and cancels the whole procedure if they differ. A refused
-   * prepare leaves the existing queue untouched, as the specification requires.
+   * Holds one part of a long or reliable write until the execute arrives, and echoes it back: the
+   * response's handle, offset and part value "shall be set to the same value as in the corresponding
+   * ATT_PREPARE_WRITE_REQ PDU" (Core Spec Vol 3, Part F, §3.4.6.2), which a Reliable Write client
+   * compares and cancels the whole procedure over. A refused prepare leaves the existing queue untouched,
+   * as the specification requires.
    */
   @SuppressLint("MissingPermission")
   private fun queuePreparedWrite(
@@ -1228,12 +1175,11 @@ class GattServerManager(
   }
 
   /**
-   * Executes [queued] as one atomic operation, in the order the parts were received.
-   *
-   * Parts are assembled onto each attribute's current value first and nothing is applied until every
-   * one of them has been validated, because the execute either wholly succeeds or wholly fails: a
-   * part starting past the end of its attribute is answered with "Invalid Offset" and discards the
-   * entire queue (Core Specification, Vol 3, Part F, Section 3.4.6.3).
+   * Executes [queued] as one atomic operation, in the order the parts were received. Parts are assembled
+   * onto each attribute's current value first and nothing is applied until every one of them has been
+   * validated, because the execute either wholly succeeds or wholly fails: a part starting past the end
+   * of its attribute is answered with "Invalid Offset" and discards the entire queue (Core Spec Vol 3,
+   * Part F, §3.4.6.3).
    */
   @SuppressLint("MissingPermission")
   private fun applyPreparedWrites(
@@ -1241,8 +1187,8 @@ class GattServerManager(
     requestId: Int,
     queued: List<PreparedWrite>,
   ) {
-    // Identity-keyed, which is what is wanted: these are the very instances the published database
-    // holds, and neither class overrides equals.
+    // Identity-keyed, which is what is wanted: these are the very instances the published database holds,
+    // and neither class overrides equals.
     val characteristicValues = LinkedHashMap<BluetoothGattCharacteristic, ByteArray>()
     val descriptorValues = LinkedHashMap<BluetoothGattDescriptor, ByteArray>()
 
@@ -1267,8 +1213,8 @@ class GattServerManager(
       }
     }
 
-    // The specification fixes a CCCD at two octets, so a prepared write that assembles to any other
-    // length is rejected here rather than parsed into a guess, exactly as a direct write would be.
+    // The specification fixes a CCCD at two octets, so a prepared write assembling to any other length is
+    // rejected rather than parsed into a guess, exactly as a direct write would be.
     descriptorValues.forEach { (descriptor, value) ->
       if (descriptor.uuid == CCCD_UUID && value.size != CCCD_VALUE_LENGTH) {
         Log.w(TAG, "onExecuteWrite: prepared CCCD write assembles to ${value.size} octets, rejecting")
@@ -1288,8 +1234,8 @@ class GattServerManager(
       }
     }
 
-    // A delegated write is JavaScript's to accept or reject, so the assembled value is withheld
-    // until it answers, and one pending request stands for the whole atomic execute.
+    // A delegated write is JavaScript's to accept or reject, so the assembled value is withheld until it
+    // answers, and one pending request stands for the whole atomic execute.
     val delegated = characteristicValues.keys.any { delegationFor(it).write }
     if (delegated) {
       registerPendingRequest(requestId, device.address, offset = 0, isRead = false)
@@ -1301,8 +1247,8 @@ class GattServerManager(
       gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
     }
 
-    // The reassembled value is reported once per attribute from offset 0, rather than replaying the
-    // fragments the client happened to split it into.
+    // Reported once per attribute from offset 0, rather than replaying the fragments the client happened
+    // to split the value into.
     characteristicValues.forEach { (characteristic, value) ->
       listener?.onCharacteristicWriteRequest(
         device.address, requestId, characteristic.service?.uuid?.toString() ?: "",
@@ -1312,9 +1258,8 @@ class GattServerManager(
   }
 
   /**
-   * Writes [part] into [current] at [offset], extending the value when the part runs past its end.
-   * Returns `null` for an offset beyond the current end, which the specification answers with
-   * "Invalid Offset" — an offset exactly at the end appends and is in range.
+   * Returns `null` for an offset beyond the current end, which the specification answers with "Invalid
+   * Offset". An offset exactly at the end appends and is in range.
    */
   private fun spliceAt(current: ByteArray, offset: Int, part: ByteArray): ByteArray? {
     if (offset > current.size) return null
@@ -1324,9 +1269,8 @@ class GattServerManager(
   }
 
   /**
-   * Records a request handed to JavaScript and arms the expiry that answers it if JavaScript never
-   * does. Called before the event is emitted, so a listener that responds synchronously still finds
-   * the request.
+   * Arms the expiry that answers a delegated request if JavaScript never does. Called before the event is
+   * emitted, so a listener that responds synchronously still finds the request.
    */
   private fun registerPendingRequest(requestId: Int, deviceId: String, offset: Int, isRead: Boolean) {
     val timeout = if (requestTimeoutMs > 0) Runnable { expireRequest(requestId) } else null
@@ -1351,7 +1295,6 @@ class GattServerManager(
     gattServer?.sendResponse(device, requestId, ATT_ERROR_UNLIKELY_ERROR, pending.offset, null)
   }
 
-  /** Forgets matching pending requests, cancelling the expiry each one armed. */
   private fun discardPendingRequests(predicate: (PendingRequest) -> Boolean) {
     val iterator = pendingRequests.entries.iterator()
     while (iterator.hasNext()) {
@@ -1365,26 +1308,24 @@ class GattServerManager(
   /**
    * Answers a pending read or write request.
    *
-   * A read response is deliberately not size-checked. An `ATT_READ_RSP` carries at most
-   * `ATT_MTU - 1` octets and the central continues a longer value with `ATT_READ_BLOB_REQ`, which
-   * arrives as another read request bearing an offset — so answering with more than fits is normal
-   * ATT, not a failure. This module's own automatic read path already answers with the whole
-   * remainder from the requested offset, so rejecting it here only ever penalised delegated reads
-   * for behaving identically.
+   * A read response is deliberately not size-checked: the central continues a value longer than one
+   * `ATT_READ_RSP` with `ATT_READ_BLOB_REQ`, so answering with more than fits is normal ATT rather than a
+   * failure, and the automatic read path already answers with the whole remainder from the requested
+   * offset.
    *
    * [offset] states where [value] begins within the attribute, and the response is rebased onto the
-   * offset the request actually asked for — so passing offset 0 with the whole value answers a Read
-   * Blob continuation correctly, and passing the request's own offset with a pre-sliced value works
-   * too. iOS honours the same contract.
+   * offset the request actually asked for — so passing offset 0 with the whole value answers a Read Blob
+   * continuation correctly, and passing the request's own offset with a pre-sliced value works too. iOS
+   * honours the same contract.
    */
   @SuppressLint("MissingPermission")
   fun sendResponse(deviceId: String, requestId: Int, status: Int, offset: Int, value: ByteArray) {
     val server = gattServer ?: throw IllegalStateException("Server not open")
     val device = connectedDevices[deviceId]
       ?: throw IllegalArgumentException("Device $deviceId not connected")
-    // Everything that could reject the call is checked before the pending entry is touched, so a
-    // failed attempt leaves the request answerable instead of stranding the central until its ATT
-    // transaction times out.
+    // Everything that could reject the call is checked before the pending entry is touched, so a failed
+    // attempt leaves the request answerable instead of stranding the central until its ATT transaction
+    // times out.
     val pending = pendingRequests[requestId]
       ?: throw GattServerException("REQUEST_NOT_FOUND", "Request $requestId not found or already responded")
     if (pending.deviceId != deviceId) {
@@ -1395,26 +1336,25 @@ class GattServerManager(
     }
     val payload = responsePayload(pending, requestId, offset, value)
 
-    // The offset handed to the stack is the request's own, so it always describes where `payload`
-    // sits within the attribute regardless of what the caller passed.
+    // The offset handed to the stack is the request's own, so it always describes where `payload` sits
+    // within the attribute regardless of what the caller passed.
     if (!server.sendResponse(device, requestId, status, pending.offset, payload)) {
       throw GattServerException(
         "ERR_RESPONSE",
         "The Bluetooth stack did not accept the response for request $requestId"
       )
     }
-    // Two-argument remove so a request id the framework has already reissued to another device is
-    // not consumed by this call.
+    // Two-argument remove, so a request id the framework has already reissued to another device is not
+    // consumed by this call.
     if (pendingRequests.remove(requestId, pending)) {
       pending.timeout?.let { timeoutHandler.removeCallbacks(it) }
     }
   }
 
   /**
-   * Rebases a supplied response value onto the offset the request asked for.
-   *
-   * The stack copies the value into the response PDU verbatim — it does not slice it by the offset,
-   * which for a read response is never even transmitted — so the alignment has to happen here.
+   * Rebases a supplied response value onto the offset the request asked for. The stack copies the value
+   * into the response PDU verbatim — it does not slice it by the offset, which for a read response is
+   * never even transmitted — so the alignment has to happen here.
    */
   private fun responsePayload(
     pending: PendingRequest,
@@ -1444,11 +1384,8 @@ class GattServerManager(
 
   /**
    * Hands one notification to the stack. Returns `null` when it was accepted — and only then will
-   * `onNotificationSent` arrive — or the failure that stopped it.
-   *
-   * The API 33 overload returns a `BluetoothStatusCodes` value and the older one a plain boolean
-   * ("true, if the notification has been triggered successfully"); both are checked, because a
-   * refused call produces no callback at all.
+   * `onNotificationSent` arrive. The API 33 overload reports a `BluetoothStatusCodes` value and the older
+   * one a plain boolean; both are checked, because a refused call produces no callback at all.
    */
   @SuppressLint("MissingPermission")
   private fun notifyValue(
@@ -1484,11 +1421,9 @@ class GattServerManager(
   }
 
   /**
-   * Replaces the mirrored value that a read of this characteristic is answered from.
-   *
-   * An address that names nothing in the published database is reported rather than dropped: the
-   * call used to return silently, so a mistyped UUID looked exactly like a successful update and
-   * the characteristic simply kept serving its old value forever.
+   * Replaces the mirrored value that a read of this characteristic is answered from. An address that
+   * names nothing in the published database is reported rather than dropped, so a mistyped UUID cannot
+   * look exactly like a successful update while the characteristic keeps serving its old value.
    */
   fun updateCharacteristicValue(serviceUuid: String, characteristicUuid: String, value: ByteArray) {
     val server = gattServer ?: throw GattServerException(

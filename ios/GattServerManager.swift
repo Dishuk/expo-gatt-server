@@ -1,35 +1,29 @@
 import CoreBluetooth
 
-/// Default ATT_MTU, in octets — Bluetooth Core Specification, Vol 3, Part G, Section 5.2.1.
+/// Default ATT_MTU, in octets — Core Spec Vol 3, Part G, §5.2.1.
 let defaultAttMtu = 23
 
-/// Octets an `ATT_HANDLE_VALUE_NTF` / `ATT_HANDLE_VALUE_IND` PDU spends before the value: a
-/// one-octet Attribute Opcode plus a two-octet Attribute Handle (Core Specification, Vol 3, Part F,
-/// Sections 3.4.7.1 and 3.4.7.2). The value it carries is therefore at most `ATT_MTU - 3` octets.
+/// Octets an `ATT_HANDLE_VALUE_NTF` / `ATT_HANDLE_VALUE_IND` PDU spends before the value: a one-octet
+/// Attribute Opcode plus a two-octet Attribute Handle (Core Spec Vol 3, Part F, §§3.4.7.1–3.4.7.2).
 let attNotificationHeaderSize = 3
 
 private let defaultAttMtuPayload = defaultAttMtu - attNotificationHeaderSize
 
 /// Upper bound on notifications parked while the CoreBluetooth transmit queue is full. That queue
 /// belongs to the peripheral manager rather than to any one central, so the bound is shared too.
-/// Without it a producer that outruns the link would grow the queue forever; exceeding it fails the
-/// call rather than dropping a payload silently.
+/// Without it a producer that outruns the link would grow the queue forever.
 private let maxQueuedNotifications = 64
 
-/// The ATT transaction timeout. "A transaction not completed within 30 seconds shall time out. Such a
-/// transaction shall be considered to have failed [...] No more Attribute Protocol requests,
-/// commands, indications or notifications shall be sent to the target device on this ATT bearer" —
-/// recovering then costs a whole new bearer (Core Specification, Vol 3, Part F, Section 3.3.3). A
-/// module timeout at or above it could never answer before the peer gives up, so it is the exclusive
-/// upper bound on `defaultRequestTimeoutMs` and on the configured value.
+/// The ATT transaction timeout. A transaction not completed within 30 s fails, and no further request,
+/// command, indication or notification may then be sent on that ATT bearer — recovering costs a whole
+/// new bearer (Core Spec Vol 3, Part F, §3.3.3). A module timeout at or above it could never answer
+/// before the peer gives up, so it is the exclusive upper bound on the request timeout.
 let attTransactionTimeoutMs = 30_000
 
 /// How long a request delegated to JavaScript may go unanswered before the module answers it itself.
-///
-/// Chosen to sit well inside `attTransactionTimeoutMs` — the peer is left 20 s of margin, so it
-/// receives a real ATT error response and its bearer stays usable, instead of the transaction failing
-/// and taking every subsequent notification and indication with it. It is still long enough for a
-/// handler doing genuine asynchronous work.
+/// Sits well inside `attTransactionTimeoutMs`, leaving the peer 20 s of margin so it receives a real
+/// ATT error response and its bearer stays usable, while still allowing a handler to do genuine
+/// asynchronous work.
 let defaultRequestTimeoutMs = 10_000
 
 enum GattServerError: Error {
@@ -105,15 +99,13 @@ enum GattServerError: Error {
     case .deviceDisconnected(let deviceId):
       return "Device \(deviceId) disconnected"
     case .noSubscriber(let deviceId, let characteristic):
-      // CoreBluetooth "ignores any centrals that haven't subscribed to the characteristic's
-      // value", so there is nothing to override on iOS — the send genuinely cannot happen.
       return "Device \(deviceId) has not subscribed to characteristic \(characteristic). " +
         "Wait for onCharacteristicSubscribed. CoreBluetooth only transmits to subscribed " +
         "centrals, so this cannot be overridden on iOS."
     case .confirmUnsupported(let characteristic, let confirm):
-      // CoreBluetooth has no confirm parameter at all — `updateValue` picks notification or
-      // indication from the declared properties — so the property check is the only thing standing
-      // between the caller's intent and silently getting the other one.
+      // `updateValue` has no confirm parameter and picks notification or indication from the declared
+      // properties, so this check is all that stands between the caller's intent and silently getting
+      // the other one.
       if confirm {
         return "Characteristic \(characteristic) does not declare the \"indicate\" property, so it " +
           "cannot send the acknowledged indication confirm: true asks for. Declare \"indicate\" on " +
@@ -139,23 +131,20 @@ struct DeviceMtu {
   /// Octets that fit in one notification or indication: `ATT_MTU - 3`.
   let maxNotificationPayload: Int
 
-  /// iOS only ever reports a payload length — `CBCentral.maximumUpdateValueLength` is "the maximum
-  /// amount of data, in bytes, that can be received by the central in a single notification or
-  /// indication" — so the ATT_MTU is reconstructed from it rather than read directly.
+  /// iOS only ever reports a payload length, `CBCentral.maximumUpdateValueLength`, so the ATT_MTU is
+  /// reconstructed from it rather than read directly.
   init(maxNotificationPayload: Int) {
     self.maxNotificationPayload = maxNotificationPayload
     self.mtu = maxNotificationPayload + attNotificationHeaderSize
   }
 }
 
-/// Identifies a characteristic within the configured GATT database.
 struct CharacteristicAddress: Hashable {
   let service: CBUUID
   let characteristic: CBUUID
 }
 
-/// Per-characteristic opt-in delegation of ATT request handling to JavaScript. Every flag defaults
-/// to `false`, which keeps the module answering the request itself.
+/// Every flag defaults to `false`, which keeps the module answering the request itself.
 struct CharacteristicDelegation: Equatable {
   var read = false
   var write = false
@@ -182,12 +171,11 @@ protocol GattServerManagerDelegate: AnyObject {
 
 /// Maps a status supplied by JavaScript onto the ATT error code CoreBluetooth transmits.
 ///
-/// An ATT error code is a single octet (Bluetooth Core Specification 5.4, Vol 3, Part F, Table
-/// 3.4) and `CBATTError.Code` models 0x00 through 0x11, so those map straight across and match
-/// what Android sends for the same call. The specification also defines 0x12, 0x13 and the
-/// application (0x80–0x9F) and profile (0xE0–0xFF) ranges, but CoreBluetooth has no case for them
-/// and `respond(to:withResult:)` only accepts a `CBATTError.Code`; anything unrepresentable is
-/// reported as the generic "unlikely error" rather than being downgraded to success.
+/// `CBATTError.Code` models 0x00 through 0x11 (Core Spec 5.4, Vol 3, Part F, Table 3.4), so those map
+/// straight across and match what Android sends. The specification also defines 0x12, 0x13 and the
+/// application and profile ranges, but `respond(to:withResult:)` accepts only a `CBATTError.Code`, so
+/// anything unrepresentable becomes the generic "unlikely error" rather than being downgraded to
+/// success.
 func attErrorCode(for status: Int) -> CBATTError.Code {
   switch status {
   case 0x00: return .success
@@ -212,20 +200,16 @@ func attErrorCode(for status: Int) -> CBATTError.Code {
   }
 }
 
-/// The Bluetooth Base UUID's trailing four groups — Core Specification, Vol 3, Part B,
-/// Section 2.5.1.
+/// The Bluetooth Base UUID's trailing four groups — Core Spec Vol 3, Part B, §2.5.1.
 private let bluetoothBaseUuidSuffix = "-0000-1000-8000-00805f9b34fb"
 
 extension CBUUID {
   /// The lowercase 128-bit spelling, which is what `java.util.UUID.toString` produces on Android.
   ///
-  /// `CBUUID.uuidString` is not that: it uppercases the 128-bit form, and echoes a 16-bit or 32-bit
-  /// UUID back in the short form it was constructed from. Reporting it raw made the same
-  /// characteristic arrive in event payloads spelled differently on each platform, so a consumer
-  /// comparing an event's UUID against its own configuration matched on Android and failed on iOS.
-  /// The short-form expansion is the specification's own aliasing rule, and is kept here as well as
-  /// in JavaScript because these UUIDs come back out of CoreBluetooth rather than from the
-  /// configuration.
+  /// `CBUUID.uuidString` is not that: it uppercases the 128-bit form and echoes a 16-bit or 32-bit
+  /// UUID back in the short form it was constructed from, which made the same characteristic arrive in
+  /// event payloads spelled differently on each platform. Normalising is repeated here as well as in
+  /// JavaScript because these UUIDs come back out of CoreBluetooth rather than from the configuration.
   var normalizedString: String {
     let lower = uuidString.lowercased()
     guard lower.count < 36 else { return lower }
@@ -256,7 +240,7 @@ class GattServerManager: NSObject {
     super.init()
   }
 
-  /// Invoked on the main queue for every `peripheralManagerDidUpdateState` callback.
+  /// Invoked on the main queue.
   var onStateChange: ((CBManagerState) -> Void)?
 
   private var peripheralManager: CBPeripheralManager?
@@ -276,16 +260,13 @@ class GattServerManager: NSObject {
 
   /// Centrals the module believes are connected, keyed by `CBCentral.identifier`.
   ///
-  /// `CBPeripheralManagerDelegate` declares no connection-level callback — the protocol is exactly
-  /// `peripheralManagerDidUpdateState`, `willRestoreState`, `didStartAdvertising`, `didAddService`,
-  /// `didSubscribeTo`, `didUnsubscribeFrom`, `didReceiveReadRequest`, `didReceiveWriteRequests`,
-  /// `peripheralManagerIsReadyToUpdateSubscribers` and the three L2CAP methods — so membership is
-  /// derived from the only signals CoreBluetooth does deliver: a subscribe, a read request or a
-  /// write request. A central is therefore discovered on its first ATT activity rather than when
-  /// the link is established.
+  /// `CBPeripheralManagerDelegate` declares no connection-level callback, so membership is derived
+  /// from the only signals CoreBluetooth does deliver — a subscribe, a read request or a write
+  /// request. A central is therefore discovered on its first ATT activity rather than when the link
+  /// is established.
   private var connectedCentrals: [String: CBCentral] = [:]
 
-  /// Last `maximumUpdateValueLength` observed per central, used purely to detect a change.
+  /// Last `maximumUpdateValueLength` observed per central, used purely to detect a change:
   /// CoreBluetooth has no MTU-changed callback, so the only opportunity to notice one is when a
   /// central next produces activity.
   private var centralPayloadLengths: [String: Int] = [:]
@@ -299,12 +280,10 @@ class GattServerManager: NSObject {
   // characteristic UUIDs that occur exactly once in the configuration, so a hit is unambiguous.
   private var delegationsByCharacteristic: [CBUUID: CharacteristicDelegation] = [:]
 
-  /// Notifications CoreBluetooth could not accept yet, oldest first. Apple documents that when
-  /// `updateValue(_:for:onSubscribedCentrals:)` returns `false` "because the underlying transmit
-  /// queue is full", the manager calls `peripheralManagerIsReady(toUpdateSubscribers:)` "when more
-  /// space in the transmit queue becomes available. After you receive this delegate method
-  /// callback, you may resend the update" — so exactly these payloads, in this order, are what has
-  /// to be resent.
+  /// Notifications CoreBluetooth could not accept yet, oldest first. When
+  /// `updateValue(_:for:onSubscribedCentrals:)` returns `false` because the transmit queue is full,
+  /// Apple documents that the update may be resent once `peripheralManagerIsReady` arrives — so
+  /// exactly these payloads, in this order, are what has to go out then.
   private var pendingNotifications: [QueuedNotification] = []
 
   private struct QueuedNotification {
@@ -318,9 +297,8 @@ class GattServerManager: NSObject {
 
   private struct PendingRequest {
     let request: CBATTRequest
-    /// Only a read response carries a value back to the central, so only a read request's `value`
-    /// is overwritten when the response is sent. A write request's `value` is the written data and
-    /// CoreBluetooth does not document overwriting it as supported.
+    /// Only a read response carries a value back to the central. A write request's `value` is the
+    /// written data, and CoreBluetooth does not document overwriting it as supported.
     let isRead: Bool
     /// The armed expiry, kept so answering or discarding the request can cancel it.
     let timeout: DispatchWorkItem?
@@ -351,12 +329,11 @@ class GattServerManager: NSObject {
     return delegationsByCharacteristic[characteristic.uuid] ?? CharacteristicDelegation.none
   }
 
-  /// Opens the peripheral manager and publishes `services`. `completion` runs exactly once on the
-  /// main queue — with `nil` only after every service is confirmed published, or with an error if
-  /// publishing fails or Bluetooth is unavailable.
+  /// Opens the peripheral manager and publishes `services`. `completion` runs exactly once on the main
+  /// queue — with `nil` only after every service is confirmed published.
   ///
-  /// `CBPeripheralManager.state` is `.unknown` until `peripheralManagerDidUpdateState` fires, and
-  /// services can only be added while powered on, so the completion is necessarily deferred.
+  /// The completion is necessarily deferred: `CBPeripheralManager.state` is `.unknown` until
+  /// `peripheralManagerDidUpdateState` fires, and services can only be added while powered on.
   func open(
     services: [CBMutableService],
     initialValues: [CBUUID: Data] = [:],
@@ -372,11 +349,10 @@ class GattServerManager: NSObject {
     peripheralManager?.state ?? .unknown
   }
 
-  /// Invokes `completion` once Bluetooth is known to be powered on, rather than sampling
-  /// `state` synchronously — a synchronous read right after `open` still returns `.unknown`,
-  /// because the state only becomes meaningful when `peripheralManagerDidUpdateState` fires.
-  /// Transient states (`.unknown`, `.resetting`) park the caller until the next definitive update;
-  /// terminal states fail it immediately.
+  /// Invokes `completion` once Bluetooth is known to be powered on, rather than sampling `state`
+  /// synchronously: a synchronous read right after `open` still returns `.unknown`, because the state
+  /// only becomes meaningful when `peripheralManagerDidUpdateState` fires. Transient states park the
+  /// caller until the next definitive update; terminal states fail it immediately.
   func whenPoweredOn(_ completion: @escaping (Error?) -> Void) {
     guard let peripheral = peripheralManager else {
       completion(GattServerError.serverStopped)
@@ -406,8 +382,6 @@ class GattServerManager: NSObject {
     }
   }
 
-  /// Publishes every configured service and completes the pending open once CoreBluetooth has
-  /// acknowledged all of them via `peripheralManager(_:didAdd:error:)`.
   private func publishConfiguredServices(on peripheral: CBPeripheralManager) {
     databasePublished = false
     servicesAwaitingRegistration = Set(serviceConfiguration.map { $0.uuid })
@@ -422,9 +396,9 @@ class GattServerManager: NSObject {
   }
 
   /// `startAdvertising:` documents its complete set of supported keys as
-  /// `CBAdvertisementDataLocalNameKey` and `CBAdvertisementDataServiceUUIDsKey`, so those are the
-  /// only two built here. Every other option is rejected before it reaches this point, except
-  /// `timeoutMs`, which is emulated.
+  /// `CBAdvertisementDataLocalNameKey` and `CBAdvertisementDataServiceUUIDsKey`, so those are the only
+  /// two built here. Every other option is rejected before this point, except `timeoutMs`, emulated
+  /// below.
   func startAdvertising(
     localName: String?,
     serviceUuids: [CBUUID]?,
@@ -478,22 +452,20 @@ class GattServerManager: NSObject {
   }
 
   /// Sends one notification and reports the outcome through `completion` — with `nil` once
-  /// CoreBluetooth has accepted the payload for transmission, or with the failure that stopped it.
-  /// Throws only for problems detectable before the payload joins the queue.
+  /// CoreBluetooth has accepted the payload for transmission. Throws only for problems detectable
+  /// before the payload joins the queue.
   ///
   /// A payload the transmit queue cannot take is retained and resent, in order, when the manager
-  /// reports it is ready again. Nothing else is resent: an unrelated central never receives an
+  /// reports it is ready again. Nothing else is resent, so an unrelated central never receives an
   /// unsolicited update because another central's send was throttled.
   ///
   /// A central that has not subscribed is reported as `ERR_NO_SUBSCRIBER` rather than treated as a
-  /// successful send. There is no override on iOS: `updateValue(_:for:onSubscribedCentrals:)`
-  /// "ignores any centrals that haven't subscribed to the characteristic's value".
+  /// successful send, with no override: `updateValue(_:for:onSubscribedCentrals:)` "ignores any
+  /// centrals that haven't subscribed to the characteristic's value".
   ///
-  /// `confirm` is validated against the characteristic's declared properties and then goes no
-  /// further, because CoreBluetooth offers nowhere to put it: `updateValue` takes no such parameter
-  /// and the system derives notification versus indication from those same properties. Validating
-  /// is therefore the only way the flag can mean anything here — a characteristic declaring exactly
-  /// one of the two then behaves identically to Android.
+  /// `confirm` is validated against the declared properties and then goes no further, because
+  /// `updateValue` takes no such parameter and derives notification versus indication from those same
+  /// properties. Validating is the only way the flag can mean anything here.
   func sendNotification(
     deviceId: String, serviceUuid: String,
     characteristicUuid: String, value: Data, confirm: Bool,
@@ -520,8 +492,8 @@ class GattServerManager: NSObject {
     // no one is listening for it.
     characteristicValues[charUUID] = value
 
-    // Connection and subscription are reported separately now, so an unknown central is told it is
-    // not connected rather than that it has not subscribed — the same distinction Android draws.
+    // Checked before the subscription, so an unknown central is told it is not connected rather than
+    // that it has not subscribed — the same distinction Android draws.
     guard connectedCentrals[deviceId] != nil else {
       throw GattServerError.deviceDisconnected(deviceId: deviceId)
     }
@@ -533,10 +505,9 @@ class GattServerManager: NSObject {
       )
     }
 
-    // Checked before the payload goes anywhere near CoreBluetooth. `updateValue` documents that a
-    // value exceeding `maximumUpdateValueLength` "will be truncated to fit", and a notification has
-    // no continuation mechanism — unlike a read, which the central can finish with a Read Blob
-    // request — so transmitting it would silently lose the tail.
+    // `updateValue` documents that a value exceeding `maximumUpdateValueLength` "will be truncated to
+    // fit", and a notification has no continuation mechanism — unlike a read, which the central can
+    // finish with a Read Blob request — so transmitting it would silently lose the tail.
     let maxPayload = central.maximumUpdateValueLength
     guard value.count <= maxPayload else {
       throw GattServerError.payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count)
@@ -573,9 +544,8 @@ class GattServerManager: NSObject {
       entry.completion(GattServerError.serverStopped)
       return true
     }
-    // Re-checked here as well as at enqueue time: the link budget can shrink while an entry waits
-    // for the transmit queue, and the payload must never reach CoreBluetooth if it cannot be
-    // carried intact.
+    // Re-checked as well as at enqueue time: the link budget can shrink while an entry waits for the
+    // transmit queue, and the payload must never reach CoreBluetooth if it cannot be carried intact.
     let maxPayload = entry.central.maximumUpdateValueLength
     guard entry.value.count <= maxPayload else {
       entry.completion(GattServerError.payloadExceedsMtu(
@@ -597,7 +567,6 @@ class GattServerManager: NSObject {
     return true
   }
 
-  /// Fails and drops every queued notification matching `predicate`.
   private func failPendingNotifications(
     _ error: GattServerError, where predicate: (QueuedNotification) -> Bool = { _ in true }
   ) {
@@ -609,9 +578,8 @@ class GattServerManager: NSObject {
     }
   }
 
-  /// Records a request handed to JavaScript and arms the expiry that answers it if JavaScript never
-  /// does. Called before the event is emitted, so a listener that responds synchronously still finds
-  /// the request.
+  /// Arms the expiry that answers a delegated request if JavaScript never does. Called before the event
+  /// is emitted, so a listener that responds synchronously still finds the request.
   private func registerPendingRequest(_ requestId: Int, request: CBATTRequest, isRead: Bool) {
     var timeout: DispatchWorkItem?
     if requestTimeoutMs > 0 {
@@ -634,7 +602,6 @@ class GattServerManager: NSObject {
     peripheralManager?.respond(to: pending.request, withResult: .unlikelyError)
   }
 
-  /// Forgets one pending request, cancelling the expiry it armed.
   @discardableResult
   private func discardPendingRequest(_ requestId: Int) -> PendingRequest? {
     guard let pending = pendingRequests.removeValue(forKey: requestId) else { return nil }
@@ -642,7 +609,6 @@ class GattServerManager: NSObject {
     return pending
   }
 
-  /// Forgets matching pending requests, cancelling the expiry each one armed.
   private func discardPendingRequests(where predicate: (PendingRequest) -> Bool) {
     for (requestId, pending) in pendingRequests where predicate(pending) {
       pending.timeout?.cancel()
@@ -655,14 +621,14 @@ class GattServerManager: NSObject {
   /// `offset` states where `value` begins within the attribute, and the response is rebased onto the
   /// offset the request actually asked for — so passing offset 0 with the whole value answers a Read
   /// Blob continuation correctly, and passing the request's own offset with a pre-sliced value works
-  /// too. This is the same contract Android honours.
+  /// too. Android honours the same contract.
   func sendResponse(
     deviceId: String, requestId: Int, status: Int,
     offset: Int, value: Data
   ) throws {
     // Everything that could reject the call is checked before the pending entry is consumed, so a
     // failed attempt leaves the request answerable instead of stranding the central until its ATT
-    // transaction times out. This is the ordering Android already used.
+    // transaction times out.
     guard let pending = pendingRequests[requestId] else {
       throw GattServerError.requestNotFound(requestId: requestId)
     }
@@ -684,20 +650,14 @@ class GattServerManager: NSObject {
     if pending.isRead {
       request.value = payload
     }
-    // A read response is deliberately not size-checked. An `ATT_READ_RSP` carries at most
-    // `ATT_MTU - 1` octets and the central continues a longer value with `ATT_READ_BLOB_REQ`, which
-    // arrives as another read request bearing an offset — so answering with more than fits is normal
-    // ATT, not a failure. Apple's own guidance is to assign the whole remainder from the request's
-    // offset and let the central "retrieve the entire value", and this module's automatic read path
-    // does exactly that, so rejecting it here would only have penalised delegated reads for
-    // behaving identically.
+    // Deliberately not size-checked: the central continues a value longer than one `ATT_READ_RSP` with
+    // `ATT_READ_BLOB_REQ`, so answering with more than fits is normal ATT. Apple's own guidance is to
+    // assign the whole remainder from the request's offset, which the automatic read path also does.
     peripheralManager?.respond(to: request, withResult: result)
   }
 
-  /// Rebases a supplied response value onto the offset the request asked for.
-  ///
-  /// `CBATTRequest.offset` is "the zero-based index of the first byte for the read or write" and is
-  /// read-only, and `respond(to:withResult:)` takes no offset — CoreBluetooth derives it from the
+  /// Rebases a supplied response value onto the offset the request asked for. `CBATTRequest.offset` is
+  /// read-only and `respond(to:withResult:)` takes no offset — CoreBluetooth derives it from the
   /// request — so honouring the caller's `offset` means aligning the value to it here.
   private func responsePayload(
     for pending: PendingRequest, requestId: Int, offset: Int, value: Data
@@ -722,16 +682,14 @@ class GattServerManager: NSObject {
   /// Replaces the mirrored value that a read of this characteristic is answered from.
   ///
   /// The address is checked against the published database even though the cache is keyed by
-  /// characteristic UUID alone. Writing an unchecked key used to succeed silently and leave the
-  /// value somewhere no read would ever look, which made a mistyped UUID indistinguishable from a
-  /// working update.
+  /// characteristic UUID alone, because writing an unchecked key would succeed silently and leave the
+  /// value somewhere no read would ever look.
   func updateCharacteristicValue(
     serviceUuid: String, characteristicUuid: String, value: Data
   ) throws {
     guard let peripheral = peripheralManager else { throw GattServerError.serverStopped }
-    // A database exists only while powered on — Apple documents that "the powered off state clears
-    // the local database" — so anything else is reported as the Bluetooth problem it is rather than
-    // as a missing characteristic.
+    // A database exists only while powered on — Apple documents that "the powered off state clears the
+    // local database" — so anything else is the Bluetooth problem it is, not a missing characteristic.
     guard peripheral.state == .poweredOn else {
       throw GattServerError.bluetoothUnavailable(state: peripheral.state)
     }
@@ -748,11 +706,10 @@ class GattServerManager: NSObject {
 
   /// Releases everything the server holds, so a later `open` starts from an empty database.
   ///
-  /// Unpublishing goes through `removeAllServices` rather than removing each entry of
-  /// `addedServices`: that mirror only holds what `peripheralManager(_:didAdd:error:)` has already
-  /// acknowledged, so a service still awaiting its callback — or one whose callback reported an
-  /// error — stayed in the shared GATT database for the lifetime of the process and collided with
-  /// the next `createServer`.
+  /// Unpublishing goes through `removeAllServices` rather than removing each entry of `addedServices`:
+  /// that mirror only holds what `peripheralManager(_:didAdd:error:)` has already acknowledged, so a
+  /// service still awaiting its callback — or one whose callback reported an error — would stay in the
+  /// shared GATT database for the lifetime of the process and collide with the next `createServer`.
   func stop() {
     stopAdvertising()
     completeOpen(GattServerError.serverStopped)
@@ -778,8 +735,7 @@ class GattServerManager: NSObject {
     onStateChange = nil
 
     // CoreBluetooth can outlive this reference and still deliver a queued callback, which would
-    // otherwise repopulate the state just cleared above. `delegate` is weak, so this is about
-    // stopping the callbacks rather than about ownership.
+    // otherwise repopulate the state just cleared above.
     peripheralManager?.delegate = nil
     peripheralManager = nil
   }
@@ -806,18 +762,16 @@ class GattServerManager: NSObject {
     return requestCounter
   }
 
-  /// Records ATT activity from `central` and reports a first sighting as a connection.
-  ///
-  /// The stored reference is always refreshed: CoreBluetooth may hand out a distinct `CBCentral`
-  /// instance per callback, and `maximumUpdateValueLength` is read from whichever one is current.
+  /// Records ATT activity from `central` and reports a first sighting as a connection. The stored
+  /// reference is always refreshed, because CoreBluetooth may hand out a distinct `CBCentral` instance
+  /// per callback and `maximumUpdateValueLength` is read from whichever one is current.
   @discardableResult
   private func noteActivity(from central: CBCentral) -> String {
     let deviceId = central.identifier.uuidString
     let isFirstSighting = connectedCentrals[deviceId] == nil
     connectedCentrals[deviceId] = central
     if isFirstSighting {
-      // CoreBluetooth exposes no name for a central — only `CBPeripheral` has one — so there is
-      // nothing truthful to report here.
+      // CoreBluetooth exposes no name for a central — only `CBPeripheral` has one.
       delegate?.onDeviceConnected(deviceId: deviceId, name: nil)
     }
 
@@ -830,18 +784,15 @@ class GattServerManager: NSObject {
     return deviceId
   }
 
-  /// The current link budget for `deviceId`, or `nil` when no such central is known.
-  ///
-  /// Read live from the retained `CBCentral` rather than from the change-detection cache, so the
-  /// answer is whatever CoreBluetooth reports right now.
+  /// The current link budget for `deviceId`, or `nil` when no such central is known. Read live from the
+  /// retained `CBCentral` rather than from the change-detection cache.
   func mtu(for deviceId: String) -> DeviceMtu? {
     guard let central = connectedCentrals[deviceId] else { return nil }
     return DeviceMtu(maxNotificationPayload: central.maximumUpdateValueLength)
   }
 
-  /// The centrals the module has derived from ATT activity. CoreBluetooth declares no
-  /// connection-level callback, so this is every central that has subscribed, read or written and not
-  /// since been dropped — not every central holding a link.
+  /// Every central that has subscribed, read or written and not since been dropped — not every central
+  /// holding a link, since CoreBluetooth declares no connection-level callback.
   var connectedDeviceIds: [String] {
     Array(connectedCentrals.keys)
   }
@@ -855,8 +806,8 @@ class GattServerManager: NSObject {
     peripheralManager?.isAdvertising ?? false
   }
 
-  /// Drops every trace of `deviceId` and reports the disconnection exactly once. A device that was
-  /// never seen, or that has already been reported, produces nothing.
+  /// Drops every trace of `deviceId` and reports the disconnection exactly once: a device that was
+  /// never seen, or has already been reported, produces nothing.
   private func markDisconnected(_ deviceId: String, reason: GattServerError) {
     guard connectedCentrals.removeValue(forKey: deviceId) != nil else { return }
     centralPayloadLengths.removeValue(forKey: deviceId)
@@ -873,17 +824,17 @@ extension GattServerManager: CBPeripheralManagerDelegate {
 
     switch peripheral.state {
     case .poweredOn:
-      // Apple documents that "the powered off state clears the local database; in this case you
-      // must explicitly re-add all services". `serviceConfiguration` is retained for exactly this
-      // reason, so every transition to powered on re-publishes it — the first one included.
+      // Apple documents that "the powered off state clears the local database; in this case you must
+      // explicitly re-add all services", which is why `serviceConfiguration` is retained and every
+      // transition to powered on re-publishes it — the first one included.
       publishConfiguredServices(on: peripheral)
       flushReadinessWaiters(nil)
     case .unknown, .resetting:
       // Transient — a further state update is coming, so neither fail nor publish yet.
       break
     default:
-      // Any state below powered on drops the published database and disconnects every central,
-      // so discard the mirrored state rather than letting it go stale.
+      // Any state below powered on drops the published database and disconnects every central, so the
+      // mirrored state is discarded rather than left to go stale.
       let error = GattServerError.bluetoothUnavailable(state: peripheral.state)
       databasePublished = false
       servicesAwaitingRegistration.removeAll()
@@ -903,8 +854,8 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       addedServices.removeAll()
 
       // Apple documents that a state below powered on means "any connected centrals have been
-      // disconnected", so this is the one moment iOS can report a disconnection for a central that
-      // never subscribed to anything.
+      // disconnected", so this is the one moment iOS can report a disconnection for a central that never
+      // subscribed to anything.
       let disconnected = Array(connectedCentrals.keys)
       connectedCentrals.removeAll()
       centralPayloadLengths.removeAll()
@@ -955,9 +906,9 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     central: CBCentral,
     didSubscribeTo characteristic: CBCharacteristic
   ) {
-    // Subscribing is one of the activity signals a connection is derived from, but it no longer
-    // doubles as the connection event: a central that subscribes to three characteristics is one
-    // connection, and `noteActivity` reports it once.
+    // Subscribing is one of the activity signals a connection is derived from, but it does not double
+    // as the connection event: a central that subscribes to three characteristics is one connection,
+    // which `noteActivity` reports once.
     let deviceId = noteActivity(from: central)
     var subs = subscribedCentrals[deviceId] ?? [:]
     subs[characteristic.uuid] = central
@@ -985,11 +936,10 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     failPendingNotifications(.deviceDisconnected(deviceId: deviceId)) {
       $0.deviceId == deviceId && $0.characteristicUuid == characteristic.uuid
     }
-    // CoreBluetooth delivers this same callback whether the central deliberately cleared its
-    // Client Characteristic Configuration or simply went away, and offers nothing to tell the two
-    // apart, so losing the last subscription is the only disconnect signal available for a
-    // subscribed central. A central that unsubscribes but stays connected is therefore reported as
-    // disconnected; a later read or write re-discovers it and reports a fresh connection.
+    // CoreBluetooth delivers this same callback whether the central cleared its Client Characteristic
+    // Configuration or simply went away, and offers nothing to tell the two apart, so losing the last
+    // subscription is the only disconnect signal available. A central that unsubscribes but stays
+    // connected is therefore reported as disconnected, and a later read or write re-discovers it.
     if subscribedCentrals[deviceId]?.isEmpty == true {
       markDisconnected(deviceId, reason: .deviceDisconnected(deviceId: deviceId))
     }
@@ -1001,18 +951,16 @@ extension GattServerManager: CBPeripheralManagerDelegate {
   ) {
     noteActivity(from: request.central)
 
-    // An opted-in characteristic always reaches JS. A configured initial value is served from this
-    // cache rather than the CBMutableCharacteristic initialiser, so without the opt-in a
-    // characteristic declared with `value` would never produce a single read event.
+    // An opted-in characteristic always reaches JS. A configured initial value is served from this cache
+    // rather than the CBMutableCharacteristic initialiser, so without the opt-in a characteristic
+    // declared with `value` would never produce a single read event.
     if !delegation(for: request.characteristic).read,
        let value = characteristicValues[request.characteristic.uuid] {
       let offset = request.offset
 
-      // An offset past the end of the value is answered with the error the specification requires —
-      // 0x07 "Invalid Offset", `CBATTError.invalidOffset` (Core Specification, Vol 3, Part F,
-      // Section 3.4.1.1) — rather than handed to a listener the characteristic never opted in to,
-      // which left the central waiting for its ATT transaction to time out. This is also exactly
-      // what Apple's own peripheral-role guidance prescribes. An offset equal to the length is
+      // An offset past the end is answered with `CBATTError.invalidOffset`, 0x07 (Core Spec Vol 3,
+      // Part F, §3.4.1.1), rather than handed to a listener the characteristic never opted in to, which
+      // left the central waiting for its ATT transaction to time out. An offset equal to the length is
       // in range and answered with an empty value.
       if offset > value.count {
         peripheral.respond(to: request, withResult: .invalidOffset)
@@ -1045,11 +993,10 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       noteActivity(from: request.central)
     }
 
-    // Apple documents that `respond(to:withResult:)` must be called exactly once per callback,
-    // passing the first request of the array, and that the batch is all-or-nothing: "if you can't
-    // fulfill an individual request, you shouldn't fulfill any of them". So a delegated batch is
-    // registered as a single pending request backed by `first`, every event it produces carries
-    // that one id, and the first `sendResponse` for it answers the whole batch.
+    // Apple documents that `respond(to:withResult:)` must be called exactly once per callback, passing
+    // the first request of the array, and that the batch is all-or-nothing: "if you can't fulfill an
+    // individual request, you shouldn't fulfill any of them". So a delegated batch is one pending
+    // request backed by `first`, and the first `sendResponse` for its id answers the whole batch.
     let batchId = nextRequestId()
     let delegated = requests.contains { delegation(for: $0.characteristic).write }
 
@@ -1083,8 +1030,8 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     }
   }
 
-  /// Resends only the payloads that were actually refused, oldest first, and stops as soon as the
-  /// transmit queue fills again so the rest keep their place in line.
+  /// Resends only the payloads that were actually refused, oldest first, stopping as soon as the transmit
+  /// queue fills again so the rest keep their place in line.
   func peripheralManagerIsReady(_ peripheral: CBPeripheralManager) {
     while let next = pendingNotifications.first {
       guard deliver(next) else { return }
