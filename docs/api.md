@@ -11,6 +11,7 @@ Complete reference for all exported functions, types, events, and constants.
   - [sendNotification](#sendnotification)
   - [sendResponse](#sendresponse)
   - [updateCharacteristicValue](#updatecharacteristicvalue)
+  - [getBluetoothState](#getbluetoothstate)
   - [getMtu](#getmtu)
   - [getConnectedDevices](#getconnecteddevices)
   - [disconnectDevice](#disconnectdevice)
@@ -26,6 +27,7 @@ Complete reference for all exported functions, types, events, and constants.
   - [addMtuChangedListener](#addmtuchangedlistener)
   - [addCharacteristicSubscribedListener](#addcharacteristicsubscribedlistener)
   - [addCharacteristicUnsubscribedListener](#addcharacteristicunsubscribedlistener)
+  - [addBluetoothStateChangedListener](#addbluetoothstatechangedlistener)
 - [Types](#types)
 - [Constants](#constants)
 - [Error Codes](#error-codes)
@@ -75,10 +77,10 @@ configuration used. The spelling the consumer passed is deliberately not echoed 
   both platforms, and events also arrive for attributes that were never configured -- for which there
   is no original spelling to restore.
 
-iOS needed a second fix for this to hold: `CBUUID.uuidString` uppercases the 128-bit form and echoes a
-short UUID back in the short form it was built from, while Java's `UUID.toString` is always lowercase
-128-bit. The same characteristic therefore used to arrive spelled differently on each platform. iOS now
-emits the normalised spelling.
+This also holds for UUIDs that come back out of the platform rather than from the configuration, which
+takes a second normalisation on iOS: `CBUUID.uuidString` uppercases the 128-bit form and echoes a short
+UUID back in the short form it was built from, while Java's `UUID.toString` is always lowercase 128-bit.
+iOS therefore re-spells every UUID it emits.
 
 `deviceId` is **not** affected. It is an opaque handle -- a MAC address on Android, a
 `CBCentral.identifier` on iOS -- not a Bluetooth UUID, and it is passed straight back to `getMtu`,
@@ -96,8 +98,7 @@ Whether the native module is present, and therefore whether anything else here c
 
 **Importing this package never throws, whatever this returns.** The module is resolved with
 `requireOptionalNativeModule`, which yields `null` instead of raising, so a bundle that only uses BLE
-conditionally is safe to `import` from unconditionally. `requireNativeModule` threw at *import* time,
-which took down any bundle that reached the import at all.
+conditionally is safe to `import` from unconditionally.
 
 `false` on web -- this package publishes a GATT server, which needs the peripheral role, and Web
 Bluetooth implements only the central role -- and in any binary that does not contain the module,
@@ -139,9 +140,40 @@ Initialize the native BLE GATT server with the given services and characteristic
 | `services` | `GattServiceConfig[]` | -- | Array of service definitions |
 | `options.requestTimeoutMs` | `number` | `10000` | How long a delegated request may go unanswered before the module answers it itself |
 
-**Throws** if Bluetooth permission is not granted (iOS: authorization check, Android: `BLUETOOTH_CONNECT` runtime permission).
+Must be called before `startAdvertising`. Calling it again **replaces** the existing server: the
+previous one is stopped first, so an explicit `stopServer` in between is not required.
 
-Must be called before `startAdvertising`. Call `stopServer` before calling `createServer` again.
+**The promise resolves only once every service is confirmed published**, so a resolved `createServer`
+means the database really is there to advertise. On iOS that means waiting for CoreBluetooth to reach
+`poweredOn` and acknowledge each service; on Android the services are registered strictly one at a
+time, because `BluetoothGattServer.addService` documents "do not add another service before this
+callback".
+
+**Rejects** with:
+
+| Code | When |
+|---|---|
+| `ERR_PERMISSION` | iOS: `CBManager.authorization` is denied or restricted. Android: `BLUETOOTH_CONNECT` is not granted (API 31+) |
+| `ERR_NO_CONTEXT` | Android only: no React context is available, so the permission could not be checked |
+| `ERR_UNSUPPORTED` | iOS only: the configuration asks for a property, permission or descriptor CoreBluetooth cannot express -- see the type tables below |
+| `ERR_BLUETOOTH` | iOS: Bluetooth is off, unsupported or unauthorized when the manager reports its state |
+| `ERR_CREATE_SERVER` | A service failed to publish, the configuration was malformed, or -- **on Android only** -- Bluetooth is off or the device has no adapter |
+
+> Bluetooth being off during `createServer` is reported as `ERR_BLUETOOTH` on iOS but as
+> `ERR_CREATE_SERVER` on Android. Check [`getBluetoothState`](#getbluetoothstate) first rather than
+> branching on the code.
+
+Invalid configuration is rejected in the shared TypeScript layer before either platform sees it, as a
+plain `Error` rather than a coded one: a malformed UUID, a byte outside `0`--`255`, an unrecognised
+service type, characteristic property or permission name, a `requestTimeoutMs` outside its range, or a
+descriptor declaring the Client Characteristic Configuration UUID.
+
+#### Delegating requests to JavaScript
+
+By default the module answers every ATT request itself -- reads from the characteristic's cached
+value, writes with a success response. Set
+[`delegate`](#characteristicdelegateconfig) on a characteristic to hand its requests to JavaScript
+instead, and answer them with [`sendResponse`](#sendresponse).
 
 #### Unanswered requests
 
@@ -178,7 +210,7 @@ Begin BLE advertisement. The device becomes visible to nearby scanners.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `config.localName` | `string` | -- | Local name to advertise. **iOS only** -- see below |
+| `config.localName` | `string` | -- | Local name to advertise. Honoured verbatim on iOS only; **Android has no per-advertisement local name** -- see below |
 | `config.serviceUuids` | `string[]` | -- | Service UUIDs to advertise |
 | `config.includeTxPowerLevel` | `boolean` | `false` | Include TX power level. Android only |
 | `config.connectable` | `boolean` | `true` | Accept incoming connections. `false` is Android only |
@@ -190,7 +222,26 @@ Begin BLE advertisement. The device becomes visible to nearby scanners.
 | `config.android.includeDeviceName` | `boolean` | `localName !== undefined` | Include the device's own Bluetooth name in the scan response |
 | `config.android.setAdapterName` | `boolean` | `false` | Rename the device's Bluetooth adapter to `localName` |
 
-**Throws** if Bluetooth is not powered on (iOS) or `BLUETOOTH_ADVERTISE` permission is missing (Android). `android.setAdapterName` additionally requires `BLUETOOTH_CONNECT` on API 31+, and rejects with `ERR_ADVERTISE` when no `localName` is supplied.
+Requires a server: `startAdvertising` before `createServer` rejects with `ERR_NO_SERVER`.
+
+On iOS the call **waits** for Bluetooth to reach a definitive state rather than sampling it, because
+`CBPeripheralManager.state` is `unknown` until its first callback arrives -- so calling
+`startAdvertising` immediately after `createServer` is safe. A terminal state rejects with
+`ERR_BLUETOOTH`, or `ERR_PERMISSION` when Bluetooth is unauthorized.
+
+**Rejects** with:
+
+| Code | When |
+|---|---|
+| `ERR_NO_SERVER` | No server exists -- call `createServer` first |
+| `ERR_PERMISSION` | Android: `BLUETOOTH_ADVERTISE` is not granted, or `BLUETOOTH_CONNECT` is not granted while `android.setAdapterName` is set (API 31+). iOS: Bluetooth is unauthorized |
+| `ERR_NO_CONTEXT` | Android only: no React context, so the permission could not be checked |
+| `ERR_UNSUPPORTED` | iOS only: `manufacturerData`, `serviceData` or `connectable: false` was supplied |
+| `ERR_BLUETOOTH` | iOS only: Bluetooth is off or unsupported |
+| `ERR_ADVERTISE` | The platform refused the advertisement -- data over the 31-byte budget, too many advertisers, already started, or `android.setAdapterName` without a `localName` |
+
+An invalid `mode`, `txPowerLevel`, `timeoutMs`, `companyId` or byte value is rejected in the shared
+TypeScript layer as a plain `Error`, before either platform sees it.
 
 #### Platform support for advertising options
 
@@ -207,7 +258,9 @@ Begin BLE advertisement. The device becomes visible to nearby scanners.
 
 The split is deliberate. `mode`, `txPowerLevel` and `includeTxPowerLevel` are hints about radio behaviour: the advertisement still means the same thing and a peer still finds it, so rejecting them would force every cross-platform app to branch on `Platform.OS` purely to tune Android battery use. `manufacturerData`, `serviceData` and `connectable: false` change what a scanner *observes* -- a central filtering on manufacturer data would never find a peripheral whose manufacturer data was quietly dropped -- so they fail loudly instead.
 
-`mode` and `txPowerLevel` now default to Android's own platform defaults (`ADVERTISE_MODE_LOW_POWER`, `ADVERTISE_TX_POWER_MEDIUM`). Earlier versions hardcoded `ADVERTISE_MODE_LOW_LATENCY`, which the platform documents as having "the highest power consumption" and as something that "should not be used for continuous background advertising". Pass `mode: 'lowLatency'` to get the old behaviour back.
+`mode` and `txPowerLevel` default to Android's own platform defaults (`ADVERTISE_MODE_LOW_POWER`, `ADVERTISE_TX_POWER_MEDIUM`). Pass `mode: 'lowLatency'` for the shortest discovery latency, which the platform documents as having "the highest power consumption" and as something that "should not be used for continuous background advertising".
+
+`timeoutMs` is bounded at `180000` on both platforms -- the limit `AdvertiseSettings.Builder.setTimeout` enforces -- so one configuration behaves the same either side. On iOS it is **emulated** by a module timer that calls `stopAdvertising` when it fires, matching Android's behaviour of simply stopping with no error and no callback. Because it is a process-local timer, it only holds while the process is alive; `isAdvertising` goes `false` when it fires on either platform.
 
 `serviceUuids`, `manufacturerData` and `serviceData` all go in the advertisement itself, where a passive scanner sees them, and share its 31-byte budget; the device name and TX power go in the scan response so they do not compete for it. An over-budget advertisement rejects with `ERR_ADVERTISE` ("Advertise data too large").
 
@@ -218,9 +271,7 @@ The split is deliberate. `mode`, `txPowerLevel` and `includeTxPowerLevel` are hi
 **Android has no per-advertisement local name.** `AdvertiseData.Builder` exposes only `setIncludeDeviceName(boolean)`, and the name that flag includes is the *adapter's* -- `BluetoothLeAdvertiser` sizes the field from `BluetoothAdapter.getNameLengthForAdvertise()`. No public API writes an arbitrary Local Name into an advertisement. Android therefore has two options, neither of which advertises `localName` as given:
 
 - **`android.includeDeviceName`** (the default whenever `localName` is set) advertises the name the device already has, in the scan response. Nothing is mutated.
-- **`android.setAdapterName`** renames the adapter to `localName` so scanners see the requested string. This changes the phone's **system-wide** Bluetooth name -- visible in the device's own Bluetooth settings and to every peer, over Classic as well as LE. The module records the previous name and restores it on `stopAdvertising`, `stopServer`, or module destruction, but restoration is best-effort: `BluetoothAdapter.setName` fails while the adapter is off, and a process killed while advertising never runs it. Prefer `includeDeviceName` unless the exact advertised name genuinely matters.
-
-Earlier versions renamed the adapter unconditionally whenever `localName` was set, and never restored it.
+- **`android.setAdapterName`** renames the adapter to `localName` so scanners see the requested string. It defaults to `false`, so **nothing is renamed unless the app asks for it.** This changes the phone's **system-wide** Bluetooth name -- visible in the device's own Bluetooth settings and to every peer, over Classic as well as LE. The module records the previous name and restores it on `stopAdvertising`, `stopServer`, or module destruction, but restoration is best-effort: `BluetoothAdapter.setName` fails while the adapter is off, and a process killed while advertising never runs it. Prefer `includeDeviceName` unless the exact advertised name genuinely matters.
 
 ---
 
@@ -230,7 +281,12 @@ Earlier versions renamed the adapter unconditionally whenever `localName` was se
 stopAdvertising(): void
 ```
 
-Stop BLE advertisement. Does not disconnect existing connections or remove services.
+Stop BLE advertisement. Synchronous, and never throws -- including when the native module is absent,
+in which case nothing can be advertising anyway.
+
+Does **not** disconnect existing connections or remove services. A `startAdvertising` promise still
+in flight rejects with `ERR_ADVERTISE`, since the advertisement it was waiting on has been cancelled.
+On Android this is also where the adapter name is restored if `android.setAdapterName` changed it.
 
 ---
 
@@ -297,7 +353,7 @@ Rejects with `ERR_NO_SUBSCRIBER` when the target device has not enabled the *spe
 On Android this is checked against that device's own Client Characteristic Configuration bits: bit 0
 enables notifications, bit 1 enables indications (Vol 3, Part G, Table 3.11), and "when a bit is set,
 that action shall be enabled, otherwise it will not be used" (Section 3.3.3.3). A client that enabled
-only indications is therefore no longer sent a notification. Passing `requireSubscription: false`
+only indications is therefore never sent a notification. Passing `requireSubscription: false`
 sends anyway, since the platform transmits without consulting the descriptor.
 
 iOS cannot make the distinction at all -- CoreBluetooth reports a subscription without saying which
@@ -318,15 +374,31 @@ stream against the connection instead of overrunning it.
 > **Android:** the platform allows one outstanding notification per device -- "when multiple
 > notifications are to be sent, an application must wait for this callback to be received before
 > sending additional notifications"
-> ([`onNotificationSent`](https://developer.android.com/reference/android/bluetooth/BluetoothGattServerCallback#onNotificationSent(android.bluetooth.BluetoothDevice,%20int))).
-> Sends beyond that used to be dropped by the stack while the promise still resolved.
+> ([`onNotificationSent`](https://developer.android.com/reference/android/bluetooth/BluetoothGattServerCallback#onNotificationSent(android.bluetooth.BluetoothDevice,%20int))),
+> so the module holds the rest in a per-device queue and hands them over one at a time.
 
 > **iOS:** a payload CoreBluetooth's transmit queue cannot take is held and resent when
 > [`peripheralManagerIsReady(toUpdateSubscribers:)`](https://developer.apple.com/documentation/corebluetooth/cbperipheralmanagerdelegate/peripheralmanagerisready(toupdatesubscribers:))
 > reports space. Only the refused payloads are resent, in order -- an unrelated central never
 > receives an unsolicited update because another central's send was throttled.
 
-**Throws** `PAYLOAD_EXCEEDS_MTU` when `value` is longer than the link can carry in one notification, checked **before** anything is transmitted -- nothing is sent and the payload is not truncated. Size payloads against [`getMtu`](#getmtu)`.maxNotificationPayload` to avoid it. Also throws `ERR_NOTIFY` when the stack refuses or fails the send, `ERR_NOTIFY_QUEUE_FULL` when too many sends are already waiting for the same device, `ERR_DEVICE_DISCONNECTED` when the central is not connected or goes away before a queued notification is delivered, and `ERR_NO_SUBSCRIBER` when it has not enabled notifications or indications on the characteristic.
+**Rejects** with:
+
+| Code | When |
+|---|---|
+| `PAYLOAD_EXCEEDS_MTU` | `value` is longer than the link can carry in one notification. Checked **before** anything is transmitted, and re-checked if the MTU shrinks while the send is queued -- nothing is sent and the payload is not truncated. Size payloads against [`getMtu`](#getmtu)`.maxNotificationPayload` |
+| `ERR_CONFIRM_UNSUPPORTED` | The characteristic does not declare the property `confirm` asks for |
+| `ERR_NO_SUBSCRIBER` | The device has not enabled the transmission on the characteristic |
+| `ERR_NOTIFY_QUEUE_FULL` | 64 sends are already waiting for the same device (iOS: for the peripheral manager's transmit queue). Await earlier sends first |
+| `ERR_DEVICE_DISCONNECTED` | The central is not connected, or went away before a queued notification was delivered |
+| `ERR_NOTIFY` | The stack refused the send, or reported it as undelivered |
+| `ERR_NO_SERVER` | No server exists, or it was stopped while the send was queued |
+| `ERR_BLUETOOTH` | Bluetooth was turned off while the send was queued |
+
+> **Android reports a bad address less specifically.** An unknown `deviceId`, `serviceUuid` or
+> `characteristicUuid` rejects with `ERR_NOTIFY` there, where iOS uses `ERR_DEVICE_DISCONNECTED` and
+> `ERR_CHARACTERISTIC_NOT_FOUND`. The message names the problem on both platforms; only the code
+> differs.
 
 ---
 
@@ -342,15 +414,22 @@ sendResponse(
 ): Promise<void>
 ```
 
-Respond to a characteristic read request forwarded from the native layer.
+Answer a pending read or write request -- one delivered by
+[`addCharacteristicReadRequestListener`](#addcharacteristicreadrequestlistener) or by
+[`addCharacteristicWriteRequestListener`](#addcharacteristicwriterequestlistener) with
+`responseNeeded: true`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `deviceId` | `string` | Requesting device identifier |
-| `requestId` | `number` | Request ID from the read event |
-| `status` | `number` | `GATT_SUCCESS` or an `ATT_ERROR_*` code |
-| `offset` | `number` | The offset within the attribute at which `value` begins |
-| `value` | `number[]` | Response byte array, starting at `offset` |
+| `deviceId` | `string` | Requesting device identifier, from the event |
+| `requestId` | `number` | Request ID from the event |
+| `status` | `number` | `GATT_SUCCESS` or an `ATT_ERROR_*` code. Must be an integer `0`--`255`, since an ATT error code is a single octet |
+| `offset` | `number` | The offset within the attribute at which `value` begins. Must be an integer `0`--`65535` |
+| `value` | `number[]` | Response byte array, starting at `offset`. Not transmitted for a write -- an `ATT_WRITE_RSP` carries no value -- so pass `[]` |
+
+Answering a write with an `ATT_ERROR_*` status is the **only** way to reject a write, and it requires
+the characteristic to be configured with [`delegate.write`](#characteristicdelegateconfig); every
+other write is already answered by the module before the event is emitted.
 
 `offset` says where `value` begins within the attribute, and the response is rebased onto the offset
 the request actually asked for. So both of these are correct and equivalent, on both platforms:
@@ -363,10 +442,16 @@ await sendResponse(deviceId, requestId, GATT_SUCCESS, 0, wholeValue);
 await sendResponse(deviceId, requestId, GATT_SUCCESS, event.offset, wholeValue.slice(event.offset));
 ```
 
-**Throws** `REQUEST_NOT_FOUND` if the request ID is invalid or already responded to,
-`REQUEST_DEVICE_MISMATCH` if the request belongs to a different device than `deviceId`, and
-`ERR_RESPONSE_OFFSET` if `offset` is past the offset the request asked for -- which would leave the
-requested bytes missing from the response.
+**Rejects** with `REQUEST_NOT_FOUND` if the request ID is invalid, already responded to, or expired
+after `createServer`'s `requestTimeoutMs`; `REQUEST_DEVICE_MISMATCH` if the request belongs to a
+different device than `deviceId`; `ERR_RESPONSE_OFFSET` if `offset` is past the offset the request
+asked for -- which would leave the requested bytes missing from the response; `ERR_NO_SERVER` if no
+server exists; and `ERR_RESPONSE` if the Bluetooth stack does not accept the response. A `status`,
+`offset` or byte value outside its range is rejected as a plain `Error` before either platform sees
+it.
+
+A rejected call leaves the request still answerable, rather than consuming it -- so a mistake here
+does not strand the central until its own ATT transaction times out.
 
 `value` is **not** size-checked against the MTU. An `ATT_READ_RSP` carries at most `ATT_MTU - 1`
 octets and the central finishes a longer value with a Read Blob request, which arrives as another
@@ -384,17 +469,42 @@ updateCharacteristicValue(
 ): Promise<void>
 ```
 
-Update the cached value of a characteristic. Subsequent read requests from centrals are auto-responded by the native layer using this value.
+Update the cached value of a characteristic. Subsequent read requests from centrals are auto-responded
+by the native layer using this value -- unless the characteristic is configured with
+[`delegate.read`](#characteristicdelegateconfig), in which case every read still reaches JavaScript
+and the cached value is only used as the payload of a notification.
 
 Does **not** send a notification. Use `sendNotification` to push updates to subscribed centrals.
 
 **Rejects** with `ERR_CHARACTERISTIC_NOT_FOUND` when the pair of UUIDs names nothing in the published
-GATT database, and with `ERR_NO_SERVER` when no server exists. On iOS it also rejects with
-`ERR_BLUETOOTH` while Bluetooth is not powered on, because the published database only exists then --
-"the powered off state clears the local database".
+GATT database, and with `ERR_NO_SERVER` when no server exists.
 
-Both failures used to be silent no-ops on both platforms, so a mistyped UUID looked identical to a
-successful update while the characteristic went on serving its old value.
+While Bluetooth is not powered on there is no published database to update -- "the powered off state
+clears the local database" -- and the two platforms report that differently: iOS rejects with
+`ERR_BLUETOOTH`, Android with `ERR_NO_SERVER`. Check
+[`isServerRunning`](#isserverrunning) rather than branching on the code.
+
+---
+
+### getBluetoothState
+
+```typescript
+getBluetoothState(): Promise<BluetoothState>
+```
+
+Read the current Bluetooth adapter state. Safe to call before `createServer`, and resolves to
+`'unsupported'` where the native module is absent -- which is exactly what that state already means,
+so a consumer branching on the state needs no separate `isSupported` check.
+
+See [`BluetoothState`](#bluetoothstate) for the states and their per-platform sources, and
+[`addBluetoothStateChangedListener`](#addbluetoothstatechangedlistener) to observe changes.
+
+> **iOS cannot answer precisely before a server exists.** `CBPeripheralManager.state` requires an
+> instantiated manager, and instantiating one purely to read the state would trigger the Bluetooth
+> permission prompt. So without a server iOS answers `'unauthorized'` when authorization has been
+> denied or restricted and `'unknown'` otherwise -- never `'poweredOn'` or `'poweredOff'`. Android
+> reads `BluetoothAdapter.getState()`, which needs no permission and no server, so it is accurate at
+> any time.
 
 ---
 
@@ -414,8 +524,9 @@ PDU.
 A device that has not negotiated an MTU reports the specification default of `23` rather than
 failing, because that default is what the link actually carries until a negotiation happens.
 
-**Throws** `ERR_DEVICE_DISCONNECTED` when the device is not connected, `ERR_NO_SERVER` when no
-server exists.
+**Rejects** with `ERR_DEVICE_DISCONNECTED` when the device is not connected, `ERR_NO_SERVER` when no
+server exists. On iOS "not connected" means "not known", which is a weaker statement -- see
+[`getConnectedDevices`](#getconnecteddevices).
 
 | Platform | `mtu` | `maxNotificationPayload` |
 |----------|-------|--------------------------|
@@ -479,8 +590,11 @@ ones, and neither `removeAllServices` nor `stopServer` is documented as disconne
 presenting either as an equivalent would be an invention. On iOS, only the central can end the
 connection.
 
-**Throws** `ERR_DEVICE_DISCONNECTED` when the device is not connected, `ERR_NO_SERVER` when no
-server exists, `ERR_UNSUPPORTED` on iOS.
+**Rejects** on iOS with `ERR_UNSUPPORTED` always, before any other check -- there is no state in
+which the call can succeed there. On Android it rejects with `ERR_PERMISSION` when
+`BLUETOOTH_CONNECT` is not granted (API 31+), `ERR_NO_CONTEXT` when no React context is available to
+check that against, `ERR_NO_SERVER` when no server exists, `ERR_DEVICE_DISCONNECTED` when the device
+is not connected, and `ERR_DISCONNECT` if the stack raises anything else.
 
 ---
 
@@ -523,34 +637,54 @@ timer because `AdvertiseSettings.setTimeout` stops the advertisement at the limi
 stopServer(): void
 ```
 
-Shut down the GATT server. Removes all services, disconnects peripherals, and releases native resources. Call this in cleanup or when done with BLE.
+Shut down the GATT server: stop advertising, unpublish every service, and release native resources.
+Call this in cleanup or when done with BLE. Synchronous, and never throws -- including when the native
+module is absent.
 
-Pending work is settled rather than abandoned: an unresolved `createServer` rejects with
-`ERR_NO_SERVER`, queued notifications reject, unanswered delegated requests are dropped, and
-advertising stops (restoring the adapter name on Android if `android.setAdapterName` changed it).
-Both platforms unpublish the whole database and stop listening for adapter state, so a later
-`createServer` starts from an empty GATT database rather than colliding with the previous one.
+**It does not disconnect anybody.** Neither platform offers a peripheral-role disconnect that
+unpublishing a database implies: on Android use [`disconnectDevice`](#disconnectdevice) first if the
+central must be dropped, and on iOS only the central can end the connection. A central that was
+connected simply loses the attributes it was talking to.
+
+For the same reason **no `onDeviceDisconnected` events are emitted** by `stopServer`. The module
+discards its own connection tracking without reporting a disconnection it did not observe, so
+`getConnectedDevices` goes empty while any actual links are still up.
+
+Pending work is settled rather than abandoned: an unresolved `createServer` rejects (with
+`ERR_NO_SERVER` on iOS, `ERR_CREATE_SERVER` on Android), queued notifications reject, unanswered
+delegated requests are dropped without being answered, and a pending `startAdvertising` rejects with
+`ERR_ADVERTISE` (restoring the adapter name on
+Android if `android.setAdapterName` changed it). Both platforms unpublish the whole database and stop
+listening for adapter state, so a later `createServer` starts from an empty GATT database rather than
+colliding with the previous one, and services are **not** re-published if Bluetooth is cycled
+afterwards.
 
 ## Event Listeners
 
-All listeners return a `Subscription` object with a `.remove()` method. Call `.remove()` to unsubscribe.
+All listeners return an `EventSubscription` with a `.remove()` method. Call `.remove()` to
+unsubscribe. When the native module is absent they return a subscription whose `remove()` does
+nothing, so registering a listener is safe on any platform.
 
 ### addDeviceConnectedListener
 
 ```typescript
 addDeviceConnectedListener(
   listener: (event: DeviceConnectedEvent) => void,
-): Subscription
+): EventSubscription
 ```
 
-Fired when a central connects to the server.
+Fired once per connected central, independently of any subscription.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `event.deviceId` | `string` | Device identifier (UUID on iOS, MAC address on Android) |
-| `event.name` | `string?` | Device name, if available |
+| `event.name` | `string?` | `BluetoothDevice.getName()` on Android. Always `''` on iOS, which exposes no name for a remote central |
 
-> **iOS behavior:** The connected event fires on first characteristic subscription (not on raw connection), because CoreBluetooth's peripheral manager API does not expose a connection-level callback.
+> **iOS reports the first ATT activity, not the connection.**
+> `CBPeripheralManagerDelegate` declares no connection-level callback, so a central is reported when
+> it first subscribes, reads or writes -- whichever comes first, and only once. **A central that
+> connects and never touches an attribute is not observable from the peripheral role at all**, so no
+> event fires for it. Android reports the connection itself, from `onConnectionStateChange`.
 
 ---
 
@@ -559,14 +693,30 @@ Fired when a central connects to the server.
 ```typescript
 addDeviceDisconnectedListener(
   listener: (event: DeviceDisconnectedEvent) => void,
-): Subscription
+): EventSubscription
 ```
 
-Fired when a central disconnects.
+Fired once when a central goes away.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `event.deviceId` | `string` | Device identifier |
+
+> **On iOS this is inferred, and the inference is imperfect.** CoreBluetooth never reports a
+> disconnection to a peripheral, so the module treats **losing the last subscription** as one, and
+> reports every known central as disconnected when Bluetooth leaves `poweredOn`. Two consequences,
+> both real:
+>
+> - A central that only ever read or wrote produces **no** disconnect event when it leaves. It
+>   generally stays in `getConnectedDevices` until Bluetooth is turned off or the server stops.
+> - A central that deliberately unsubscribes but stays connected is reported as disconnected
+>   **early**. A later read or write re-discovers it, producing a fresh `onDeviceConnected`.
+>
+> CoreBluetooth delivers the same callback whether the central cleared its Client Characteristic
+> Configuration or vanished, and offers nothing to tell the two apart. Android reports the
+> disconnection itself.
+
+`stopServer` emits nothing: see [stopServer](#stopserver).
 
 ---
 
@@ -575,25 +725,36 @@ Fired when a central disconnects.
 ```typescript
 addCharacteristicReadRequestListener(
   listener: (event: CharacteristicReadRequestEvent) => void,
-): Subscription
+): EventSubscription
 ```
 
-Fired when a central reads a characteristic that has no cached value. Respond with `sendResponse`.
+Fired when a central reads a characteristic the module is not answering itself. **Every such request
+must be answered with [`sendResponse`](#sendresponse)**, or it is completed with
+`ATT_ERROR_UNLIKELY_ERROR` after `createServer`'s `requestTimeoutMs`.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `event.deviceId` | `string` | Requesting device |
-| `event.requestId` | `number` | Use in `sendResponse` |
-| `event.serviceUuid` | `string` | Service UUID |
+| `event.requestId` | `number` | Use in `sendResponse`. Unique per request, and only valid until answered or expired |
+| `event.serviceUuid` | `string` | Service UUID, or `''` when the platform could not identify the owning service |
 | `event.characteristicUuid` | `string` | Characteristic UUID |
-| `event.offset` | `number` | Read offset |
+| `event.offset` | `number` | Read offset. Non-zero for a Read Blob continuation |
 
-> **Note:** If the characteristic has a cached value (from `value` in config or `updateCharacteristicValue`), the native layer auto-responds and this listener is not called.
+A read reaches this listener in exactly two cases, on both platforms:
+
+- The characteristic has **no cached value** -- `value` was omitted from its configuration and
+  `updateCharacteristicValue` has never been called for it. Once a value exists the module answers
+  from it and the event stops firing.
+- The characteristic is configured with [`delegate.read`](#characteristicdelegateconfig), which keeps
+  every read coming to JavaScript however current the cached value is. This is what a computed or
+  dynamic read needs.
 
 > **Note:** A read whose offset is past the end of the cached value is answered directly with ATT
 > error `0x07` "Invalid Offset" (Core Specification, Vol 3, Part F, Section 3.4.1.1) and does not
 > reach this listener. An offset equal to the value's length is in range and answers with an empty
-> value, as the specification intends for a Read Blob that has consumed the whole attribute.
+> value, as the specification intends for a Read Blob that has consumed the whole attribute. A
+> characteristic with `delegate.read` has no cached value to range-check against, so its offsets are
+> passed through for the listener to interpret.
 
 ---
 
@@ -602,22 +763,52 @@ Fired when a central reads a characteristic that has no cached value. Respond wi
 ```typescript
 addCharacteristicWriteRequestListener(
   listener: (event: CharacteristicWriteRequestEvent) => void,
-): Subscription
+): EventSubscription
 ```
 
-Fired when a central writes to a characteristic.
+Fired when a central writes to a characteristic. The event is emitted for **every** write, whether or
+not JavaScript has to answer it.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `event.deviceId` | `string` | Writing device |
-| `event.requestId` | `number` | Request identifier |
-| `event.serviceUuid` | `string` | Service UUID |
+| `event.requestId` | `number` | Pass to `sendResponse` when `responseNeeded` is `true` |
+| `event.serviceUuid` | `string` | Service UUID, or `''` when the platform could not identify the owning service |
 | `event.characteristicUuid` | `string` | Characteristic UUID |
-| `event.offset` | `number` | Write offset |
+| `event.offset` | `number` | Where `value` begins within the attribute. Always `0` for a reassembled long write |
 | `event.value` | `number[]` | Written byte array |
-| `event.responseNeeded` | `boolean` | Whether the central expects an acknowledgment |
+| `event.responseNeeded` | `boolean` | Whether the module is **waiting for JavaScript** to answer this request -- see below |
 
-> **Android:** Write responses are auto-sent by the native layer when `responseNeeded` is true.
+#### `responseNeeded` means "you must answer this"
+
+`responseNeeded` is `true` only when the module is holding the ATT transaction open for
+[`sendResponse`](#sendresponse). That happens exactly when the characteristic is configured with
+[`delegate.write`](#characteristicdelegateconfig) **and** the write actually carries a response.
+
+Every other write has already been acknowledged with `GATT_SUCCESS` before the event was emitted, and
+arrives with `responseNeeded: false` -- including a Write Without Response, which cannot be answered
+at all, so it is never delegated even on an opted-in characteristic. Calling `sendResponse` for such a
+request rejects with `REQUEST_NOT_FOUND`.
+
+When it is `true`, the write is **not applied** until JavaScript accepts it: answer with
+`GATT_SUCCESS` and commit the value yourself with
+[`updateCharacteristicValue`](#updatecharacteristicvalue), or answer with an `ATT_ERROR_*` code to
+reject the write. Leaving it unanswered completes it with `ATT_ERROR_UNLIKELY_ERROR` after
+`requestTimeoutMs`.
+
+> **What a write leaves behind differs by platform.** An automatically acknowledged write updates the
+> value a later read is answered from on iOS, but **not** on Android, where the module answers reads from
+> `BluetoothGattCharacteristic.value` and never assigns the written bytes to it. If a subsequent read
+> should serve what was written, call
+> [`updateCharacteristicValue`](#updatecharacteristicvalue) from this listener -- which is also what a
+> delegated write has to do on both platforms.
+
+> **iOS shares one `requestId` across a batch.** CoreBluetooth delivers writes as an array and
+> requires exactly one `respond(to:withResult:)` per callback, passing the first request, documenting
+> the batch as all-or-nothing: "if you can't fulfill an individual request, you shouldn't fulfill any
+> of them". So a delegated batch emits one event per attribute written, all carrying the **same**
+> `requestId`, and the first `sendResponse` for that id answers the whole batch. Later calls for it
+> reject with `REQUEST_NOT_FOUND`. On Android each write request has its own id.
 
 #### Long writes and reliable writes
 
@@ -656,31 +847,44 @@ or reject until the execute says the value is real.
 > nothing to configure. Long writes to an iOS peripheral work, but the fragmentation is not
 > observable and the execute cannot be rejected.
 
+---
+
+### addNotificationSentListener
+
 ```typescript
 addNotificationSentListener(
   listener: (event: NotificationSentEvent) => void,
-): Subscription
+): EventSubscription
 ```
 
-Fired after a notification or indication is delivered (or fails).
+Fired when the platform has finished with a notification or indication.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `event.deviceId` | `string` | Target device |
 | `event.characteristicUuid` | `string` | Notified characteristic |
-| `event.status` | `number` | `0` for success |
+| `event.status` | `number` | `0` for success; a platform GATT status otherwise |
 
 `characteristicUuid` always identifies the characteristic this particular notification carried, so
 notifying several characteristics, or several devices, reports each one correctly.
 
----
+`sendNotification`'s promise carries the same outcome, and is usually the better signal -- it
+identifies *which* send finished. This event is for observing traffic the app did not initiate the
+await for.
+
+| | Android | iOS |
+|---|---|---|
+| Source | `BluetoothGattServerCallback.onNotificationSent` | The module, once `updateValue(_:for:onSubscribedCentrals:)` accepts the payload |
+| Meaning | The stack finished transmitting -- and, for an indication, received the central's confirmation | CoreBluetooth accepted the payload for transmission. It is **not** a delivery report |
+| On failure | Emitted with the non-zero `status` the platform reported | **Not emitted at all** -- a refused or failed send only rejects `sendNotification`'s promise |
+| `status` | Whatever the platform reported | Always `0` |
 
 ### addMtuChangedListener
 
 ```typescript
 addMtuChangedListener(
   listener: (event: MtuChangedEvent) => void,
-): Subscription
+): EventSubscription
 ```
 
 Fired when a connection's MTU changes, or when it is observed for the first time. The event carries
@@ -705,7 +909,7 @@ event for a device arrives alongside `onDeviceConnected`.
 ```typescript
 addCharacteristicSubscribedListener(
   listener: (event: CharacteristicSubscribedEvent) => void,
-): Subscription
+): EventSubscription
 ```
 
 Fired when a central enables notifications or indications on a characteristic. This is the signal
@@ -733,7 +937,7 @@ emit a further event -- the central stays subscribed throughout.
 ```typescript
 addCharacteristicUnsubscribedListener(
   listener: (event: CharacteristicUnsubscribedEvent) => void,
-): Subscription
+): EventSubscription
 ```
 
 Fired when a central stops receiving updates for a characteristic -- the signal to stop streaming.
@@ -745,6 +949,42 @@ turned off and the published database is dropped.
 | `event.deviceId` | `string` | Unsubscribing device |
 | `event.serviceUuid` | `string` | Owning service, or `''` when the platform could not identify it |
 | `event.characteristicUuid` | `string` | Characteristic no longer subscribed |
+
+On iOS, losing the **last** subscription for a central is also what the module reads as a
+disconnection, so this event is immediately followed by `onDeviceDisconnected` in that case. See
+[addDeviceDisconnectedListener](#adddevicedisconnectedlistener).
+
+---
+
+### addBluetoothStateChangedListener
+
+```typescript
+addBluetoothStateChangedListener(
+  listener: (event: BluetoothStateChangedEvent) => void,
+): EventSubscription
+```
+
+Fired whenever the Bluetooth adapter state changes. See [`BluetoothState`](#bluetoothstate) for the
+states.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event.state` | `BluetoothState` | The new adapter state |
+
+**Delivered only while a server exists**, because state monitoring is tied to the server lifecycle on
+both platforms: Android registers a receiver for `BluetoothAdapter.ACTION_STATE_CHANGED` in
+`createServer` and unregisters it in `stopServer`, and iOS gets the state from
+`peripheralManagerDidUpdateState`, which requires an instantiated `CBPeripheralManager`. Use
+[`getBluetoothState`](#getbluetoothstate) for a one-off read outside that window.
+
+On iOS the first event usually arrives shortly after `createServer` and carries the state
+CoreBluetooth resolved to; before that the state is `'unknown'`.
+
+`poweredOff` destroys the published GATT database on both platforms, and every subscription with it,
+so expect `onCharacteristicUnsubscribed` and `onDeviceDisconnected` for everything that was live. The
+module **re-publishes the services** on the next transition to `poweredOn`, at which point
+[`isServerRunning`](#isserverrunning) goes `true` again -- but **advertising is not restarted**, so
+call `startAdvertising` again yourself.
 
 ## Types
 
@@ -790,9 +1030,47 @@ interface GattCharacteristicConfig {
 delegated to JavaScript instead.
 
 `value: []` is a **configured** value, not an absent one: it declares a present but zero-length
-attribute, which is a legitimate GATT state, and both platforms now cache it and answer reads from it
-with an empty value. Previously Android did that while iOS treated `[]` as absent and delegated every
-read, so one configuration behaved differently on each platform.
+attribute, which is a legitimate GATT state, and both platforms cache it and answer reads from it with
+an empty value. Omit `value` entirely for the delegating behaviour.
+
+### CreateServerOptions
+
+```typescript
+interface CreateServerOptions {
+  requestTimeoutMs?: number;
+}
+```
+
+`requestTimeoutMs` is how long a request delegated to JavaScript may go unanswered before the module
+answers it itself with `ATT_ERROR_UNLIKELY_ERROR`. Defaults to `DEFAULT_REQUEST_TIMEOUT_MS` (`10000`).
+Must be an integer from `0` to `ATT_TRANSACTION_TIMEOUT_MS - 1` (`29999`), where `0` disables the
+timeout. See [Unanswered requests](#unanswered-requests).
+
+### CharacteristicDelegateConfig
+
+```typescript
+interface CharacteristicDelegateConfig {
+  read?: boolean;
+  write?: boolean;
+}
+```
+
+Per-characteristic opt-in delegation of ATT request handling to JavaScript. Both flags default to
+`false`, which keeps the module answering the request itself. Set on
+[`GattCharacteristicConfig.delegate`](#gattcharacteristicconfig).
+
+| Flag | Effect |
+|---|---|
+| `read` | Always emit `onCharacteristicReadRequest` and wait for `sendResponse`, even when the characteristic already has a value to serve. Without it the module answers from the last known value as soon as one exists, so the event stops firing -- which is why a computed or dynamic read needs this. A configured `value` is still used as the payload of a notification |
+| `write` | Do not acknowledge writes automatically. The write stays unapplied and unanswered, and `onCharacteristicWriteRequest` arrives with `responseNeeded: true`, until `sendResponse` is called with `GATT_SUCCESS` or an `ATT_ERROR_*` code. **This is the only way to reject a write** |
+
+Both behave identically on Android and iOS, with two platform notes:
+
+- A **Write Without Response** carries nothing to answer, so it is never delegated even with
+  `write: true`, on either platform.
+- On iOS a batch of writes delivered in one callback shares a single `requestId`, so one
+  `sendResponse` answers all of it. See
+  [addCharacteristicWriteRequestListener](#addcharacteristicwriterequestlistener).
 
 ### GattDescriptorConfig
 
@@ -861,7 +1139,8 @@ Apple annotates both `CBCharacteristicPropertyBroadcast` and
 can be set on a published peripheral. They are still offered because Android does set the bits, and
 a peripheral targeting Android alone can legitimately want them — declare them for Android only.
 
-An unrecognised name now throws instead of being ignored.
+An unrecognised name throws, rather than being ignored, so a typo cannot silently publish a
+characteristic with one fewer property than the configuration asked for.
 
 ### CharacteristicPermission
 
@@ -898,8 +1177,8 @@ onto `.readEncryptionRequired`/`.writeEncryptionRequired` — or worse, onto pla
 saying so. Failing the call is the safer outcome, and the error names `readEncrypted` /
 `writeEncrypted` as the portable choice.
 
-An unrecognised name now throws instead of being ignored, so a typo can no longer silently drop a
-permission.
+An unrecognised name throws, rather than being ignored, so a typo cannot silently publish an attribute
+less protected than the configuration asked for.
 
 ### AdvertiseConfig
 
@@ -962,6 +1241,23 @@ interface AndroidAdvertiseOptions {
   setAdapterName?: boolean;
 }
 ```
+
+Options whose concept has no CoreBluetooth counterpart, so the whole object is ignored on iOS. Both
+concern the advertised name -- see [The advertised local name](#the-advertised-local-name).
+`includeDeviceName` defaults to `true` whenever `localName` is set and `false` otherwise, and costs the
+name's length plus two bytes of the scan response's 31-byte budget. `setAdapterName` defaults to
+`false`.
+
+### SendNotificationOptions
+
+```typescript
+interface SendNotificationOptions {
+  requireSubscription?: boolean;
+}
+```
+
+Defaults to `true`. See [`requireSubscription`](#requiresubscription) for what each platform can
+actually check, and note that `false` changes nothing on iOS.
 
 ### DeviceConnectedEvent
 
@@ -1053,6 +1349,71 @@ interface CharacteristicSubscribedEvent {
 }
 ```
 
+`CharacteristicUnsubscribedEvent` has the same three fields.
+
+### BluetoothState
+
+```typescript
+type BluetoothState =
+  | 'unknown'
+  | 'resetting'
+  | 'unsupported'
+  | 'unauthorized'
+  | 'poweredOff'
+  | 'poweredOn';
+```
+
+Adapter state, normalised so consumers never have to branch on platform.
+
+| State | Meaning | iOS | Android |
+|---|---|---|---|
+| `poweredOn` | The only state in which a server can advertise | `CBManagerState.poweredOn` | `STATE_ON` |
+| `poweredOff` | Bluetooth is off. Destroys the published database on both platforms | `CBManagerState.poweredOff` | `STATE_OFF` |
+| `resetting` | Transient, so do not act yet | `CBManagerState.resetting` | `STATE_TURNING_ON` / `STATE_TURNING_OFF`, both documented as not yet usable |
+| `unsupported` | No BLE peripheral support. Also what the module reports where the native module is absent | `CBManagerState.unsupported` | No `BluetoothAdapter` |
+| `unauthorized` | The app may not use Bluetooth | `CBManagerState.unauthorized` | Not reported; Android surfaces this as a rejected call instead |
+| `unknown` | Not determined yet | Reported until the first state callback arrives, and by `getBluetoothState` before a server exists | Only when no React context is available |
+
+### BluetoothStateChangedEvent
+
+```typescript
+interface BluetoothStateChangedEvent {
+  state: BluetoothState;
+}
+```
+
+### GattServerEvents
+
+```typescript
+type GattServerEvents = {
+  onDeviceConnected(event: DeviceConnectedEvent): void;
+  onDeviceDisconnected(event: DeviceDisconnectedEvent): void;
+  onCharacteristicReadRequest(event: CharacteristicReadRequestEvent): void;
+  onCharacteristicWriteRequest(event: CharacteristicWriteRequestEvent): void;
+  onNotificationSent(event: NotificationSentEvent): void;
+  onMtuChanged(event: MtuChangedEvent): void;
+  onCharacteristicSubscribed(event: CharacteristicSubscribedEvent): void;
+  onCharacteristicUnsubscribed(event: CharacteristicUnsubscribedEvent): void;
+  onBluetoothStateChanged(event: BluetoothStateChangedEvent): void;
+};
+```
+
+The event-name-to-payload map the native module is typed against. Exported for consumers that want to
+name an event and its payload together; the `add*Listener` helpers are the supported way to subscribe.
+
+### EventSubscription
+
+Re-exported from `expo-modules-core`, and what every `add*Listener` returns:
+
+```typescript
+interface EventSubscription {
+  remove(): void;
+}
+```
+
+It is re-exported so consumers can annotate a stored subscription without adding a direct dependency on
+`expo-modules-core`.
+
 ## Constants
 
 An ATT error code is a single octet (Bluetooth Core Specification 5.4, Vol 3, Part F, Table 3.4).
@@ -1081,22 +1442,44 @@ An ATT error code is a single octet (Bluetooth Core Specification 5.4, Vol 3, Pa
 
 Codes above `0x11` are not exposed: iOS can only transmit what `CBATTError.Code` models, which
 stops at `0x11`, so the specification's `0x12`, `0x13`, application (`0x80`–`0x9F`) and profile
-(`0xE0`–`0xFF`) ranges have no iOS representation and would arrive as Unlikely Error.
+(`0xE0`–`0xFF`) ranges have no iOS representation and would arrive as Unlikely Error. `sendResponse`
+still accepts any byte, so passing one of those to Android alone works -- it simply has no portable
+meaning.
+
+### Other constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `ATT_TRANSACTION_TIMEOUT_MS` | `30000` | The ATT transaction timeout (Core Specification, Vol 3, Part F, Section 3.3.3). The exclusive upper bound on `CreateServerOptions.requestTimeoutMs` |
+| `DEFAULT_REQUEST_TIMEOUT_MS` | `10000` | The default `CreateServerOptions.requestTimeoutMs` |
+| `CLIENT_CHARACTERISTIC_CONFIGURATION_UUID` | `'00002902-0000-1000-8000-00805f9b34fb'` | The CCCD UUID, in the 128-bit form both platforms compare against. The module publishes and answers this descriptor itself, so declaring it in `descriptors` is rejected; the constant is exported for recognising it |
 
 ## Error Codes
 
-Errors thrown by `sendNotification` and `sendResponse` include a `code` property:
+Every rejection from this module carries a `code` property. Argument validation performed in the shared
+TypeScript layer -- malformed UUIDs, bytes outside `0`--`255`, out-of-range timeouts, offsets and
+statuses, unrecognised enum names -- throws a plain `Error` with a descriptive message and **no**
+`code`, since it never reaches a platform.
 
 | Code | Description |
 |------|-------------|
-| `PAYLOAD_EXCEEDS_MTU` | A `sendNotification` payload is longer than one notification can carry (`mtu - 3`). Checked before transmitting, so nothing was sent. The message says when the link is still at the default ATT MTU of 23. |
-| `REQUEST_NOT_FOUND` | The `requestId` does not match any pending read request. |
-| `REQUEST_DEVICE_MISMATCH` | The `requestId` is pending, but for a different device than the `deviceId` supplied. |
-| `ERR_RESPONSE_OFFSET` | The `offset` given to `sendResponse` is past the offset the request asked for, so the requested bytes would be missing. |
-| `ERR_NOTIFY` | The Bluetooth stack refused the notification, or reported it as undelivered. |
-| `ERR_NOTIFY_QUEUE_FULL` | Too many notifications are already queued for the device. Await earlier sends before queueing more. |
-| `ERR_DEVICE_DISCONNECTED` | The central disconnected, or unsubscribed, before a queued notification could be delivered. |
-| `ERR_CHARACTERISTIC_NOT_FOUND` | The characteristic is not part of the published GATT database. |
-| `ERR_UPDATE_VALUE` | An `updateCharacteristicValue` argument was rejected by the native layer. |
-| `ERR_NO_SUBSCRIBER` | The device has not enabled the transmission `confirm` selects on the characteristic. |
-| `ERR_CONFIRM_UNSUPPORTED` | `confirm` asks for a transmission the characteristic does not declare the property for -- `indicate` for `true`, `notify` for `false`. |
+| `ERR_UNSUPPORTED` | The configuration or advertising option cannot be expressed on this platform. **iOS only**, and raised by `disconnectDevice`, by `manufacturerData` / `serviceData` / `connectable: false`, by MITM and signed permissions, by the `broadcast` and `extendedProperties` properties, and by a descriptor other than `0x2901` / `0x2904` |
+| `ERR_NO_SERVER` | No server exists, or it was stopped while the call was in flight. Also how Android reports a missing database while Bluetooth is off |
+| `ERR_PERMISSION` | Bluetooth permission is not granted -- `CBManager.authorization` on iOS, `BLUETOOTH_CONNECT` / `BLUETOOTH_ADVERTISE` on Android (API 31+) |
+| `ERR_NO_CONTEXT` | **Android only.** No React context was available, so the permission could not be checked. Treated as a failure rather than a pass, because assuming the grant only defers it to a `SecurityException` |
+| `ERR_BLUETOOTH` | Bluetooth is off, unsupported or otherwise not ready. On iOS this is also how `createServer` and `updateCharacteristicValue` report a powered-off adapter |
+| `ERR_CREATE_SERVER` | A service failed to publish, or the configuration was rejected by the native layer. Also how Android reports Bluetooth being off during `createServer` |
+| `ERR_ADVERTISE` | The platform refused the advertisement, or a pending `startAdvertising` was superseded by another one, by `stopAdvertising` or by `stopServer` |
+| `ERR_RESPONSE` | The Bluetooth stack did not accept a `sendResponse`, or its arguments were rejected by the native layer |
+| `ERR_DISCONNECT` | **Android only.** `disconnectDevice` failed for a reason the stack did not classify |
+| `PAYLOAD_EXCEEDS_MTU` | A `sendNotification` payload is longer than one notification can carry (`mtu - 3`). Checked before transmitting, so nothing was sent. The message says when the link is still at the default ATT MTU of 23 |
+| `REQUEST_NOT_FOUND` | The `requestId` does not match a pending read or write request. It was never delegated, has already been answered, or expired after `requestTimeoutMs` |
+| `REQUEST_DEVICE_MISMATCH` | The `requestId` is pending, but for a different device than the `deviceId` supplied |
+| `ERR_RESPONSE_OFFSET` | The `offset` given to `sendResponse` is past the offset the request asked for, so the requested bytes would be missing |
+| `ERR_NOTIFY` | The Bluetooth stack refused the notification, or reported it as undelivered. On Android also raised for an unknown device, service or characteristic |
+| `ERR_NOTIFY_QUEUE_FULL` | 64 notifications are already queued for the device. Await earlier sends before queueing more |
+| `ERR_DEVICE_DISCONNECTED` | The device is not connected, or disconnected -- or on iOS unsubscribed -- before a queued notification could be delivered. Also raised by `getMtu` and Android's `disconnectDevice` |
+| `ERR_CHARACTERISTIC_NOT_FOUND` | The characteristic is not part of the published GATT database |
+| `ERR_UPDATE_VALUE` | An `updateCharacteristicValue` argument was rejected by the native layer |
+| `ERR_NO_SUBSCRIBER` | The device has not enabled the transmission `confirm` selects on the characteristic |
+| `ERR_CONFIRM_UNSUPPORTED` | `confirm` asks for a transmission the characteristic does not declare the property for -- `indicate` for `true`, `notify` for `false` |
