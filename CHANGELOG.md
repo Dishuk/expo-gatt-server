@@ -386,6 +386,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   advertisement is now stopped before the new one starts, as iOS has always done implicitly, since a
   `CBPeripheralManager` holds a single advertisement. A failure belonging to the superseded
   advertisement can also no longer settle the new call's promise
+- `isAdvertising` reported `true` on Android after a restart whose new start threw — the adapter having
+  been turned off between stopping the superseded advertisement and starting the replacement. Nothing
+  cleared the flag until the adapter-state receiver happened to, so the module claimed to be advertising
+  while the radio was silent
 - A partly delegated write batch could silently undo a newer value. The values it holds for the
   characteristics that did not opt in were committed unconditionally when the batch was answered with
   `GATT_SUCCESS`, so an `updateCharacteristicValue` — or another central's write — that landed while the

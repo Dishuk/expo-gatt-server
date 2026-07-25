@@ -1006,7 +1006,12 @@ class GattServerManager(
       // that throw, so neither the completion nor the callback may be left installed for a later stop to
       // settle and stop a second time. compareAndSet, so a concurrent restart's own state is left alone.
       pendingAdvertiseResult.compareAndSet(onResult, null)
-      advertiseCallback.compareAndSet(callback, null)
+      if (advertiseCallback.compareAndSet(callback, null)) {
+        // The superseded set was stopped just above, so nothing is on the air and no AdvertiseCallback
+        // is coming to say so. Left set, `isAdvertising` would report an advertisement that is not
+        // running until the adapter-state receiver happened to clear it.
+        advertising.set(false)
+      }
       throw e
     }
     // The callback has to be installed before the start, because it is the only handle the platform accepts
