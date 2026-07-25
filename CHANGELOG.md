@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `createServer` option `requestTimeoutMs`, with the type `CreateServerOptions` and the constants
+  `ATT_TRANSACTION_TIMEOUT_MS` and `DEFAULT_REQUEST_TIMEOUT_MS`. A delegated request that JavaScript
+  never answers is now completed with `ATT_ERROR_UNLIKELY_ERROR` after 10 s by default, instead of
+  being retained forever while the central stalls until its own 30 s ATT transaction timeout drops
+  the connection
 - `onCharacteristicSubscribed` / `onCharacteristicUnsubscribed` events, with
   `addCharacteristicSubscribedListener` and `addCharacteristicUnsubscribedListener`
 - Per-device, per-characteristic Client Characteristic Configuration tracking on Android, as the

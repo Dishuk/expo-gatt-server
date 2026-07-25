@@ -75,13 +75,18 @@ public class ExpoGattServerModule: Module {
       promise.resolve(normalizedBluetoothState(mgr.bluetoothState))
     }
 
-    AsyncFunction("createServer") { (services: [[String: Any]], promise: Promise) in
+    AsyncFunction("createServer") { (
+      services: [[String: Any]],
+      options: [String: Any],
+      promise: Promise
+    ) in
       if let err = self.checkBluetoothAuthorization() {
         promise.reject("ERR_PERMISSION", err)
         return
       }
 
       do {
+        let requestTimeoutMs = try self.parseRequestTimeout(options["requestTimeoutMs"])
         var initialValues: [CBUUID: Data] = [:]
         var cbServices: [CBMutableService] = []
         for serviceConfig in services {
@@ -89,7 +94,7 @@ public class ExpoGattServerModule: Module {
         }
         let delegations = try self.parseDelegations(services)
         self.manager?.stop()
-        let mgr = GattServerManager()
+        let mgr = GattServerManager(requestTimeoutMs: requestTimeoutMs)
         mgr.setDelegations(delegations)
         mgr.delegate = self
         mgr.onStateChange = { [weak self] state in
@@ -364,6 +369,21 @@ public class ExpoGattServerModule: Module {
       bytes.append(byte)
     }
     return Data(bytes)
+  }
+
+  private func parseRequestTimeout(_ value: Any?) throws -> Int {
+    guard let value = value else { return defaultRequestTimeoutMs }
+    guard let millis = (value as? NSNumber)?.intValue,
+          (value as? NSNumber)?.doubleValue == Double(millis),
+          millis >= 0, millis < attTransactionTimeoutMs else {
+      throw GattArgumentError(
+        message: "Invalid request timeout \(value). Expected an integer between 0 and " +
+          "\(attTransactionTimeoutMs - 1) milliseconds — below the ATT transaction timeout of " +
+          "\(attTransactionTimeoutMs) ms, past which the central has already given up — where 0 " +
+          "disables the timeout."
+      )
+    }
+    return millis
   }
 
   /// Collects the characteristics that opted out of the module's automatic responses. Absent or

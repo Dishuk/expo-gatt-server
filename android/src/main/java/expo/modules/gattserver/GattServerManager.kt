@@ -10,6 +10,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
 import java.util.UUID
@@ -58,6 +60,29 @@ const val MAX_ADVERTISING_TIMEOUT_MS = 180_000
 
 /** ATT "Invalid Attribute Value Length" — Core Specification, Vol 3, Part F, Table 3.4. */
 private const val ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH = 0x0D
+
+/** ATT "Unlikely Error" — Core Specification, Vol 3, Part F, Table 3.4. */
+private const val ATT_ERROR_UNLIKELY_ERROR = 0x0E
+
+/**
+ * The ATT transaction timeout. "A transaction not completed within 30 seconds shall time out. Such a
+ * transaction shall be considered to have failed [...] No more Attribute Protocol requests,
+ * commands, indications or notifications shall be sent to the target device on this ATT bearer" —
+ * recovering then costs a whole new bearer (Core Specification, Vol 3, Part F, Section 3.3.3). A
+ * module timeout at or above it could never answer before the peer gives up, so it is the exclusive
+ * upper bound on [DEFAULT_REQUEST_TIMEOUT_MS] and on the configured value.
+ */
+const val ATT_TRANSACTION_TIMEOUT_MS = 30_000
+
+/**
+ * How long a request delegated to JavaScript may go unanswered before the module answers it itself.
+ *
+ * Chosen to sit well inside [ATT_TRANSACTION_TIMEOUT_MS] — the peer is left 20 s of margin, so it
+ * receives a real ATT error response and its bearer stays usable, instead of the transaction failing
+ * and taking every subsequent notification and indication with it. It is still long enough for a
+ * handler doing genuine asynchronous work.
+ */
+const val DEFAULT_REQUEST_TIMEOUT_MS = 10_000
 
 open class GattServerException(val code: String, message: String) : Exception(message)
 class MtuException(code: String, message: String) : GattServerException(code, message)
@@ -156,6 +181,7 @@ fun currentBluetoothState(context: Context): String {
  */
 class GattServerManager(
   private val context: Context,
+  private val requestTimeoutMs: Int = DEFAULT_REQUEST_TIMEOUT_MS,
 ) {
   interface Listener {
     fun onDeviceConnected(deviceId: String, name: String?)
@@ -187,6 +213,9 @@ class GattServerManager(
   private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
   private val deviceMtu = ConcurrentHashMap<String, Int>()
   private val pendingRequests = ConcurrentHashMap<Int, PendingRequest>()
+  // Expiry tasks are posted here from the binder threads that register the requests, and run on the
+  // main looper, which always exists for the lifetime of the process.
+  private val timeoutHandler = Handler(Looper.getMainLooper())
   // Android delivers one notification at a time: "When multiple notifications are to be sent, an
   // application must wait for this callback to be received before sending additional
   // notifications" (BluetoothGattServerCallback.onNotificationSent). Sends are therefore queued
@@ -200,11 +229,14 @@ class GattServerManager(
    * [offset] is the offset the central asked for. It is retained so a response can be rebased onto
    * it, and so the offset handed back to the stack is the one the request carried rather than
    * whatever the caller happened to pass.
+   *
+   * [timeout] is the armed expiry task, kept so answering or discarding the request can cancel it.
    */
   private data class PendingRequest(
     val deviceId: String,
     val offset: Int,
     val isRead: Boolean,
+    val timeout: Runnable? = null,
   )
 
   /** One notification waiting for, or occupying, the single outstanding slot a device has. */
@@ -320,7 +352,7 @@ class GattServerManager(
     val disconnected = connectedDevices.keys.toList()
     connectedDevices.clear()
     deviceMtu.clear()
-    pendingRequests.clear()
+    discardPendingRequests { true }
     failAllNotifications(GattServerException("ERR_BLUETOOTH", "Bluetooth was turned off"))
     // The server is gone, so no onConnectionStateChange callbacks will arrive for these.
     disconnected.forEach {
@@ -363,7 +395,7 @@ class GattServerManager(
         BluetoothGattServer.STATE_DISCONNECTED -> {
           connectedDevices.remove(id)
           deviceMtu.remove(id)
-          pendingRequests.entries.removeIf { it.value.deviceId == id }
+          discardPendingRequests { it.deviceId == id }
           // Nothing will ever acknowledge these now, so fail them instead of leaking the queue.
           failNotifications(id, GattServerException("ERR_DEVICE_DISCONNECTED", "Device $id disconnected"))
           clearSubscriptions(id)
@@ -404,7 +436,7 @@ class GattServerManager(
       }
 
       Log.d(TAG, "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset delegating to JS")
-      pendingRequests[requestId] = PendingRequest(device.address, offset, isRead = true)
+      registerPendingRequest(requestId, device.address, offset, isRead = true)
 
       val serviceUuid = characteristic.service?.uuid?.toString() ?: ""
       listener?.onCharacteristicReadRequest(
@@ -426,9 +458,7 @@ class GattServerManager(
       Log.d(TAG, "onCharacteristicWriteRequest: device=${device.address} char=${characteristic.uuid} offset=$offset responseNeeded=$responseNeeded delegated=$delegated")
 
       if (delegated) {
-        // Registered before the event is emitted so a listener that responds synchronously still
-        // finds the request.
-        pendingRequests[requestId] = PendingRequest(device.address, offset, isRead = false)
+        registerPendingRequest(requestId, device.address, offset, isRead = false)
       } else if (responseNeeded) {
         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, data)
       }
@@ -959,6 +989,45 @@ class GattServerManager(
   }
 
   /**
+   * Records a request handed to JavaScript and arms the expiry that answers it if JavaScript never
+   * does. Called before the event is emitted, so a listener that responds synchronously still finds
+   * the request.
+   */
+  private fun registerPendingRequest(requestId: Int, deviceId: String, offset: Int, isRead: Boolean) {
+    val timeout = if (requestTimeoutMs > 0) Runnable { expireRequest(requestId) } else null
+    pendingRequests[requestId] = PendingRequest(deviceId, offset, isRead, timeout)
+    if (timeout != null) {
+      timeoutHandler.postDelayed(timeout, requestTimeoutMs.toLong())
+    }
+  }
+
+  /**
+   * Answers a request JavaScript left unanswered, so the central's transaction completes with an
+   * error rather than stalling until its own ATT transaction timeout drops the connection.
+   *
+   * "Unlikely Error" is the closest the specification offers: the request was valid and the server
+   * simply failed to produce a response, which none of the more specific codes describes.
+   */
+  @SuppressLint("MissingPermission")
+  private fun expireRequest(requestId: Int) {
+    val pending = pendingRequests.remove(requestId) ?: return
+    Log.w(TAG, "Request $requestId unanswered after ${requestTimeoutMs}ms, answering with an ATT error")
+    val device = connectedDevices[pending.deviceId] ?: return
+    gattServer?.sendResponse(device, requestId, ATT_ERROR_UNLIKELY_ERROR, pending.offset, null)
+  }
+
+  /** Forgets matching pending requests, cancelling the expiry each one armed. */
+  private fun discardPendingRequests(predicate: (PendingRequest) -> Boolean) {
+    val iterator = pendingRequests.entries.iterator()
+    while (iterator.hasNext()) {
+      val pending = iterator.next().value
+      if (!predicate(pending)) continue
+      pending.timeout?.let { timeoutHandler.removeCallbacks(it) }
+      iterator.remove()
+    }
+  }
+
+  /**
    * Answers a pending read or write request.
    *
    * A read response is deliberately not size-checked. An `ATT_READ_RSP` carries at most
@@ -1001,7 +1070,9 @@ class GattServerManager(
     }
     // Two-argument remove so a request id the framework has already reissued to another device is
     // not consumed by this call.
-    pendingRequests.remove(requestId, pending)
+    if (pendingRequests.remove(requestId, pending)) {
+      pending.timeout?.let { timeoutHandler.removeCallbacks(it) }
+    }
   }
 
   /**
@@ -1096,7 +1167,7 @@ class GattServerManager(
     gattServer = null
     connectedDevices.clear()
     deviceMtu.clear()
-    pendingRequests.clear()
+    discardPendingRequests { true }
     failAllNotifications(GattServerException("ERR_NO_SERVER", "Server stopped"))
     subscriptions.clear()
     delegations.clear()

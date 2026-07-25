@@ -16,6 +16,22 @@ private let defaultAttMtuPayload = defaultAttMtu - attNotificationHeaderSize
 /// call rather than dropping a payload silently.
 private let maxQueuedNotifications = 64
 
+/// The ATT transaction timeout. "A transaction not completed within 30 seconds shall time out. Such a
+/// transaction shall be considered to have failed [...] No more Attribute Protocol requests,
+/// commands, indications or notifications shall be sent to the target device on this ATT bearer" —
+/// recovering then costs a whole new bearer (Core Specification, Vol 3, Part F, Section 3.3.3). A
+/// module timeout at or above it could never answer before the peer gives up, so it is the exclusive
+/// upper bound on `defaultRequestTimeoutMs` and on the configured value.
+let attTransactionTimeoutMs = 30_000
+
+/// How long a request delegated to JavaScript may go unanswered before the module answers it itself.
+///
+/// Chosen to sit well inside `attTransactionTimeoutMs` — the peer is left 20 s of margin, so it
+/// receives a real ATT error response and its bearer stays usable, instead of the transaction failing
+/// and taking every subsequent notification and indication with it. It is still long enough for a
+/// handler doing genuine asynchronous work.
+let defaultRequestTimeoutMs = 10_000
+
 enum GattServerError: Error {
   case payloadExceedsMtu(maxPayload: Int, payloadSize: Int)
   case requestNotFound(requestId: Int)
@@ -194,6 +210,14 @@ func normalizedBluetoothState(_ state: CBManagerState) -> String {
 class GattServerManager: NSObject {
   weak var delegate: GattServerManagerDelegate?
 
+  /// Milliseconds a delegated request may go unanswered; `0` disables the expiry entirely.
+  private let requestTimeoutMs: Int
+
+  init(requestTimeoutMs: Int = defaultRequestTimeoutMs) {
+    self.requestTimeoutMs = requestTimeoutMs
+    super.init()
+  }
+
   /// Invoked on the main queue for every `peripheralManagerDidUpdateState` callback.
   var onStateChange: ((CBManagerState) -> Void)?
 
@@ -255,6 +279,8 @@ class GattServerManager: NSObject {
     /// is overwritten when the response is sent. A write request's `value` is the written data and
     /// CoreBluetooth does not document overwriting it as supported.
     let isRead: Bool
+    /// The armed expiry, kept so answering or discarding the request can cancel it.
+    let timeout: DispatchWorkItem?
   }
 
   /// Records which characteristics hand their ATT requests to JavaScript. Call before `open`.
@@ -526,6 +552,47 @@ class GattServerManager: NSObject {
     }
   }
 
+  /// Records a request handed to JavaScript and arms the expiry that answers it if JavaScript never
+  /// does. Called before the event is emitted, so a listener that responds synchronously still finds
+  /// the request.
+  private func registerPendingRequest(_ requestId: Int, request: CBATTRequest, isRead: Bool) {
+    var timeout: DispatchWorkItem?
+    if requestTimeoutMs > 0 {
+      let work = DispatchWorkItem { [weak self] in self?.expireRequest(requestId) }
+      timeout = work
+      DispatchQueue.main.asyncAfter(
+        deadline: .now() + .milliseconds(requestTimeoutMs), execute: work
+      )
+    }
+    pendingRequests[requestId] = PendingRequest(request: request, isRead: isRead, timeout: timeout)
+  }
+
+  /// Answers a request JavaScript left unanswered, so the central's transaction completes with an
+  /// error rather than stalling until its own ATT transaction timeout drops the connection.
+  ///
+  /// "Unlikely Error" is the closest the specification offers: the request was valid and the server
+  /// simply failed to produce a response, which none of the more specific codes describes.
+  private func expireRequest(_ requestId: Int) {
+    guard let pending = discardPendingRequest(requestId) else { return }
+    peripheralManager?.respond(to: pending.request, withResult: .unlikelyError)
+  }
+
+  /// Forgets one pending request, cancelling the expiry it armed.
+  @discardableResult
+  private func discardPendingRequest(_ requestId: Int) -> PendingRequest? {
+    guard let pending = pendingRequests.removeValue(forKey: requestId) else { return nil }
+    pending.timeout?.cancel()
+    return pending
+  }
+
+  /// Forgets matching pending requests, cancelling the expiry each one armed.
+  private func discardPendingRequests(where predicate: (PendingRequest) -> Bool) {
+    for (requestId, pending) in pendingRequests where predicate(pending) {
+      pending.timeout?.cancel()
+      pendingRequests.removeValue(forKey: requestId)
+    }
+  }
+
   /// Answers a pending read or write request.
   ///
   /// `offset` states where `value` begins within the attribute, and the response is rebased onto the
@@ -554,7 +621,7 @@ class GattServerManager: NSObject {
     let payload = try responsePayload(
       for: pending, requestId: requestId, offset: offset, value: value
     )
-    pendingRequests.removeValue(forKey: requestId)
+    discardPendingRequest(requestId)
 
     let result = attErrorCode(for: status)
     if pending.isRead {
@@ -617,7 +684,7 @@ class GattServerManager: NSObject {
     centralPayloadLengths.removeAll()
     subscribedCentrals.removeAll()
     characteristicValues.removeAll()
-    pendingRequests.removeAll()
+    discardPendingRequests { _ in true }
     delegations.removeAll()
     delegationsByCharacteristic.removeAll()
     peripheralManager = nil
@@ -684,9 +751,7 @@ class GattServerManager: NSObject {
     guard connectedCentrals.removeValue(forKey: deviceId) != nil else { return }
     centralPayloadLengths.removeValue(forKey: deviceId)
     subscribedCentrals.removeValue(forKey: deviceId)
-    pendingRequests = pendingRequests.filter {
-      $0.value.request.central.identifier.uuidString != deviceId
-    }
+    discardPendingRequests { $0.request.central.identifier.uuidString == deviceId }
     failPendingNotifications(reason) { $0.deviceId == deviceId }
     delegate?.onDeviceDisconnected(deviceId: deviceId)
   }
@@ -733,7 +798,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       connectedCentrals.removeAll()
       centralPayloadLengths.removeAll()
       subscribedCentrals.removeAll()
-      pendingRequests.removeAll()
+      discardPendingRequests { _ in true }
       failPendingNotifications(.bluetoothUnavailable(state: peripheral.state))
       for deviceId in disconnected {
         delegate?.onDeviceDisconnected(deviceId: deviceId)
@@ -823,18 +888,12 @@ extension GattServerManager: CBPeripheralManagerDelegate {
   ) {
     noteActivity(from: request.central)
 
-    let reqId = nextRequestId()
-    pendingRequests[reqId] = PendingRequest(request: request, isRead: true)
-
-    let serviceUuid = request.characteristic.service?.uuid.uuidString ?? ""
-
     // An opted-in characteristic always reaches JS. A configured initial value is served from this
     // cache rather than the CBMutableCharacteristic initialiser, so without the opt-in a
     // characteristic declared with `value` would never produce a single read event.
     if !delegation(for: request.characteristic).read,
        let value = characteristicValues[request.characteristic.uuid] {
       let offset = request.offset
-      pendingRequests.removeValue(forKey: reqId)
 
       // An offset past the end of the value is answered with the error the specification requires —
       // 0x07 "Invalid Offset", `CBATTError.invalidOffset` (Core Specification, Vol 3, Part F,
@@ -851,10 +910,13 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       return
     }
 
+    let reqId = nextRequestId()
+    registerPendingRequest(reqId, request: request, isRead: true)
+
     delegate?.onCharacteristicReadRequest(
       deviceId: request.central.identifier.uuidString,
       requestId: reqId,
-      serviceUuid: serviceUuid,
+      serviceUuid: request.characteristic.service?.uuid.uuidString ?? "",
       characteristicUuid: request.characteristic.uuid.uuidString,
       offset: request.offset
     )
@@ -879,7 +941,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     let delegated = requests.contains { delegation(for: $0.characteristic).write }
 
     if delegated {
-      pendingRequests[batchId] = PendingRequest(request: first, isRead: false)
+      registerPendingRequest(batchId, request: first, isRead: false)
     } else {
       peripheral.respond(to: first, withResult: .success)
     }

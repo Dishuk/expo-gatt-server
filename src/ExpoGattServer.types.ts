@@ -46,6 +46,36 @@ export interface GattServiceConfig {
   characteristics: GattCharacteristicConfig[];
 }
 
+/**
+ * The ATT transaction timeout, in milliseconds. "A transaction not completed within 30 seconds shall
+ * time out", after which "no more Attribute Protocol requests, commands, indications or
+ * notifications shall be sent to the target device on this ATT bearer" — recovering costs a whole
+ * new bearer (Bluetooth Core Specification, Vol 3, Part F, Section 3.3.3). A server timeout at or
+ * above this could never answer in time, so it is the exclusive upper bound on
+ * `CreateServerOptions.requestTimeoutMs`.
+ */
+export const ATT_TRANSACTION_TIMEOUT_MS = 30_000;
+
+/** Default `CreateServerOptions.requestTimeoutMs`. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+
+export interface CreateServerOptions {
+  /**
+   * How long a request delegated to JavaScript may go unanswered before the module answers it
+   * itself with `ATT_ERROR_UNLIKELY_ERROR`, in milliseconds. Defaults to
+   * `DEFAULT_REQUEST_TIMEOUT_MS` (10000).
+   *
+   * Without it a handler that never calls `sendResponse` leaks the pending request and leaves the
+   * central stalled until its own ATT transaction timeout of 30 s expires, which then bars every
+   * further request, notification and indication on that bearer. Answering early enough keeps the
+   * bearer usable and turns a missing response into an ordinary ATT error the central can handle.
+   *
+   * Must be an integer from 0 to `ATT_TRANSACTION_TIMEOUT_MS - 1`; `0` disables the timeout and
+   * restores the unbounded wait.
+   */
+  requestTimeoutMs?: number;
+}
+
 export interface SendNotificationOptions {
   /**
    * Refuse the send with `ERR_NO_SUBSCRIBER` when the target device has not enabled notifications

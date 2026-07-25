@@ -73,7 +73,10 @@ class ExpoGattServerModule : Module() {
       }
     }
 
-    AsyncFunction("createServer") { services: List<Map<String, Any?>>, promise: Promise ->
+    AsyncFunction("createServer") {
+      services: List<Map<String, Any?>>,
+      options: Map<String, Any?>,
+      promise: Promise ->
       permissionError(android.Manifest.permission.BLUETOOTH_CONNECT)?.let { (code, message) ->
         promise.reject(code, message, null)
         return@AsyncFunction
@@ -85,8 +88,9 @@ class ExpoGattServerModule : Module() {
       }
 
       try {
+        val requestTimeoutMs = parseRequestTimeout(options["requestTimeoutMs"])
         manager?.stop()
-        val mgr = GattServerManager(context)
+        val mgr = GattServerManager(context, requestTimeoutMs)
         mgr.listener = createListener()
         mgr.onStateChange = { state ->
           sendEvent("onBluetoothStateChanged", bundleOf("state" to state))
@@ -362,6 +366,23 @@ class ExpoGattServerModule : Module() {
       throw IllegalArgumentException(
         "Invalid advertising timeout $value. Expected an integer between 0 and " +
           "$MAX_ADVERTISING_TIMEOUT_MS milliseconds, where 0 means no time limit."
+      )
+    }
+    return millis
+  }
+
+  private fun parseRequestTimeout(value: Any?): Int {
+    if (value == null) return DEFAULT_REQUEST_TIMEOUT_MS
+    val number = value as? Number
+    val millis = number?.toInt()
+    if (number == null || millis == null || number.toDouble() != millis.toDouble() ||
+      millis < 0 || millis >= ATT_TRANSACTION_TIMEOUT_MS
+    ) {
+      throw IllegalArgumentException(
+        "Invalid request timeout $value. Expected an integer between 0 and " +
+          "${ATT_TRANSACTION_TIMEOUT_MS - 1} milliseconds — below the ATT transaction timeout of " +
+          "$ATT_TRANSACTION_TIMEOUT_MS ms, past which the central has already given up — where 0 " +
+          "disables the timeout."
       )
     }
     return millis

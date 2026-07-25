@@ -2,6 +2,7 @@ import { requireNativeModule, NativeModule } from 'expo';
 
 import type {
   GattServiceConfig,
+  CreateServerOptions,
   AdvertiseConfig,
   BluetoothState,
   DeviceMtu,
@@ -9,7 +10,7 @@ import type {
 } from './ExpoGattServer.types';
 
 declare class ExpoGattServerModuleType extends NativeModule<GattServerEvents> {
-  createServer(services: GattServiceConfig[]): Promise<void>;
+  createServer(services: GattServiceConfig[], options: CreateServerOptions): Promise<void>;
   startAdvertising(config: AdvertiseConfig): Promise<void>;
   stopAdvertising(): void;
   sendNotification(

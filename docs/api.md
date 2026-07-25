@@ -29,18 +29,42 @@ Complete reference for all exported functions, types, events, and constants.
 ### createServer
 
 ```typescript
-createServer(services: GattServiceConfig[]): Promise<void>
+createServer(services: GattServiceConfig[], options?: CreateServerOptions): Promise<void>
 ```
 
 Initialize the native BLE GATT server with the given services and characteristics.
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `services` | `GattServiceConfig[]` | Array of service definitions |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `services` | `GattServiceConfig[]` | -- | Array of service definitions |
+| `options.requestTimeoutMs` | `number` | `10000` | How long a delegated request may go unanswered before the module answers it itself |
 
 **Throws** if Bluetooth permission is not granted (iOS: authorization check, Android: `BLUETOOTH_CONNECT` runtime permission).
 
 Must be called before `startAdvertising`. Call `stopServer` before calling `createServer` again.
+
+#### Unanswered requests
+
+A characteristic configured with `delegate.read` or `delegate.write` hands its ATT request to
+JavaScript and waits for [`sendResponse`](#sendresponse). If the handler never responds -- it threw,
+it awaited something that never settled, the listener was removed -- the request would otherwise be
+retained forever and the central would sit blocked on it.
+
+The Bluetooth Core Specification gives the central 30 seconds: "a transaction not completed within 30
+seconds shall time out. Such a transaction shall be considered to have failed [...] No more Attribute
+Protocol requests, commands, indications or notifications shall be sent to the target device on this
+ATT bearer" -- recovering costs a whole new bearer (Vol 3, Part F, Section 3.3.3). One unanswered
+request therefore poisons every later read, write **and notification** on that connection.
+
+So the module answers first. After `requestTimeoutMs` an unanswered request is completed with
+`ATT_ERROR_UNLIKELY_ERROR` (`0x0e`) and forgotten. The default of 10000 ms leaves the central 20
+seconds of margin, so it receives a real error response and the bearer stays usable. A later
+`sendResponse` for that request rejects with `REQUEST_NOT_FOUND`.
+
+Raise it for handlers that legitimately take longer, but it must stay below the 30000 ms transaction
+timeout -- past that the central has already given up, so a response could never arrive in time.
+Values from `30000` upward are rejected. Set `0` to disable the timeout and restore the unbounded
+wait.
 
 ---
 

@@ -1,8 +1,10 @@
 import { Platform, type EventSubscription } from 'expo-modules-core';
 
 import ExpoGattServerModule from './ExpoGattServerModule';
+import { ATT_TRANSACTION_TIMEOUT_MS } from './ExpoGattServer.types';
 import type {
   GattServiceConfig,
+  CreateServerOptions,
   AdvertiseConfig,
   AdvertisingMode,
   AdvertisingTxPower,
@@ -24,6 +26,7 @@ export type { EventSubscription };
 
 export {
   type GattServiceConfig,
+  type CreateServerOptions,
   type GattCharacteristicConfig,
   type CharacteristicDelegateConfig,
   type AdvertiseConfig,
@@ -65,6 +68,8 @@ export {
   ATT_ERROR_INSUFFICIENT_ENCRYPTION,
   ATT_ERROR_UNSUPPORTED_GROUP_TYPE,
   ATT_ERROR_INSUFFICIENT_RESOURCES,
+  ATT_TRANSACTION_TIMEOUT_MS,
+  DEFAULT_REQUEST_TIMEOUT_MS,
 } from './ExpoGattServer.types';
 
 // Accepted by CBUUID(string:) on iOS: 16-bit (4 hex digits), 32-bit (8 hex digits) or the
@@ -98,7 +103,10 @@ function assertValidBytes(value: unknown, field: string): void {
   }
 }
 
-export async function createServer(services: GattServiceConfig[]): Promise<void> {
+export async function createServer(
+  services: GattServiceConfig[],
+  options: CreateServerOptions = {},
+): Promise<void> {
   for (const service of services ?? []) {
     assertValidUuid(service?.uuid, 'service');
     for (const characteristic of service?.characteristics ?? []) {
@@ -108,7 +116,21 @@ export async function createServer(services: GattServiceConfig[]): Promise<void>
       }
     }
   }
-  return ExpoGattServerModule.createServer(services);
+  if (options.requestTimeoutMs !== undefined) {
+    if (
+      !Number.isInteger(options.requestTimeoutMs) ||
+      options.requestTimeoutMs < 0 ||
+      options.requestTimeoutMs >= ATT_TRANSACTION_TIMEOUT_MS
+    ) {
+      throw new Error(
+        `Invalid request timeout ${JSON.stringify(options.requestTimeoutMs)}. Expected an integer ` +
+          `between 0 and ${ATT_TRANSACTION_TIMEOUT_MS - 1} milliseconds — below the ATT ` +
+          `transaction timeout of ${ATT_TRANSACTION_TIMEOUT_MS} ms, past which the central has ` +
+          'already given up — where 0 disables the timeout.',
+      );
+    }
+  }
+  return ExpoGattServerModule.createServer(services, options);
 }
 
 /**
