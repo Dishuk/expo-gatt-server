@@ -525,7 +525,11 @@ public class ExpoGattServerModule: Module {
     // "Characteristics with cached values must be read-only". Always publish the
     // characteristic with a dynamic (nil) value and serve the initial value from our own
     // cache instead, so that any configuration Android accepts also works here.
-    if let bytes = map["value"] as? [Int], !bytes.isEmpty {
+    // An empty array is a configured value, not an absent one: `[]` declares a present but
+    // zero-length attribute, which is a legitimate GATT state and what Android already cached and
+    // auto-answered reads from. Skipping it here made the same configuration delegate every read to
+    // JavaScript on iOS instead.
+    if let bytes = map["value"] as? [Int] {
       initialValues[uuid] = try parseBytes(bytes, field: "characteristic")
     }
 

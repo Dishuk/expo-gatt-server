@@ -34,9 +34,11 @@ import {
   View,
 } from 'react-native';
 
-const SERVICE_UUID = '0000180d-0000-1000-8000-00805f9b34fb';
-const CHARACTERISTIC_UUID = '00002a37-0000-1000-8000-00805f9b34fb';
-const USER_DESCRIPTION_UUID = '00002901-0000-1000-8000-00805f9b34fb';
+// Short forms on purpose: both platforms now accept them, expanded onto the Bluetooth Base UUID in
+// the shared layer. Event payloads report the 128-bit form regardless.
+const SERVICE_UUID = '180d';
+const CHARACTERISTIC_UUID = '2a37';
+const USER_DESCRIPTION_UUID = '2901';
 
 const utf8 = (text: string): number[] => Array.from(new TextEncoder().encode(text));
 

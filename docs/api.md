@@ -2,6 +2,7 @@
 
 Complete reference for all exported functions, types, events, and constants.
 
+- [UUID forms](#uuid-forms)
 - [Functions](#functions)
   - [isSupported](#issupported)
   - [createServer](#createserver)
@@ -28,6 +29,60 @@ Complete reference for all exported functions, types, events, and constants.
 - [Types](#types)
 - [Constants](#constants)
 - [Error Codes](#error-codes)
+
+## UUID forms
+
+Every UUID this API accepts may be written in any of the three forms the Bluetooth Core Specification
+defines: 16-bit (4 hex digits, `'180D'`), 32-bit (8 hex digits, `'0000180D'`) or the hyphenated
+128-bit form (`'0000180d-0000-1000-8000-00805f9b34fb'`). This covers service and characteristic
+`uuid`, descriptor `uuid`, `AdvertiseConfig.serviceUuids`, `ServiceDataEntry.uuid`, and the
+`serviceUuid` / `characteristicUuid` arguments of `sendNotification` and
+`updateCharacteristicValue`.
+
+Short forms are **expanded onto the Bluetooth Base UUID in the shared TypeScript layer**, before
+either platform sees them. This exists because the two platforms disagreed: `CBUUID` "automatically
+handles transformations of 16 and 32 bit UUIDs into 128 bit UUIDs", but Java's `UUID.fromString`
+requires the 8-4-4-4-12 form, so `'180D'` was accepted on iOS and threw on Android.
+
+The Core Specification defines the aliases arithmetically (Vol 3, Part B, Section 2.5.1):
+
+```
+Bluetooth_Base_UUID = 00000000-0000-1000-8000-00805F9B34FB
+
+128_bit_value = 16_bit_value * 2^96 + Bluetooth_Base_UUID
+128_bit_value = 32_bit_value * 2^96 + Bluetooth_Base_UUID
+```
+
+`2^96` places the value in the leading 32 bits in both cases -- a 16-bit alias being zero-extended to
+32 bits first -- so the expansion is exactly "left-pad to eight hex digits, then append the base
+UUID's remaining four groups". `'180D'` and `'0000180D'` therefore both become
+`0000180d-0000-1000-8000-00805f9b34fb`.
+
+**This costs nothing in an advertisement.** Android encodes advertised UUIDs with
+`BluetoothUuid.uuidToBytes`, documented as returning "the shortest representation, a 16-bit, 32-bit or
+128-bit UUID", and `BluetoothLeAdvertiser` sizes the 31-byte budget the same way -- so a normalised
+16-bit alias still goes out as two octets, exactly as before.
+
+### What events report
+
+Event payloads always carry the **lowercase 128-bit form**, on both platforms, whatever spelling the
+configuration used. The spelling the consumer passed is deliberately not echoed back:
+
+- The specification requires the conversion for comparison anyway: "If two UUIDs of differing sizes
+  are to be compared, the shorter UUID must be converted to the longer UUID format before comparison".
+  One canonical spelling is what makes `event.characteristicUuid === MY_UUID` work at all.
+- Preserving it would mean carrying a reverse map from normalised UUID back to original spelling on
+  both platforms, and events also arrive for attributes that were never configured -- for which there
+  is no original spelling to restore.
+
+iOS needed a second fix for this to hold: `CBUUID.uuidString` uppercases the 128-bit form and echoes a
+short UUID back in the short form it was built from, while Java's `UUID.toString` is always lowercase
+128-bit. The same characteristic therefore used to arrive spelled differently on each platform. iOS now
+emits the normalised spelling.
+
+`deviceId` is **not** affected. It is an opaque handle -- a MAC address on Android, a
+`CBCentral.identifier` on iOS -- not a Bluetooth UUID, and it is passed straight back to `getMtu`,
+`sendNotification`, `sendResponse` and `disconnectDevice`.
 
 ## Functions
 
@@ -730,6 +785,14 @@ interface GattCharacteristicConfig {
   delegate?: CharacteristicDelegateConfig;
 }
 ```
+
+`value` is the value reads are answered from until something replaces it. Omit it to have every read
+delegated to JavaScript instead.
+
+`value: []` is a **configured** value, not an absent one: it declares a present but zero-length
+attribute, which is a legitimate GATT state, and both platforms now cache it and answer reads from it
+with an empty value. Previously Android did that while iOS treated `[]` as absent and delegated every
+read, so one configuration behaved differently on each platform.
 
 ### GattDescriptorConfig
 

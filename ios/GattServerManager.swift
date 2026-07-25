@@ -212,6 +212,27 @@ func attErrorCode(for status: Int) -> CBATTError.Code {
   }
 }
 
+/// The Bluetooth Base UUID's trailing four groups — Core Specification, Vol 3, Part B,
+/// Section 2.5.1.
+private let bluetoothBaseUuidSuffix = "-0000-1000-8000-00805f9b34fb"
+
+extension CBUUID {
+  /// The lowercase 128-bit spelling, which is what `java.util.UUID.toString` produces on Android.
+  ///
+  /// `CBUUID.uuidString` is not that: it uppercases the 128-bit form, and echoes a 16-bit or 32-bit
+  /// UUID back in the short form it was constructed from. Reporting it raw made the same
+  /// characteristic arrive in event payloads spelled differently on each platform, so a consumer
+  /// comparing an event's UUID against its own configuration matched on Android and failed on iOS.
+  /// The short-form expansion is the specification's own aliasing rule, and is kept here as well as
+  /// in JavaScript because these UUIDs come back out of CoreBluetooth rather than from the
+  /// configuration.
+  var normalizedString: String {
+    let lower = uuidString.lowercased()
+    guard lower.count < 36 else { return lower }
+    return String(repeating: "0", count: 8 - lower.count) + lower + bluetoothBaseUuidSuffix
+  }
+}
+
 /// Maps `CBManagerState` onto the platform-neutral state union shared with Android.
 func normalizedBluetoothState(_ state: CBManagerState) -> String {
   switch state {
@@ -569,7 +590,7 @@ class GattServerManager: NSObject {
     }
     delegate?.onNotificationSent(
       deviceId: entry.deviceId,
-      characteristicUuid: entry.characteristicUuid.uuidString,
+      characteristicUuid: entry.characteristicUuid.normalizedString,
       status: 0
     )
     entry.completion(nil)
@@ -777,7 +798,7 @@ class GattServerManager: NSObject {
   private func serviceUuid(containing characteristicUuid: CBUUID) -> String {
     addedServices.values.first {
       $0.characteristics?.contains { $0.uuid == characteristicUuid } ?? false
-    }?.uuid.uuidString ?? ""
+    }?.uuid.normalizedString ?? ""
   }
 
   private func nextRequestId() -> Int {
@@ -875,7 +896,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
           delegate?.onCharacteristicUnsubscribed(
             deviceId: deviceId,
             serviceUuid: serviceUuid(containing: characteristicUuid),
-            characteristicUuid: characteristicUuid.uuidString
+            characteristicUuid: characteristicUuid.normalizedString
           )
         }
       }
@@ -914,7 +935,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       databasePublished = false
       servicesAwaitingRegistration.removeAll()
       completeOpen(GattServerError.serviceRegistrationFailed(
-        uuid: service.uuid.uuidString,
+        uuid: service.uuid.normalizedString,
         reason: error.localizedDescription
       ))
       return
@@ -943,8 +964,8 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     subscribedCentrals[deviceId] = subs
     delegate?.onCharacteristicSubscribed(
       deviceId: deviceId,
-      serviceUuid: characteristic.service?.uuid.uuidString ?? "",
-      characteristicUuid: characteristic.uuid.uuidString
+      serviceUuid: characteristic.service?.uuid.normalizedString ?? "",
+      characteristicUuid: characteristic.uuid.normalizedString
     )
   }
 
@@ -957,8 +978,8 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     subscribedCentrals[deviceId]?.removeValue(forKey: characteristic.uuid)
     delegate?.onCharacteristicUnsubscribed(
       deviceId: deviceId,
-      serviceUuid: characteristic.service?.uuid.uuidString ?? "",
-      characteristicUuid: characteristic.uuid.uuidString
+      serviceUuid: characteristic.service?.uuid.normalizedString ?? "",
+      characteristicUuid: characteristic.uuid.normalizedString
     )
     // Nothing will ever accept these now, so fail them instead of leaking the queue.
     failPendingNotifications(.deviceDisconnected(deviceId: deviceId)) {
@@ -1008,8 +1029,8 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     delegate?.onCharacteristicReadRequest(
       deviceId: request.central.identifier.uuidString,
       requestId: reqId,
-      serviceUuid: request.characteristic.service?.uuid.uuidString ?? "",
-      characteristicUuid: request.characteristic.uuid.uuidString,
+      serviceUuid: request.characteristic.service?.uuid.normalizedString ?? "",
+      characteristicUuid: request.characteristic.uuid.normalizedString,
       offset: request.offset
     )
   }
@@ -1039,7 +1060,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     }
 
     for request in requests {
-      let serviceUuid = request.characteristic.service?.uuid.uuidString ?? ""
+      let serviceUuid = request.characteristic.service?.uuid.normalizedString ?? ""
       let value = request.value ?? Data()
 
       // A delegated batch may still be rejected, so the mirrored value is left untouched and the
@@ -1054,7 +1075,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
         deviceId: request.central.identifier.uuidString,
         requestId: batchId,
         serviceUuid: serviceUuid,
-        characteristicUuid: request.characteristic.uuid.uuidString,
+        characteristicUuid: request.characteristic.uuid.normalizedString,
         offset: request.offset,
         value: value,
         responseNeeded: delegated

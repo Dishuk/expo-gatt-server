@@ -33,6 +33,13 @@ export interface GattCharacteristicConfig {
   uuid: string;
   properties: CharacteristicProperty[];
   permissions: CharacteristicPermission[];
+  /**
+   * The value reads are answered from until something replaces it. Omit it to have every read
+   * delegated to JavaScript instead.
+   *
+   * `[]` is a configured value, not an absent one: it declares a present but zero-length attribute,
+   * which both platforms cache and answer reads from with an empty value.
+   */
   value?: number[];
   /**
    * Descriptors to publish alongside the characteristic, beyond the Client Characteristic
@@ -490,6 +497,27 @@ export interface BluetoothStateChangedEvent {
   state: BluetoothState;
 }
 
+/**
+ * Every `serviceUuid` and `characteristicUuid` in an event payload is the **lowercase 128-bit form**,
+ * on both platforms, whatever spelling the configuration used.
+ *
+ * A 16-bit or 32-bit UUID in the configuration is expanded onto the Bluetooth Base UUID before it
+ * reaches either platform, because `CBUUID` accepts all three forms while Java's `UUID.fromString`
+ * requires only the 8-4-4-4-12 one — so `'180D'` used to work on iOS and throw on Android. The
+ * spelling the consumer passed is deliberately **not** echoed back:
+ *
+ * - The Core Specification requires the conversion for comparison anyway: "If two UUIDs of differing
+ *   sizes are to be compared, the shorter UUID must be converted to the longer UUID format before
+ *   comparison" (Vol 3, Part B, Section 2.5.1). One canonical spelling is what makes a consumer's
+ *   `event.characteristicUuid === MY_UUID` work at all.
+ * - Preserving it would mean carrying a reverse map from normalised UUID back to original spelling on
+ *   both platforms, and events also arrive for attributes that were never configured — a write to a
+ *   descriptor, a read of a characteristic on a re-published database — for which no original
+ *   spelling exists to restore.
+ *
+ * `deviceId` is unaffected: it is an opaque handle (a MAC address on Android, a `CBCentral.identifier`
+ * on iOS), not a Bluetooth UUID.
+ */
 export type GattServerEvents = {
   onDeviceConnected(event: DeviceConnectedEvent): void;
   onDeviceDisconnected(event: DeviceDisconnectedEvent): void;

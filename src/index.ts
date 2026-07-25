@@ -143,13 +143,42 @@ const SHORT_UUID_RE = /^(?:[0-9a-fA-F]{4}|[0-9a-fA-F]{8})$/;
 const LONG_UUID_RE =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
-function assertValidUuid(uuid: unknown, field: string): void {
+/**
+ * The Bluetooth Base UUID, `00000000-0000-1000-8000-00805F9B34FB` — Bluetooth Core Specification,
+ * Vol 3, Part B, Section 2.5.1.
+ */
+const BLUETOOTH_BASE_UUID = '00000000-0000-1000-8000-00805f9b34fb';
+
+/**
+ * Validates a UUID and returns it as the lowercase 128-bit form, expanding a 16-bit or 32-bit alias
+ * onto the Bluetooth Base UUID.
+ *
+ * The specification defines the aliases arithmetically as
+ * `128_bit_value = 16_bit_value * 2^96 + Bluetooth_Base_UUID` and
+ * `128_bit_value = 32_bit_value * 2^96 + Bluetooth_Base_UUID` (Vol 3, Part B, Section 2.5.1). `2^96`
+ * lands the value in the leading 32 bits either way — a 16-bit alias being first zero-extended to
+ * 32 bits — so the expansion is exactly "left-pad to eight hex digits and append the base UUID's
+ * remaining four groups", which is why the suffix is taken from the constant rather than repeated.
+ *
+ * Normalising here rather than per platform is what makes one configuration portable: `CBUUID`
+ * accepts all three forms, but Java's `UUID.fromString` requires the 8-4-4-4-12 form, so `'180D'`
+ * used to be accepted on iOS and throw on Android. The specification also requires this conversion
+ * before comparing UUIDs of different sizes — "the shorter UUID must be converted to the longer UUID
+ * format before comparison" — so the long form is the only representation in which the module's own
+ * lookups and a consumer's `===` against an event payload agree.
+ */
+function normalizeUuid(uuid: unknown, field: string): string {
   if (typeof uuid !== 'string' || (!SHORT_UUID_RE.test(uuid) && !LONG_UUID_RE.test(uuid))) {
     throw new Error(
       `Invalid ${field} UUID ${JSON.stringify(uuid)}. Expected 4 hex digits (16-bit), ` +
         '8 hex digits (32-bit) or the hyphenated 8-4-4-4-12 form (128-bit).',
     );
   }
+  const lower = uuid.toLowerCase();
+  if (LONG_UUID_RE.test(lower)) {
+    return lower;
+  }
+  return lower.padStart(8, '0') + BLUETOOTH_BASE_UUID.slice(8);
 }
 
 function assertValidBytes(value: unknown, field: string): void {
@@ -205,16 +234,11 @@ function assertEachOneOf<T extends string>(values: unknown, allowed: T[], field:
   }
 }
 
-/** Recognises the CCCD in any of the three forms `assertValidUuid` accepts. */
-function isClientCharacteristicConfiguration(uuid: string): boolean {
-  const lower = uuid.toLowerCase();
-  return (
-    lower === CLIENT_CHARACTERISTIC_CONFIGURATION_UUID || lower === '2902' || lower === '00002902'
-  );
-}
-
-function assertValidCharacteristic(characteristic: GattCharacteristicConfig): void {
-  assertValidUuid(characteristic?.uuid, 'characteristic');
+/** Validates a characteristic and returns it with every UUID in the 128-bit form. */
+function normalizeCharacteristic(
+  characteristic: GattCharacteristicConfig,
+): GattCharacteristicConfig {
+  const uuid = normalizeUuid(characteristic?.uuid, 'characteristic');
   assertEachOneOf(characteristic?.properties, CHARACTERISTIC_PROPERTIES, 'characteristic property');
   assertEachOneOf(
     characteristic?.permissions,
@@ -224,9 +248,9 @@ function assertValidCharacteristic(characteristic: GattCharacteristicConfig): vo
   if (characteristic.value !== undefined) {
     assertValidBytes(characteristic.value, 'characteristic');
   }
-  for (const descriptor of characteristic.descriptors ?? []) {
-    assertValidUuid(descriptor?.uuid, 'descriptor');
-    if (isClientCharacteristicConfiguration(descriptor.uuid)) {
+  const descriptors = characteristic.descriptors?.map((descriptor) => {
+    const descriptorUuid = normalizeUuid(descriptor?.uuid, 'descriptor');
+    if (descriptorUuid === CLIENT_CHARACTERISTIC_CONFIGURATION_UUID) {
       throw new Error(
         `Descriptor ${descriptor.uuid} is the Client Characteristic Configuration descriptor, ` +
           'which the module publishes itself for every characteristic declaring "notify" or ' +
@@ -239,22 +263,29 @@ function assertValidCharacteristic(characteristic: GattCharacteristicConfig): vo
     if (descriptor.permissions !== undefined) {
       assertEachOneOf(descriptor.permissions, CHARACTERISTIC_PERMISSIONS, 'descriptor permission');
     }
-  }
+    return { ...descriptor, uuid: descriptorUuid };
+  });
+  return descriptors
+    ? { ...characteristic, uuid, descriptors }
+    : { ...characteristic, uuid };
 }
 
 export async function createServer(
   services: GattServiceConfig[],
   options: CreateServerOptions = {},
 ): Promise<void> {
-  for (const service of services ?? []) {
-    assertValidUuid(service?.uuid, 'service');
+  // Rebuilt rather than mutated, so the caller's own configuration object is left as they wrote it.
+  const normalizedServices = (services ?? []).map((service) => {
+    const uuid = normalizeUuid(service?.uuid, 'service');
     if (service.type !== undefined) {
       assertOneOf(service.type, SERVICE_TYPES, 'service type');
     }
-    for (const characteristic of service?.characteristics ?? []) {
-      assertValidCharacteristic(characteristic);
-    }
-  }
+    return {
+      ...service,
+      uuid,
+      characteristics: (service?.characteristics ?? []).map(normalizeCharacteristic),
+    };
+  });
   if (options.requestTimeoutMs !== undefined) {
     if (
       !Number.isInteger(options.requestTimeoutMs) ||
@@ -269,7 +300,7 @@ export async function createServer(
       );
     }
   }
-  return nativeModule().createServer(services, options);
+  return nativeModule().createServer(normalizedServices, options);
 }
 
 /**
@@ -292,9 +323,10 @@ function assertOneOf<T extends string>(value: unknown, allowed: T[], field: stri
 }
 
 export async function startAdvertising(config: AdvertiseConfig = {}): Promise<void> {
-  for (const uuid of config.serviceUuids ?? []) {
-    assertValidUuid(uuid, 'service');
-  }
+  // Expanding an advertised UUID costs nothing on the wire: Android encodes it with
+  // `BluetoothUuid.uuidToBytes`, documented as returning "the shortest representation", and sizes the
+  // 31-byte budget the same way — so a 16-bit alias still goes out as two octets.
+  const serviceUuids = config.serviceUuids?.map((uuid) => normalizeUuid(uuid, 'service'));
   if (config.mode !== undefined) {
     assertOneOf(config.mode, ADVERTISING_MODES, 'advertising mode');
   }
@@ -323,10 +355,11 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
     }
     assertValidBytes(entry.data, 'manufacturer');
   }
-  for (const entry of config.serviceData ?? []) {
-    assertValidUuid(entry?.uuid, 'service data');
+  const serviceData = config.serviceData?.map((entry) => {
+    const uuid = normalizeUuid(entry?.uuid, 'service data');
     assertValidBytes(entry.data, 'service data');
-  }
+    return { ...entry, uuid };
+  });
   if (Platform.OS === 'ios') {
     // Warned about rather than rejected: these only tune the radio, so failing the call would force
     // a platform branch on every caller. The options iOS cannot express at all reject natively.
@@ -347,7 +380,7 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
       );
     }
   }
-  return nativeModule().startAdvertising(config);
+  return nativeModule().startAdvertising({ ...config, serviceUuids, serviceData });
 }
 
 /**
@@ -394,13 +427,11 @@ export async function sendNotification(
   confirm: boolean = false,
   options: SendNotificationOptions = {},
 ): Promise<void> {
-  assertValidUuid(serviceUuid, 'service');
-  assertValidUuid(characteristicUuid, 'characteristic');
   assertValidBytes(value, 'notification');
   return nativeModule().sendNotification(
     deviceId,
-    serviceUuid,
-    characteristicUuid,
+    normalizeUuid(serviceUuid, 'service'),
+    normalizeUuid(characteristicUuid, 'characteristic'),
     value,
     confirm,
     options.requireSubscription ?? true,
@@ -464,10 +495,12 @@ export async function updateCharacteristicValue(
   characteristicUuid: string,
   value: number[],
 ): Promise<void> {
-  assertValidUuid(serviceUuid, 'service');
-  assertValidUuid(characteristicUuid, 'characteristic');
   assertValidBytes(value, 'characteristic');
-  return nativeModule().updateCharacteristicValue(serviceUuid, characteristicUuid, value);
+  return nativeModule().updateCharacteristicValue(
+    normalizeUuid(serviceUuid, 'service'),
+    normalizeUuid(characteristicUuid, 'characteristic'),
+    value,
+  );
 }
 
 /** Does nothing when the module is unsupported, for the same reason as `stopAdvertising`. */

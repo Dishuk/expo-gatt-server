@@ -64,6 +64,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- 16-bit and 32-bit UUIDs are expanded onto the Bluetooth Base UUID in the shared TypeScript layer, so
+  both platforms accept identical input. `CBUUID` took all three forms while Java's `UUID.fromString`
+  requires the 8-4-4-4-12 form, so `'180D'` used to be accepted on iOS and throw on Android. Applies to
+  service, characteristic and descriptor `uuid`, `serviceUuids`, `serviceData`, and the UUID arguments
+  of `sendNotification` and `updateCharacteristicValue`. The expansion is
+  `128_bit_value = short_value * 2^96 + Bluetooth_Base_UUID` (Core Specification, Vol 3, Part B,
+  Section 2.5.1). Advertising payloads are unaffected in size, because Android re-encodes an advertised
+  UUID in its shortest form
+- **Breaking:** event payloads report `serviceUuid` and `characteristicUuid` as the lowercase 128-bit
+  form on both platforms, rather than echoing the spelling the configuration used. iOS previously
+  reported `CBUUID.uuidString`, which uppercases the 128-bit form and echoes short UUIDs back short, so
+  the same characteristic arrived spelled differently on each platform and a `===` against the
+  configuration failed on iOS. `deviceId` is unchanged — it is an opaque handle, not a Bluetooth UUID
+- **Breaking:** `value: []` on a characteristic now means a present, zero-length value on iOS too, so
+  reads are auto-answered with an empty value instead of being delegated to JavaScript. Android already
+  behaved this way; omit `value` for the delegating behaviour
 - **Breaking:** an unrecognised characteristic property or permission name now throws instead of
   being silently ignored. A typo used to publish an attribute with one fewer permission than the
   configuration asked for, with no indication
