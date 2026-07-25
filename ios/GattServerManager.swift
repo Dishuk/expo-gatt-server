@@ -161,6 +161,18 @@ class GattServerManager: NSObject {
   private var readinessWaiters: [(Error?) -> Void] = []
   private var advertisingCompletion: ((Error?) -> Void)?
   private var addedServices: [CBUUID: CBMutableService] = [:]
+
+  /// Centrals the module believes are connected, keyed by `CBCentral.identifier`.
+  ///
+  /// `CBPeripheralManagerDelegate` declares no connection-level callback — the protocol is exactly
+  /// `peripheralManagerDidUpdateState`, `willRestoreState`, `didStartAdvertising`, `didAddService`,
+  /// `didSubscribeTo`, `didUnsubscribeFrom`, `didReceiveReadRequest`, `didReceiveWriteRequests`,
+  /// `peripheralManagerIsReadyToUpdateSubscribers` and the three L2CAP methods — so membership is
+  /// derived from the only signals CoreBluetooth does deliver: a subscribe, a read request or a
+  /// write request. A central is therefore discovered on its first ATT activity rather than when
+  /// the link is established.
+  private var connectedCentrals: [String: CBCentral] = [:]
+
   private var subscribedCentrals: [String: [CBUUID: CBCentral]] = [:]
   private var characteristicValues: [CBUUID: Data] = [:]
   private var pendingRequests: [Int: PendingRequest] = [:]
@@ -346,6 +358,12 @@ class GattServerManager: NSObject {
     // no one is listening for it.
     characteristicValues[charUUID] = value
 
+    // Connection and subscription are reported separately now, so an unknown central is told it is
+    // not connected rather than that it has not subscribed — the same distinction Android draws.
+    guard connectedCentrals[deviceId] != nil else {
+      throw GattServerError.deviceDisconnected(deviceId: deviceId)
+    }
+
     guard let centrals = subscribedCentrals[deviceId],
           let central = centrals[charUUID] else {
       throw GattServerError.noSubscriber(
@@ -462,6 +480,7 @@ class GattServerManager: NSObject {
     serviceConfiguration.removeAll()
     servicesAwaitingRegistration.removeAll()
     addedServices.removeAll()
+    connectedCentrals.removeAll()
     subscribedCentrals.removeAll()
     characteristicValues.removeAll()
     pendingRequests.removeAll()
@@ -490,6 +509,35 @@ class GattServerManager: NSObject {
   private func nextRequestId() -> Int {
     requestCounter += 1
     return requestCounter
+  }
+
+  /// Records ATT activity from `central` and reports a first sighting as a connection.
+  ///
+  /// The stored reference is always refreshed: CoreBluetooth may hand out a distinct `CBCentral`
+  /// instance per callback, and `maximumUpdateValueLength` is read from whichever one is current.
+  @discardableResult
+  private func noteActivity(from central: CBCentral) -> String {
+    let deviceId = central.identifier.uuidString
+    let isFirstSighting = connectedCentrals[deviceId] == nil
+    connectedCentrals[deviceId] = central
+    if isFirstSighting {
+      // CoreBluetooth exposes no name for a central — only `CBPeripheral` has one — so there is
+      // nothing truthful to report here.
+      delegate?.onDeviceConnected(deviceId: deviceId, name: nil)
+    }
+    return deviceId
+  }
+
+  /// Drops every trace of `deviceId` and reports the disconnection exactly once. A device that was
+  /// never seen, or that has already been reported, produces nothing.
+  private func markDisconnected(_ deviceId: String, reason: GattServerError) {
+    guard connectedCentrals.removeValue(forKey: deviceId) != nil else { return }
+    subscribedCentrals.removeValue(forKey: deviceId)
+    pendingRequests = pendingRequests.filter {
+      $0.value.request.central.identifier.uuidString != deviceId
+    }
+    failPendingNotifications(reason) { $0.deviceId == deviceId }
+    delegate?.onDeviceDisconnected(deviceId: deviceId)
   }
 }
 
@@ -527,7 +575,11 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       }
       addedServices.removeAll()
 
-      let disconnected = Array(subscribedCentrals.keys)
+      // Apple documents that a state below powered on means "any connected centrals have been
+      // disconnected", so this is the one moment iOS can report a disconnection for a central that
+      // never subscribed to anything.
+      let disconnected = Array(connectedCentrals.keys)
+      connectedCentrals.removeAll()
       subscribedCentrals.removeAll()
       pendingRequests.removeAll()
       failPendingNotifications(.bluetoothUnavailable(state: peripheral.state))
@@ -573,11 +625,13 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     central: CBCentral,
     didSubscribeTo characteristic: CBCharacteristic
   ) {
-    let deviceId = central.identifier.uuidString
+    // Subscribing is one of the activity signals a connection is derived from, but it no longer
+    // doubles as the connection event: a central that subscribes to three characteristics is one
+    // connection, and `noteActivity` reports it once.
+    let deviceId = noteActivity(from: central)
     var subs = subscribedCentrals[deviceId] ?? [:]
     subs[characteristic.uuid] = central
     subscribedCentrals[deviceId] = subs
-    delegate?.onDeviceConnected(deviceId: deviceId, name: nil)
     delegate?.onCharacteristicSubscribed(
       deviceId: deviceId,
       serviceUuid: characteristic.service?.uuid.uuidString ?? "",
@@ -601,12 +655,13 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     failPendingNotifications(.deviceDisconnected(deviceId: deviceId)) {
       $0.deviceId == deviceId && $0.characteristicUuid == characteristic.uuid
     }
+    // CoreBluetooth delivers this same callback whether the central deliberately cleared its
+    // Client Characteristic Configuration or simply went away, and offers nothing to tell the two
+    // apart, so losing the last subscription is the only disconnect signal available for a
+    // subscribed central. A central that unsubscribes but stays connected is therefore reported as
+    // disconnected; a later read or write re-discovers it and reports a fresh connection.
     if subscribedCentrals[deviceId]?.isEmpty == true {
-      subscribedCentrals.removeValue(forKey: deviceId)
-      pendingRequests = pendingRequests.filter {
-        $0.value.request.central.identifier.uuidString != deviceId
-      }
-      delegate?.onDeviceDisconnected(deviceId: deviceId)
+      markDisconnected(deviceId, reason: .deviceDisconnected(deviceId: deviceId))
     }
   }
 
@@ -614,6 +669,8 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     _ peripheral: CBPeripheralManager,
     didReceiveRead request: CBATTRequest
   ) {
+    noteActivity(from: request.central)
+
     let reqId = nextRequestId()
     pendingRequests[reqId] = PendingRequest(request: request, isRead: true)
 
@@ -647,6 +704,10 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     didReceiveWrite requests: [CBATTRequest]
   ) {
     guard let first = requests.first else { return }
+
+    for request in requests {
+      noteActivity(from: request.central)
+    }
 
     // Apple documents that `respond(to:withResult:)` must be called exactly once per callback,
     // passing the first request of the array, and that the batch is all-or-nothing: "if you can't

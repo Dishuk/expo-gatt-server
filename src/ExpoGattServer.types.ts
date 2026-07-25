@@ -70,6 +70,7 @@ export interface AdvertiseConfig {
 
 export interface DeviceConnectedEvent {
   deviceId: string;
+  /** Always empty on iOS: CoreBluetooth exposes no name for a remote central. */
   name?: string;
 }
 

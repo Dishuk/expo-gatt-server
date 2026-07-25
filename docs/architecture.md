@@ -163,7 +163,8 @@ On iOS, the negotiated payload size is read from `central.maximumUpdateValueLeng
 | Behavior | iOS | Android |
 |----------|-----|---------|
 | Device identifier | UUID (opaque, can rotate) | MAC address (stable) |
-| Connection event | Fires on first CCCD subscription | Fires on `onConnectionStateChange` |
+| Connection event | Fires on the central's first ATT activity (subscribe, read or write) -- `CBPeripheralManagerDelegate` has no connection callback | Fires on `onConnectionStateChange` |
+| Disconnection event | Inferred from the loss of the last subscription, or reported for every known central when Bluetooth leaves `poweredOn` | Fires on `onConnectionStateChange` |
 | Write auto-response | Not automatic; JS must respond if `responseNeeded` | Automatic for `responseNeeded` requests |
 | CCCD descriptor | Managed by CoreBluetooth internally | Explicitly added by the module |
 | MTU source | `central.maximumUpdateValueLength` | `onMtuChanged` callback |

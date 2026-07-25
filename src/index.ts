@@ -188,12 +188,30 @@ export async function getBluetoothState(): Promise<BluetoothState> {
   return ExpoGattServerModule.getBluetoothState();
 }
 
+/**
+ * Fires once per connected central, independently of any subscription.
+ *
+ * Android reports the connection itself, via `onConnectionStateChange`. iOS has no equivalent —
+ * `CBPeripheralManagerDelegate` declares no connection-level callback — so a central is reported on
+ * its first ATT activity instead: a subscribe, a read request or a write request. A central that
+ * connects and never touches an attribute is not observable from the peripheral role at all.
+ */
 export function addDeviceConnectedListener(
   listener: (event: DeviceConnectedEvent) => void,
 ): EventSubscription {
   return ExpoGattServerModule.addListener('onDeviceConnected', listener);
 }
 
+/**
+ * Fires once when a central goes away.
+ *
+ * Android reports the disconnection itself. On iOS it is inferred, because CoreBluetooth never
+ * reports one: losing the last subscription is treated as a disconnection, and every known central
+ * is reported as disconnected when Bluetooth leaves `poweredOn`. A central that only ever read or
+ * wrote therefore may not produce this event until Bluetooth is turned off or the server stops, and
+ * a central that deliberately unsubscribes but stays connected produces it early — CoreBluetooth
+ * delivers the same callback for both and offers nothing to tell them apart.
+ */
 export function addDeviceDisconnectedListener(
   listener: (event: DeviceDisconnectedEvent) => void,
 ): EventSubscription {

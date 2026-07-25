@@ -73,7 +73,8 @@ To advertise and handle requests while the app is backgrounded, enable the `blue
 | `createServer` rejects with permission error | Bluetooth authorization not granted | Check `NSBluetoothAlwaysUsageDescription` is set, user accepted the prompt |
 | `startAdvertising` rejects | Bluetooth not powered on | Ensure Bluetooth is enabled in Settings |
 | `sendNotification` rejects with `ERR_NO_SUBSCRIBER` | No subscribers | The central must enable notifications or indications on the characteristic first -- wait for `onCharacteristicSubscribed` |
-| `onDeviceConnected` not firing | iOS fires this on first subscription, not raw connection | This is expected behavior -- wait for the central to subscribe |
+| `onDeviceConnected` not firing | `CBPeripheralManagerDelegate` has no connection callback, so iOS reports a central on its first ATT activity -- a subscribe, read or write | Expected. A central that connects but never touches an attribute is invisible to the peripheral role |
+| `onDeviceDisconnected` not firing | iOS can only infer a disconnection from the loss of the last subscription, or from Bluetooth being turned off | Expected for a central that never subscribed. See [Platform Differences](./architecture.md#platform-differences) |
 
 ## Android
 
