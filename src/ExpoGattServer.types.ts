@@ -92,6 +92,38 @@ export interface NotificationSentEvent {
 }
 
 /**
+ * A central enabled notifications or indications on a characteristic — the signal to start
+ * streaming to it.
+ *
+ * On Android this is driven by a write to the characteristic's Client Characteristic Configuration
+ * descriptor (Bluetooth Core Specification, Vol 3, Part G, Section 3.3.3.3), which every client
+ * has its own instance of. On iOS it comes from `peripheralManager(_:central:didSubscribeTo:)`.
+ *
+ * Whether the central asked for notifications or for indications is not reported: CoreBluetooth
+ * does not expose the distinction, so it cannot be surfaced consistently. Switching between the
+ * two does not produce a further event — the central stays subscribed throughout.
+ */
+export interface CharacteristicSubscribedEvent {
+  deviceId: string;
+  /** Empty when the platform could not identify the owning service. */
+  serviceUuid: string;
+  characteristicUuid: string;
+}
+
+/**
+ * A central stopped receiving updates for a characteristic — the signal to stop streaming.
+ *
+ * Also emitted for every subscription a central still held when it disconnects, and when
+ * Bluetooth is turned off and the published database is dropped.
+ */
+export interface CharacteristicUnsubscribedEvent {
+  deviceId: string;
+  /** Empty when the platform could not identify the owning service. */
+  serviceUuid: string;
+  characteristicUuid: string;
+}
+
+/**
  * Bluetooth adapter state, normalised so consumers never have to branch on platform.
  *
  * - `poweredOn` — adapter is on and usable. The only state in which a server can advertise.
@@ -126,6 +158,8 @@ export type GattServerEvents = {
   onCharacteristicReadRequest(event: CharacteristicReadRequestEvent): void;
   onCharacteristicWriteRequest(event: CharacteristicWriteRequestEvent): void;
   onNotificationSent(event: NotificationSentEvent): void;
+  onCharacteristicSubscribed(event: CharacteristicSubscribedEvent): void;
+  onCharacteristicUnsubscribed(event: CharacteristicUnsubscribedEvent): void;
   onBluetoothStateChanged(event: BluetoothStateChangedEvent): void;
 };
 

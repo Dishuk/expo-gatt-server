@@ -91,6 +91,8 @@ protocol GattServerManagerDelegate: AnyObject {
     characteristicUuid: String, offset: Int, value: Data, responseNeeded: Bool
   )
   func onNotificationSent(deviceId: String, characteristicUuid: String, status: Int)
+  func onCharacteristicSubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
+  func onCharacteristicUnsubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
 }
 
 /// Maps a status supplied by JavaScript onto the ATT error code CoreBluetooth transmits.
@@ -464,6 +466,14 @@ class GattServerManager: NSObject {
     } as? CBMutableCharacteristic
   }
 
+  /// `CBCharacteristic.service` is a weak reference that a torn-down database may already have
+  /// cleared, so the owning service is looked up in the published database instead.
+  private func serviceUuid(containing characteristicUuid: CBUUID) -> String {
+    addedServices.values.first {
+      $0.characteristics?.contains { $0.uuid == characteristicUuid } ?? false
+    }?.uuid.uuidString ?? ""
+  }
+
   private func nextRequestId() -> Int {
     requestCounter += 1
     return requestCounter
@@ -489,6 +499,19 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       // so discard the mirrored state rather than letting it go stale.
       let error = GattServerError.bluetoothUnavailable(state: peripheral.state)
       servicesAwaitingRegistration.removeAll()
+
+      // Every subscription dies with the database, so report each one as ended before the service
+      // lookup it needs is discarded.
+      let ended = subscribedCentrals.map { ($0.key, Array($0.value.keys)) }
+      for (deviceId, characteristicUuids) in ended {
+        for characteristicUuid in characteristicUuids {
+          delegate?.onCharacteristicUnsubscribed(
+            deviceId: deviceId,
+            serviceUuid: serviceUuid(containing: characteristicUuid),
+            characteristicUuid: characteristicUuid.uuidString
+          )
+        }
+      }
       addedServices.removeAll()
 
       let disconnected = Array(subscribedCentrals.keys)
@@ -542,6 +565,11 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     subs[characteristic.uuid] = central
     subscribedCentrals[deviceId] = subs
     delegate?.onDeviceConnected(deviceId: deviceId, name: nil)
+    delegate?.onCharacteristicSubscribed(
+      deviceId: deviceId,
+      serviceUuid: characteristic.service?.uuid.uuidString ?? "",
+      characteristicUuid: characteristic.uuid.uuidString
+    )
   }
 
   func peripheralManager(
@@ -551,6 +579,11 @@ extension GattServerManager: CBPeripheralManagerDelegate {
   ) {
     let deviceId = central.identifier.uuidString
     subscribedCentrals[deviceId]?.removeValue(forKey: characteristic.uuid)
+    delegate?.onCharacteristicUnsubscribed(
+      deviceId: deviceId,
+      serviceUuid: characteristic.service?.uuid.uuidString ?? "",
+      characteristicUuid: characteristic.uuid.uuidString
+    )
     // Nothing will ever accept these now, so fail them instead of leaking the queue.
     failPendingNotifications(.deviceDisconnected(deviceId: deviceId)) {
       $0.deviceId == deviceId && $0.characteristicUuid == characteristic.uuid

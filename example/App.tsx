@@ -1,6 +1,8 @@
 import {
   GATT_SUCCESS,
   addCharacteristicReadRequestListener,
+  addCharacteristicSubscribedListener,
+  addCharacteristicUnsubscribedListener,
   addCharacteristicWriteRequestListener,
   addDeviceConnectedListener,
   addDeviceDisconnectedListener,
@@ -87,6 +89,13 @@ export default function App() {
       }),
       addNotificationSentListener((event) => {
         append(`onNotificationSent ${event.characteristicUuid} status=${event.status}`);
+      }),
+      addCharacteristicSubscribedListener((event) => {
+        setDeviceId(event.deviceId);
+        append(`onCharacteristicSubscribed ${event.deviceId} ${event.characteristicUuid}`);
+      }),
+      addCharacteristicUnsubscribedListener((event) => {
+        append(`onCharacteristicUnsubscribed ${event.deviceId} ${event.characteristicUuid}`);
       }),
     ];
 

@@ -16,6 +16,8 @@ Complete reference for all exported functions, types, events, and constants.
   - [addCharacteristicReadRequestListener](#addcharacteristicreadrequestlistener)
   - [addCharacteristicWriteRequestListener](#addcharacteristicwriterequestlistener)
   - [addNotificationSentListener](#addnotificationsentlistener)
+  - [addCharacteristicSubscribedListener](#addcharacteristicsubscribedlistener)
+  - [addCharacteristicUnsubscribedListener](#addcharacteristicunsubscribedlistener)
 - [Types](#types)
 - [Constants](#constants)
 - [Error Codes](#error-codes)
@@ -265,6 +267,54 @@ Fired after a notification or indication is delivered (or fails).
 `characteristicUuid` always identifies the characteristic this particular notification carried, so
 notifying several characteristics, or several devices, reports each one correctly.
 
+---
+
+### addCharacteristicSubscribedListener
+
+```typescript
+addCharacteristicSubscribedListener(
+  listener: (event: CharacteristicSubscribedEvent) => void,
+): Subscription
+```
+
+Fired when a central enables notifications or indications on a characteristic. This is the signal
+to start streaming -- before it arrives the central receives nothing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event.deviceId` | `string` | Subscribing device |
+| `event.serviceUuid` | `string` | Owning service, or `''` when the platform could not identify it |
+| `event.characteristicUuid` | `string` | Subscribed characteristic |
+
+On Android the event is driven by a write to the characteristic's Client Characteristic
+Configuration descriptor (Bluetooth Core Specification, Vol 3, Part G, Section 3.3.3.3), tracked
+per client as the specification requires. On iOS it comes from
+[`peripheralManager(_:central:didSubscribeTo:)`](https://developer.apple.com/documentation/corebluetooth/cbperipheralmanagerdelegate/peripheralmanager(_:central:didsubscribeto:)).
+
+Whether the central asked for notifications or indications is not reported: CoreBluetooth does not
+expose the distinction, so it cannot be surfaced consistently. Switching between the two does not
+emit a further event -- the central stays subscribed throughout.
+
+---
+
+### addCharacteristicUnsubscribedListener
+
+```typescript
+addCharacteristicUnsubscribedListener(
+  listener: (event: CharacteristicUnsubscribedEvent) => void,
+): Subscription
+```
+
+Fired when a central stops receiving updates for a characteristic -- the signal to stop streaming.
+Also emitted for every subscription a central still held when it disconnects, and when Bluetooth is
+turned off and the published database is dropped.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event.deviceId` | `string` | Unsubscribing device |
+| `event.serviceUuid` | `string` | Owning service, or `''` when the platform could not identify it |
+| `event.characteristicUuid` | `string` | Characteristic no longer subscribed |
+
 ## Types
 
 ### GattServiceConfig
@@ -360,6 +410,16 @@ interface NotificationSentEvent {
   deviceId: string;
   characteristicUuid: string;
   status: number;
+}
+```
+
+### CharacteristicSubscribedEvent / CharacteristicUnsubscribedEvent
+
+```typescript
+interface CharacteristicSubscribedEvent {
+  deviceId: string;
+  serviceUuid: string;
+  characteristicUuid: string;
 }
 ```
 

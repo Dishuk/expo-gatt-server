@@ -29,6 +29,8 @@ public class ExpoGattServerModule: Module {
       "onCharacteristicReadRequest",
       "onCharacteristicWriteRequest",
       "onNotificationSent",
+      "onCharacteristicSubscribed",
+      "onCharacteristicUnsubscribed",
       "onBluetoothStateChanged"
     )
 
@@ -442,6 +444,26 @@ extension ExpoGattServerModule: GattServerManagerDelegate {
       "deviceId": deviceId,
       "characteristicUuid": characteristicUuid,
       "status": status
+    ])
+  }
+
+  func onCharacteristicSubscribed(
+    deviceId: String, serviceUuid: String, characteristicUuid: String
+  ) {
+    sendEvent("onCharacteristicSubscribed", [
+      "deviceId": deviceId,
+      "serviceUuid": serviceUuid,
+      "characteristicUuid": characteristicUuid
+    ])
+  }
+
+  func onCharacteristicUnsubscribed(
+    deviceId: String, serviceUuid: String, characteristicUuid: String
+  ) {
+    sendEvent("onCharacteristicUnsubscribed", [
+      "deviceId": deviceId,
+      "serviceUuid": serviceUuid,
+      "characteristicUuid": characteristicUuid
     ])
   }
 }

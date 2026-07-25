@@ -30,6 +30,21 @@ private const val ATT_HEADER_SIZE = 3
  */
 private const val MAX_QUEUED_NOTIFICATIONS_PER_DEVICE = 64
 
+/**
+ * Client Characteristic Configuration descriptor — Bluetooth Core Specification, Vol 3, Part G,
+ * Section 3.3.3.3. Its value "shall be two octets in length"; bit 0 enables notifications and bit 1
+ * enables indications (Table 3.11), which is the little-endian encoding Android exposes as
+ * `BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE` = `{0x01, 0x00}` and
+ * `ENABLE_INDICATION_VALUE` = `{0x02, 0x00}`. The default is 0x0000.
+ */
+val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+private const val CCCD_VALUE_LENGTH = 2
+private const val CCCD_NOTIFY_BIT = 0x0001
+private const val CCCD_INDICATE_BIT = 0x0002
+
+/** ATT "Invalid Attribute Value Length" — Core Specification, Vol 3, Part F, Table 3.4. */
+private const val ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH = 0x0D
+
 open class GattServerException(val code: String, message: String) : Exception(message)
 class MtuException(code: String, message: String) : GattServerException(code, message)
 
@@ -84,6 +99,8 @@ class GattServerManager(
       characteristicUuid: String, offset: Int, value: ByteArray, responseNeeded: Boolean
     )
     fun onNotificationSent(deviceId: String, characteristicUuid: String, status: Int)
+    fun onCharacteristicSubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
+    fun onCharacteristicUnsubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
   }
 
   var listener: Listener? = null
@@ -127,6 +144,14 @@ class GattServerManager(
     val waiting = ArrayDeque<QueuedNotification>()
     var inFlight: QueuedNotification? = null
   }
+
+  // "Each client has its own instantiation of the Client Characteristic Configuration. Reads of
+  // the Client Characteristic Configuration only shows the configuration for that client and
+  // writes only affect the configuration of that client" (Core Specification, Vol 3, Part G,
+  // Section 3.3.3.3). The framework hands out one shared BluetoothGattDescriptor per
+  // characteristic, so the per-client configuration is kept here instead: device address, then
+  // characteristic UUID, then the raw two-octet configuration bits.
+  private val subscriptions = ConcurrentHashMap<String, ConcurrentHashMap<UUID, Int>>()
 
   // The pre-33 `notifyCharacteristicChanged` overload reads the payload from the shared
   // `characteristic.value` field, so the write and the call have to be atomic with respect to a
@@ -219,7 +244,11 @@ class GattServerManager(
     pendingRequests.clear()
     failAllNotifications(GattServerException("ERR_BLUETOOTH", "Bluetooth was turned off"))
     // The server is gone, so no onConnectionStateChange callbacks will arrive for these.
-    disconnected.forEach { listener?.onDeviceDisconnected(it) }
+    disconnected.forEach {
+      clearSubscriptions(it)
+      listener?.onDeviceDisconnected(it)
+    }
+    subscriptions.clear()
   }
 
   /** Re-opens the server and re-registers the retained configuration. */
@@ -257,6 +286,7 @@ class GattServerManager(
           pendingRequests.entries.removeIf { it.value == id }
           // Nothing will ever acknowledge these now, so fail them instead of leaking the queue.
           failNotifications(id, GattServerException("ERR_DEVICE_DISCONNECTED", "Device $id disconnected"))
+          clearSubscriptions(id)
           listener?.onDeviceDisconnected(id)
         }
       }
@@ -322,6 +352,26 @@ class GattServerManager(
       preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?
     ) {
       Log.d(TAG, "onDescriptorWriteRequest: device=${device.address} desc=${descriptor.uuid} responseNeeded=$responseNeeded value=${value?.joinToString(",") { String.format("%02x", it) }}")
+
+      if (descriptor.uuid == CCCD_UUID) {
+        // The specification fixes the length at two octets, so anything else is malformed and is
+        // rejected rather than parsed into a guess at what the client meant.
+        if (offset != 0 || value == null || value.size != CCCD_VALUE_LENGTH) {
+          Log.w(TAG, "onDescriptorWriteRequest: rejecting malformed CCCD write from ${device.address}")
+          if (responseNeeded) {
+            gattServer?.sendResponse(
+              device, requestId, ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH, offset, null
+            )
+          }
+          return
+        }
+        applyClientConfiguration(device, descriptor.characteristic, cccdBits(value))
+        if (responseNeeded) {
+          gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+        }
+        return
+      }
+
       if (value != null) {
         @Suppress("DEPRECATION")
         descriptor.value = value
@@ -335,8 +385,14 @@ class GattServerManager(
       device: BluetoothDevice, requestId: Int, offset: Int,
       descriptor: BluetoothGattDescriptor
     ) {
-      @Suppress("DEPRECATION")
-      val value = descriptor.value ?: BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+      // A CCCD read "only shows the configuration for that client", so it is answered from this
+      // device's own configuration rather than from the descriptor instance every client shares.
+      val value = if (descriptor.uuid == CCCD_UUID) {
+        cccdValue(clientConfiguration(device.address, descriptor.characteristic.uuid))
+      } else {
+        @Suppress("DEPRECATION")
+        descriptor.value ?: BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+      }
       Log.d(TAG, "onDescriptorReadRequest: device=${device.address} desc=${descriptor.uuid} value=${value.joinToString(",") { String.format("%02x", it) }}")
       gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
     }
@@ -585,6 +641,72 @@ class GattServerManager(
     pumpNotifications(deviceId)
   }
 
+  /** Two octets, little endian, as the descriptor value is defined. */
+  private fun cccdBits(value: ByteArray): Int =
+    (value[0].toInt() and 0xFF) or ((value[1].toInt() and 0xFF) shl 8)
+
+  private fun cccdValue(bits: Int): ByteArray =
+    byteArrayOf((bits and 0xFF).toByte(), ((bits shr 8) and 0xFF).toByte())
+
+  /** The two-octet configuration this client last wrote, or the specified default of 0x0000. */
+  private fun clientConfiguration(deviceId: String, characteristicUuid: UUID): Int =
+    subscriptions[deviceId]?.get(characteristicUuid) ?: 0
+
+  /**
+   * Reports whether [deviceId] has asked to receive updates for [characteristicUuid], by having
+   * set either the notification or the indication bit of its own CCCD.
+   */
+  fun isSubscribed(deviceId: String, characteristicUuid: UUID): Boolean =
+    clientConfiguration(deviceId, characteristicUuid) and
+      (CCCD_NOTIFY_BIT or CCCD_INDICATE_BIT) != 0
+
+  /**
+   * Records a client's new CCCD value and reports the transition. Only the change from "receiving
+   * nothing" to "receiving something" and back is surfaced — switching between notifications and
+   * indications leaves the client subscribed throughout.
+   */
+  private fun applyClientConfiguration(
+    device: BluetoothDevice,
+    characteristic: BluetoothGattCharacteristic,
+    bits: Int,
+  ) {
+    val deviceId = device.address
+    val characteristicUuid = characteristic.uuid
+    val serviceUuid = characteristic.service?.uuid?.toString() ?: ""
+    val enabled = bits and (CCCD_NOTIFY_BIT or CCCD_INDICATE_BIT) != 0
+    val wasEnabled = isSubscribed(deviceId, characteristicUuid)
+
+    if (bits == 0) {
+      val forDevice = subscriptions[deviceId]
+      forDevice?.remove(characteristicUuid)
+      if (forDevice != null && forDevice.isEmpty()) {
+        subscriptions.remove(deviceId, forDevice)
+      }
+    } else {
+      subscriptions.getOrPut(deviceId) { ConcurrentHashMap() }[characteristicUuid] = bits
+    }
+
+    Log.d(TAG, "CCCD: device=$deviceId char=$characteristicUuid bits=$bits subscribed=$enabled")
+    if (enabled && !wasEnabled) {
+      listener?.onCharacteristicSubscribed(deviceId, serviceUuid, characteristicUuid.toString())
+    } else if (!enabled && wasEnabled) {
+      listener?.onCharacteristicUnsubscribed(deviceId, serviceUuid, characteristicUuid.toString())
+    }
+  }
+
+  /** Forgets a device's subscriptions and reports each one it still held as ended. */
+  private fun clearSubscriptions(deviceId: String) {
+    val forDevice = subscriptions.remove(deviceId) ?: return
+    val server = gattServer
+    for ((characteristicUuid, bits) in forDevice) {
+      if (bits and (CCCD_NOTIFY_BIT or CCCD_INDICATE_BIT) == 0) continue
+      val serviceUuid = server?.services
+        ?.firstOrNull { service -> service.getCharacteristic(characteristicUuid) != null }
+        ?.uuid?.toString() ?: ""
+      listener?.onCharacteristicUnsubscribed(deviceId, serviceUuid, characteristicUuid.toString())
+    }
+  }
+
   /**
    * Hands the next queued notification to the stack if the device's single outstanding slot is
    * free. Entries the stack refuses outright never produce a callback, so they are completed here
@@ -738,6 +860,7 @@ class GattServerManager(
     deviceMtu.clear()
     pendingRequests.clear()
     failAllNotifications(GattServerException("ERR_NO_SERVER", "Server stopped"))
+    subscriptions.clear()
     delegations.clear()
     delegationsByCharacteristic.clear()
   }

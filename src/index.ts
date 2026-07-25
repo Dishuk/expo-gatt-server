@@ -9,6 +9,8 @@ import type {
   CharacteristicReadRequestEvent,
   CharacteristicWriteRequestEvent,
   NotificationSentEvent,
+  CharacteristicSubscribedEvent,
+  CharacteristicUnsubscribedEvent,
   BluetoothState,
   BluetoothStateChangedEvent,
 } from './ExpoGattServer.types';
@@ -27,6 +29,8 @@ export {
   type CharacteristicReadRequestEvent,
   type CharacteristicWriteRequestEvent,
   type NotificationSentEvent,
+  type CharacteristicSubscribedEvent,
+  type CharacteristicUnsubscribedEvent,
   type BluetoothState,
   type BluetoothStateChangedEvent,
   type GattServerEvents,
@@ -204,6 +208,27 @@ export function addNotificationSentListener(
   listener: (event: NotificationSentEvent) => void,
 ): EventSubscription {
   return ExpoGattServerModule.addListener('onNotificationSent', listener);
+}
+
+/**
+ * Fires when a central enables notifications or indications on a characteristic. This is the
+ * signal to start streaming: before it arrives the central receives nothing, and on Android
+ * `sendNotification` has no subscriber to send to.
+ */
+export function addCharacteristicSubscribedListener(
+  listener: (event: CharacteristicSubscribedEvent) => void,
+): EventSubscription {
+  return ExpoGattServerModule.addListener('onCharacteristicSubscribed', listener);
+}
+
+/**
+ * Fires when a central stops receiving updates for a characteristic, including when it
+ * disconnects while still subscribed. This is the signal to stop streaming.
+ */
+export function addCharacteristicUnsubscribedListener(
+  listener: (event: CharacteristicUnsubscribedEvent) => void,
+): EventSubscription {
+  return ExpoGattServerModule.addListener('onCharacteristicUnsubscribed', listener);
 }
 
 /**

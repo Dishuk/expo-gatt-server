@@ -11,8 +11,6 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.util.UUID
 
-private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-
 class ExpoGattServerModule : Module() {
   private var manager: GattServerManager? = null
 
@@ -31,6 +29,8 @@ class ExpoGattServerModule : Module() {
       "onCharacteristicReadRequest",
       "onCharacteristicWriteRequest",
       "onNotificationSent",
+      "onCharacteristicSubscribed",
+      "onCharacteristicUnsubscribed",
       "onBluetoothStateChanged"
     )
 
@@ -230,6 +230,26 @@ class ExpoGattServerModule : Module() {
         "deviceId" to deviceId,
         "characteristicUuid" to characteristicUuid,
         "status" to status
+      ))
+    }
+
+    override fun onCharacteristicSubscribed(
+      deviceId: String, serviceUuid: String, characteristicUuid: String
+    ) {
+      sendEvent("onCharacteristicSubscribed", bundleOf(
+        "deviceId" to deviceId,
+        "serviceUuid" to serviceUuid,
+        "characteristicUuid" to characteristicUuid
+      ))
+    }
+
+    override fun onCharacteristicUnsubscribed(
+      deviceId: String, serviceUuid: String, characteristicUuid: String
+    ) {
+      sendEvent("onCharacteristicUnsubscribed", bundleOf(
+        "deviceId" to deviceId,
+        "serviceUuid" to serviceUuid,
+        "characteristicUuid" to characteristicUuid
       ))
     }
   }
