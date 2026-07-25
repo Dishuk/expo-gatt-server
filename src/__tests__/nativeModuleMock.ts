@@ -1,4 +1,5 @@
 import type { ExpoGattServerModuleType } from '../ExpoGattServerModule';
+import type { BluetoothState, ConnectedDevice } from '../ExpoGattServer.types';
 
 /**
  * Stands in for the native module so the JavaScript layer can be exercised without a device or a
@@ -16,9 +17,11 @@ export const nativeModuleMock = {
   sendResponse: jest.fn(async (..._args: any[]) => undefined),
   updateCharacteristicValue: jest.fn(async (..._args: any[]) => undefined),
   stopServer: jest.fn(),
-  getBluetoothState: jest.fn(async () => 'poweredOn'),
+  getBluetoothState: jest.fn(async (): Promise<BluetoothState> => 'poweredOn'),
   getMtu: jest.fn(async () => ({ deviceId: 'AA:BB', mtu: 23, maxNotificationPayload: 20 })),
-  getConnectedDevices: jest.fn(async () => []),
+  // Annotated rather than inferred: an empty literal would fix the element type as `never` and reject
+  // any populated list a test hands to `mockResolvedValueOnce`.
+  getConnectedDevices: jest.fn(async (): Promise<ConnectedDevice[]> => []),
   disconnectDevice: jest.fn(async (..._args: any[]) => undefined),
   isServerRunning: jest.fn(async () => true),
   isAdvertising: jest.fn(async () => true),

@@ -24,12 +24,16 @@ function codedError(code: string): Error & { code: string } {
 }
 
 /**
- * Every entry point that can reject with a code, and the codes it is documented to produce.
+ * Every entry point that can reject with a code, and the codes it is documented to produce on **either**
+ * platform. Some are raised by only one of them — `ERR_NO_CONTEXT` needs an Android `Context`, and
+ * `disconnectDevice` rejects with `ERR_UNSUPPORTED` only on iOS, where CoreBluetooth cannot drop a
+ * central at all.
  *
- * The table is deliberately **not** split by platform: both report the same code for the same
- * situation, and this suite runs once per platform, so a JavaScript-side branch would fail one of the
- * two runs. What it pins down is that the wrapper hands the native code back untouched — flattening one
- * into a generic code, or losing it behind a rethrown `Error`, is what stops a consumer branching on it.
+ * The table is deliberately **not** split by platform anyway, because what it pins down is the
+ * JavaScript wrapper handing the native code back untouched — flattening one into a generic code, or
+ * losing it behind a rethrown `Error`, is what stops a consumer branching on it. That pass-through is
+ * the same code either side of the boundary, so feeding a platform its counterpart's code still
+ * exercises it, and a JavaScript-side branch here would only fail one of the two runs.
  */
 const CODED_ENTRY_POINTS: {
   name: string;
