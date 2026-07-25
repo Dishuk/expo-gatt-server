@@ -496,11 +496,29 @@ class GattServerManager(
 
   fun sendResponse(deviceId: String, requestId: Int, status: Int, offset: Int, value: ByteArray) {
     val server = gattServer ?: throw IllegalStateException("Server not open")
-    pendingRequests.remove(requestId)
-      ?: throw GattServerException("REQUEST_NOT_FOUND", "Request $requestId not found or already responded")
     val device = connectedDevices[deviceId]
       ?: throw IllegalArgumentException("Device $deviceId not connected")
-    server.sendResponse(device, requestId, status, offset, value)
+    // Everything that could reject the call is checked before the pending entry is touched, so a
+    // failed attempt leaves the request answerable instead of stranding the central until its ATT
+    // transaction times out.
+    val owner = pendingRequests[requestId]
+      ?: throw GattServerException("REQUEST_NOT_FOUND", "Request $requestId not found or already responded")
+    if (owner != deviceId) {
+      throw GattServerException(
+        "REQUEST_DEVICE_MISMATCH",
+        "Request $requestId belongs to device $owner, not $deviceId"
+      )
+    }
+
+    if (!server.sendResponse(device, requestId, status, offset, value)) {
+      throw GattServerException(
+        "ERR_RESPONSE",
+        "The Bluetooth stack did not accept the response for request $requestId"
+      )
+    }
+    // Two-argument remove so a request id the framework has already reissued to another device is
+    // not consumed by this call.
+    pendingRequests.remove(requestId, deviceId)
 
     val negotiatedMtu = deviceMtu[deviceId]
     val mtu = negotiatedMtu ?: DEFAULT_ATT_MTU
