@@ -67,6 +67,7 @@ class GattServerManager: NSObject {
   private var serviceConfiguration: [CBMutableService] = []
   private var servicesAwaitingRegistration: Set<CBUUID> = []
   private var openCompletion: ((Error?) -> Void)?
+  private var readinessWaiters: [(Error?) -> Void] = []
   private var advertisingCompletion: ((Error?) -> Void)?
   private var addedServices: [CBUUID: CBMutableService] = [:]
   private var subscribedCentrals: [String: [CBUUID: CBCentral]] = [:]
@@ -95,10 +96,38 @@ class GattServerManager: NSObject {
     peripheralManager?.state ?? .unknown
   }
 
+  /// Invokes `completion` once Bluetooth is known to be powered on, rather than sampling
+  /// `state` synchronously — a synchronous read right after `open` still returns `.unknown`,
+  /// because the state only becomes meaningful when `peripheralManagerDidUpdateState` fires.
+  /// Transient states (`.unknown`, `.resetting`) park the caller until the next definitive update;
+  /// terminal states fail it immediately.
+  func whenPoweredOn(_ completion: @escaping (Error?) -> Void) {
+    guard let peripheral = peripheralManager else {
+      completion(GattServerError.serverStopped)
+      return
+    }
+    switch peripheral.state {
+    case .poweredOn:
+      completion(nil)
+    case .unknown, .resetting:
+      readinessWaiters.append(completion)
+    default:
+      completion(GattServerError.bluetoothUnavailable(state: peripheral.state))
+    }
+  }
+
   private func completeOpen(_ error: Error?) {
     guard let completion = openCompletion else { return }
     openCompletion = nil
     completion(error)
+  }
+
+  private func flushReadinessWaiters(_ error: Error?) {
+    let waiters = readinessWaiters
+    readinessWaiters.removeAll()
+    for waiter in waiters {
+      waiter(error)
+    }
   }
 
   /// Publishes every configured service and completes the pending open once CoreBluetooth has
@@ -205,6 +234,7 @@ class GattServerManager: NSObject {
   func stop() {
     stopAdvertising()
     completeOpen(GattServerError.serverStopped)
+    flushReadinessWaiters(GattServerError.serverStopped)
     for (_, service) in addedServices {
       peripheralManager?.remove(service)
     }
@@ -237,6 +267,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     switch peripheral.state {
     case .poweredOn:
       publishConfiguredServices(on: peripheral)
+      flushReadinessWaiters(nil)
     case .unknown, .resetting:
       // Transient — a further state update is coming, so neither fail nor publish yet.
       break
@@ -244,6 +275,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       let error = GattServerError.bluetoothUnavailable(state: peripheral.state)
       servicesAwaitingRegistration.removeAll()
       completeOpen(error)
+      flushReadinessWaiters(error)
     }
   }
 

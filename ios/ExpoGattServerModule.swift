@@ -74,23 +74,6 @@ public class ExpoGattServerModule: Module {
         return
       }
 
-      switch mgr.bluetoothState {
-      case .poweredOff:
-        promise.reject("ERR_BLUETOOTH", "Bluetooth is turned off")
-        return
-      case .unauthorized:
-        promise.reject("ERR_PERMISSION", "Bluetooth permission not granted")
-        return
-      case .unsupported:
-        promise.reject("ERR_BLUETOOTH", "BLE not supported on this device")
-        return
-      case .poweredOn:
-        break
-      default:
-        promise.reject("ERR_BLUETOOTH", "Bluetooth not ready")
-        return
-      }
-
       let localName = config["localName"] as? String
       let serviceUuids: [CBUUID]?
       do {
@@ -100,11 +83,25 @@ public class ExpoGattServerModule: Module {
         promise.reject("ERR_ADVERTISE", error.localizedDescription)
         return
       }
-      mgr.startAdvertising(localName: localName, serviceUuids: serviceUuids) { error in
-        if let error = error {
-          promise.reject("ERR_ADVERTISE", error.localizedDescription)
-        } else {
-          promise.resolve(nil)
+
+      // Waits for a definitive powered-on state instead of sampling it. A synchronous read is
+      // `.unknown` until peripheralManagerDidUpdateState fires, which used to reject perfectly
+      // healthy calls made straight after createServer with "Bluetooth not ready".
+      mgr.whenPoweredOn { readinessError in
+        if let readinessError = readinessError as? GattServerError {
+          promise.reject(readinessError.code, readinessError.message)
+          return
+        }
+        if let readinessError = readinessError {
+          promise.reject("ERR_BLUETOOTH", readinessError.localizedDescription)
+          return
+        }
+        mgr.startAdvertising(localName: localName, serviceUuids: serviceUuids) { error in
+          if let error = error {
+            promise.reject("ERR_ADVERTISE", error.localizedDescription)
+          } else {
+            promise.resolve(nil)
+          }
         }
       }
     }
