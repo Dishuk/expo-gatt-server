@@ -28,8 +28,25 @@ public class ExpoGattServerModule: Module {
       "onDeviceDisconnected",
       "onCharacteristicReadRequest",
       "onCharacteristicWriteRequest",
-      "onNotificationSent"
+      "onNotificationSent",
+      "onBluetoothStateChanged"
     )
+
+    AsyncFunction("getBluetoothState") { (promise: Promise) in
+      // `CBPeripheralManager.state` needs an instantiated manager, and instantiating one purely
+      // to read state would trigger the Bluetooth permission prompt. Without a server, fall back
+      // to the statically available authorization status.
+      guard let mgr = self.manager else {
+        switch CBManager.authorization {
+        case .denied, .restricted:
+          promise.resolve("unauthorized")
+        default:
+          promise.resolve("unknown")
+        }
+        return
+      }
+      promise.resolve(normalizedBluetoothState(mgr.bluetoothState))
+    }
 
     AsyncFunction("createServer") { (services: [[String: Any]], promise: Promise) in
       if let err = self.checkBluetoothAuthorization() {
@@ -46,6 +63,11 @@ public class ExpoGattServerModule: Module {
         self.manager?.stop()
         let mgr = GattServerManager()
         mgr.delegate = self
+        mgr.onStateChange = { [weak self] state in
+          self?.sendEvent("onBluetoothStateChanged", [
+            "state": normalizedBluetoothState(state)
+          ])
+        }
         self.manager = mgr
         // Resolves only once CoreBluetooth is powered on and has acknowledged every service, so a
         // resolved promise means the server really is advertisable.

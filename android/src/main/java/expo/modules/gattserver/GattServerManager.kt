@@ -6,12 +6,16 @@ import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.bluetooth.le.BluetoothLeAdvertiser
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.ParcelUuid
 import android.util.Log
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 private const val TAG = "ExpoGattServer"
@@ -20,6 +24,25 @@ private const val ATT_HEADER_SIZE = 3
 
 open class GattServerException(val code: String, message: String) : Exception(message)
 class MtuException(code: String, message: String) : GattServerException(code, message)
+
+/**
+ * Maps a [BluetoothAdapter] state constant onto the platform-neutral state union shared with iOS.
+ * The two transitional states are reported as `resetting` because the platform documents both as
+ * not yet usable, which is exactly what `resetting` means to a consumer.
+ */
+fun normalizedBluetoothState(state: Int): String = when (state) {
+  BluetoothAdapter.STATE_ON -> "poweredOn"
+  BluetoothAdapter.STATE_OFF -> "poweredOff"
+  BluetoothAdapter.STATE_TURNING_ON, BluetoothAdapter.STATE_TURNING_OFF -> "resetting"
+  else -> "unknown"
+}
+
+/** Reads the adapter state without needing a server. `getState()` requires no runtime permission. */
+fun currentBluetoothState(context: Context): String {
+  val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+  val adapter = manager?.adapter ?: return "unsupported"
+  return normalizedBluetoothState(adapter.state)
+}
 
 @SuppressLint("MissingPermission")
 class GattServerManager(
@@ -58,6 +81,31 @@ class GattServerManager(
   // from the binder thread that delivers `onServiceAdded`.
   private val pendingServices = ConcurrentLinkedQueue<BluetoothGattService>()
   private val openCompletion = AtomicReference<((String?) -> Unit)?>(null)
+
+  /** Invoked for every adapter state change while the server is open. */
+  var onStateChange: ((String) -> Unit)? = null
+
+  private val stateReceiverRegistered = AtomicBoolean(false)
+
+  private val stateReceiver = object : BroadcastReceiver() {
+    override fun onReceive(receiverContext: Context?, intent: Intent?) {
+      if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+      val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+      Log.d(TAG, "Adapter state changed to $state")
+      onStateChange?.invoke(normalizedBluetoothState(state))
+    }
+  }
+
+  private fun registerStateReceiver() {
+    if (!stateReceiverRegistered.compareAndSet(false, true)) return
+    context.registerReceiver(stateReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
+  }
+
+  private fun unregisterStateReceiver() {
+    if (!stateReceiverRegistered.compareAndSet(true, false)) return
+    runCatching { context.unregisterReceiver(stateReceiver) }
+      .onFailure { Log.w(TAG, "Failed to unregister adapter state receiver", it) }
+  }
 
   private val gattServerCallback = object : BluetoothGattServerCallback() {
     override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
@@ -173,7 +221,18 @@ class GattServerManager(
    * registration failure. It may be called on a binder thread.
    */
   fun open(services: List<BluetoothGattService>, onReady: (error: String?) -> Unit) {
+    val adapter = bluetoothAdapter
+    if (adapter == null) {
+      onReady("Bluetooth not available on this device")
+      return
+    }
+    if (!adapter.isEnabled) {
+      onReady("Bluetooth is turned off")
+      return
+    }
+
     openCompletion.set(onReady)
+    registerStateReceiver()
 
     val server = bluetoothManager.openGattServer(context, gattServerCallback)
     if (server == null) {
@@ -366,6 +425,8 @@ class GattServerManager(
   }
 
   fun stop() {
+    unregisterStateReceiver()
+    onStateChange = null
     stopAdvertising()
     pendingServices.clear()
     finishOpen("Server stopped before it finished opening")

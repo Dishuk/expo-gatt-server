@@ -9,6 +9,8 @@ import type {
   CharacteristicReadRequestEvent,
   CharacteristicWriteRequestEvent,
   NotificationSentEvent,
+  BluetoothState,
+  BluetoothStateChangedEvent,
 } from './ExpoGattServer.types';
 
 export type { EventSubscription };
@@ -24,6 +26,8 @@ export {
   type CharacteristicReadRequestEvent,
   type CharacteristicWriteRequestEvent,
   type NotificationSentEvent,
+  type BluetoothState,
+  type BluetoothStateChangedEvent,
   type GattServerEvents,
   GATT_SUCCESS,
   GATT_FAILURE,
@@ -129,6 +133,15 @@ export function stopServer(): void {
   ExpoGattServerModule.stopServer();
 }
 
+/**
+ * Reads the current Bluetooth adapter state. Safe to call before `createServer`, though iOS
+ * cannot report anything more specific than `unknown` or `unauthorized` until a server exists,
+ * because `CBPeripheralManager.state` requires an instantiated manager.
+ */
+export async function getBluetoothState(): Promise<BluetoothState> {
+  return ExpoGattServerModule.getBluetoothState();
+}
+
 export function addDeviceConnectedListener(
   listener: (event: DeviceConnectedEvent) => void,
 ): EventSubscription {
@@ -157,4 +170,14 @@ export function addNotificationSentListener(
   listener: (event: NotificationSentEvent) => void,
 ): EventSubscription {
   return ExpoGattServerModule.addListener('onNotificationSent', listener);
+}
+
+/**
+ * Fires whenever the Bluetooth adapter state changes. Delivered only while a server exists,
+ * since state monitoring is tied to the server lifecycle on both platforms.
+ */
+export function addBluetoothStateChangedListener(
+  listener: (event: BluetoothStateChangedEvent) => void,
+): EventSubscription {
+  return ExpoGattServerModule.addListener('onBluetoothStateChanged', listener);
 }

@@ -60,8 +60,23 @@ protocol GattServerManagerDelegate: AnyObject {
   func onNotificationSent(deviceId: String, characteristicUuid: String, status: Int)
 }
 
+/// Maps `CBManagerState` onto the platform-neutral state union shared with Android.
+func normalizedBluetoothState(_ state: CBManagerState) -> String {
+  switch state {
+  case .poweredOn: return "poweredOn"
+  case .poweredOff: return "poweredOff"
+  case .resetting: return "resetting"
+  case .unsupported: return "unsupported"
+  case .unauthorized: return "unauthorized"
+  default: return "unknown"
+  }
+}
+
 class GattServerManager: NSObject {
   weak var delegate: GattServerManagerDelegate?
+
+  /// Invoked on the main queue for every `peripheralManagerDidUpdateState` callback.
+  var onStateChange: ((CBManagerState) -> Void)?
 
   private var peripheralManager: CBPeripheralManager?
   private var serviceConfiguration: [CBMutableService] = []
@@ -264,6 +279,8 @@ class GattServerManager: NSObject {
 
 extension GattServerManager: CBPeripheralManagerDelegate {
   func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
+    onStateChange?(peripheral.state)
+
     switch peripheral.state {
     case .poweredOn:
       publishConfiguredServices(on: peripheral)

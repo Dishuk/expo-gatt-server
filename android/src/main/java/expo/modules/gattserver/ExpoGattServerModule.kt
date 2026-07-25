@@ -30,8 +30,18 @@ class ExpoGattServerModule : Module() {
       "onDeviceDisconnected",
       "onCharacteristicReadRequest",
       "onCharacteristicWriteRequest",
-      "onNotificationSent"
+      "onNotificationSent",
+      "onBluetoothStateChanged"
     )
+
+    AsyncFunction("getBluetoothState") { promise: Promise ->
+      val context = appContext.reactContext
+      if (context == null) {
+        promise.resolve("unknown")
+      } else {
+        promise.resolve(currentBluetoothState(context))
+      }
+    }
 
     AsyncFunction("createServer") { services: List<Map<String, Any?>>, promise: Promise ->
       if (missingPermission(android.Manifest.permission.BLUETOOTH_CONNECT)) {
@@ -48,6 +58,9 @@ class ExpoGattServerModule : Module() {
         manager?.stop()
         val mgr = GattServerManager(context)
         mgr.listener = createListener()
+        mgr.onStateChange = { state ->
+          sendEvent("onBluetoothStateChanged", bundleOf("state" to state))
+        }
         val gattServices = services.map { parseServiceConfig(it) }
         manager = mgr
         // Resolves only once every service is confirmed registered — until then the server has
