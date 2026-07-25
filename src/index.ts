@@ -1,3 +1,5 @@
+import type { EventSubscription } from 'expo-modules-core';
+
 import ExpoGattServerModule from './ExpoGattServerModule';
 import type {
   GattServiceConfig,
@@ -8,6 +10,8 @@ import type {
   CharacteristicWriteRequestEvent,
   NotificationSentEvent,
 } from './ExpoGattServer.types';
+
+export type { EventSubscription };
 
 export {
   type GattServiceConfig,
@@ -77,30 +81,30 @@ export function stopServer(): void {
 
 export function addDeviceConnectedListener(
   listener: (event: DeviceConnectedEvent) => void,
-) {
+): EventSubscription {
   return ExpoGattServerModule.addListener('onDeviceConnected', listener);
 }
 
 export function addDeviceDisconnectedListener(
   listener: (event: DeviceDisconnectedEvent) => void,
-) {
+): EventSubscription {
   return ExpoGattServerModule.addListener('onDeviceDisconnected', listener);
 }
 
 export function addCharacteristicReadRequestListener(
   listener: (event: CharacteristicReadRequestEvent) => void,
-) {
+): EventSubscription {
   return ExpoGattServerModule.addListener('onCharacteristicReadRequest', listener);
 }
 
 export function addCharacteristicWriteRequestListener(
   listener: (event: CharacteristicWriteRequestEvent) => void,
-) {
+): EventSubscription {
   return ExpoGattServerModule.addListener('onCharacteristicWriteRequest', listener);
 }
 
 export function addNotificationSentListener(
   listener: (event: NotificationSentEvent) => void,
-) {
+): EventSubscription {
   return ExpoGattServerModule.addListener('onNotificationSent', listener);
 }
