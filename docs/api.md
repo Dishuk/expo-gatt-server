@@ -3,6 +3,7 @@
 Complete reference for all exported functions, types, events, and constants.
 
 - [Functions](#functions)
+  - [isSupported](#issupported)
   - [createServer](#createserver)
   - [startAdvertising](#startadvertising)
   - [stopAdvertising](#stopadvertising)
@@ -10,6 +11,10 @@ Complete reference for all exported functions, types, events, and constants.
   - [sendResponse](#sendresponse)
   - [updateCharacteristicValue](#updatecharacteristicvalue)
   - [getMtu](#getmtu)
+  - [getConnectedDevices](#getconnecteddevices)
+  - [disconnectDevice](#disconnectdevice)
+  - [isServerRunning](#isserverrunning)
+  - [isAdvertising](#isadvertising)
   - [stopServer](#stopserver)
 - [Event Listeners](#event-listeners)
   - [addDeviceConnectedListener](#adddeviceconnectedlistener)
@@ -25,6 +30,46 @@ Complete reference for all exported functions, types, events, and constants.
 - [Error Codes](#error-codes)
 
 ## Functions
+
+### isSupported
+
+```typescript
+isSupported(): boolean
+```
+
+Whether the native module is present, and therefore whether anything else here can work.
+
+**Importing this package never throws, whatever this returns.** The module is resolved with
+`requireOptionalNativeModule`, which yields `null` instead of raising, so a bundle that only uses BLE
+conditionally is safe to `import` from unconditionally. `requireNativeModule` threw at *import* time,
+which took down any bundle that reached the import at all.
+
+`false` on web -- this package publishes a GATT server, which needs the peripheral role, and Web
+Bluetooth implements only the central role -- and in any binary that does not contain the module,
+Expo Go being the usual case, since it ships a fixed set of native modules.
+
+Synchronous, so it is safe at module scope.
+
+#### Behaviour when the native module is absent
+
+Nothing crashes on an undefined property. Every export answers in the way that is true when there is
+no Bluetooth peripheral support at all:
+
+| Export | Behaviour |
+|---|---|
+| `createServer`, `startAdvertising`, `sendNotification`, `sendResponse`, `updateCharacteristicValue`, `getMtu`, `disconnectDevice` | Reject with a message naming the platform and the reason |
+| `getBluetoothState` | Resolves to `'unsupported'`, which is exactly what that state already means |
+| `getConnectedDevices` | Resolves to `[]` |
+| `isServerRunning`, `isAdvertising` | Resolve to `false` |
+| `stopAdvertising`, `stopServer` | Do nothing |
+| every `add*Listener` | Returns a subscription whose `remove()` does nothing |
+
+The teardown functions and the listener helpers deliberately do **not** throw. A listener registered
+in an effect is paired with `remove()` in that effect's cleanup, and a `stopServer()` in the same
+cleanup runs whether setup succeeded or not -- throwing there would turn one reported setup failure
+into a crash on unmount. Nothing was ever started, so there is nothing for them to fail at.
+
+---
 
 ### createServer
 

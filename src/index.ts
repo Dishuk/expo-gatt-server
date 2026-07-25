@@ -1,6 +1,6 @@
 import { Platform, type EventSubscription } from 'expo-modules-core';
 
-import ExpoGattServerModule from './ExpoGattServerModule';
+import ExpoGattServerModule, { type ExpoGattServerModuleType } from './ExpoGattServerModule';
 import {
   ATT_TRANSACTION_TIMEOUT_MS,
   CLIENT_CHARACTERISTIC_CONFIGURATION_UUID,
@@ -28,6 +28,7 @@ import type {
   ConnectedDevice,
   DeviceMtu,
   MtuChangedEvent,
+  GattServerEvents,
 } from './ExpoGattServer.types';
 
 export type { EventSubscription };
@@ -83,6 +84,58 @@ export {
   DEFAULT_REQUEST_TIMEOUT_MS,
   CLIENT_CHARACTERISTIC_CONFIGURATION_UUID,
 } from './ExpoGattServer.types';
+
+/**
+ * Whether the native module is present, and therefore whether anything else here can work.
+ *
+ * `false` on web, and in any binary that does not contain the module — Expo Go being the common
+ * case, since Expo Go ships a fixed set of native modules and cannot load this one. Synchronous and
+ * safe to call anywhere, including at module scope, so a consuming app can branch on it before
+ * touching the rest of the API.
+ *
+ * Importing this package never throws, whatever this returns.
+ */
+export function isSupported(): boolean {
+  return ExpoGattServerModule !== null;
+}
+
+function unsupportedError(): Error {
+  if (Platform.OS === 'web') {
+    return new Error(
+      '[expo-gatt-server] Not supported on web. This package publishes a BLE GATT server, which ' +
+        'requires the peripheral role; Web Bluetooth implements only the central role, so there is ' +
+        'no browser API to build on. Guard your calls with isSupported().',
+    );
+  }
+  return new Error(
+    `[expo-gatt-server] The native module is not present in this ${Platform.OS} binary. It ships ` +
+      'native code, so it cannot run in Expo Go — create a development build with ' +
+      '`npx expo run:ios` / `npx expo run:android` or EAS Build. If you already use a development ' +
+      'build, rebuild it after adding this package. Guard your calls with isSupported().',
+  );
+}
+
+/** Throws the explanation instead of letting a property access on `null` surface as the error. */
+function nativeModule(): ExpoGattServerModuleType {
+  if (ExpoGattServerModule === null) {
+    throw unsupportedError();
+  }
+  return ExpoGattServerModule;
+}
+
+/**
+ * Stands in for a real subscription when there is no native module to subscribe to. Returned rather
+ * than thrown, because a listener registered in an effect is paired with a `remove()` in that
+ * effect's teardown, and throwing would leave the teardown to crash on a value it never received.
+ */
+const NOOP_SUBSCRIPTION: EventSubscription = { remove() {} };
+
+function addListener<EventName extends keyof GattServerEvents>(
+  eventName: EventName,
+  listener: GattServerEvents[EventName],
+): EventSubscription {
+  return ExpoGattServerModule?.addListener(eventName, listener) ?? NOOP_SUBSCRIPTION;
+}
 
 // Accepted by CBUUID(string:) on iOS: 16-bit (4 hex digits), 32-bit (8 hex digits) or the
 // hyphenated 128-bit form. Anything else raises an uncatchable ObjC exception natively.
@@ -216,7 +269,7 @@ export async function createServer(
       );
     }
   }
-  return ExpoGattServerModule.createServer(services, options);
+  return nativeModule().createServer(services, options);
 }
 
 /**
@@ -294,11 +347,15 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
       );
     }
   }
-  return ExpoGattServerModule.startAdvertising(config);
+  return nativeModule().startAdvertising(config);
 }
 
+/**
+ * Does nothing when the module is unsupported: nothing can be advertising, and a teardown path is
+ * the wrong place to raise a configuration error the setup path already reported.
+ */
 export function stopAdvertising(): void {
-  ExpoGattServerModule.stopAdvertising();
+  ExpoGattServerModule?.stopAdvertising();
 }
 
 /**
@@ -340,7 +397,7 @@ export async function sendNotification(
   assertValidUuid(serviceUuid, 'service');
   assertValidUuid(characteristicUuid, 'characteristic');
   assertValidBytes(value, 'notification');
-  return ExpoGattServerModule.sendNotification(
+  return nativeModule().sendNotification(
     deviceId,
     serviceUuid,
     characteristicUuid,
@@ -391,7 +448,7 @@ export async function sendResponse(
     );
   }
   assertValidBytes(value, 'response');
-  return ExpoGattServerModule.sendResponse(deviceId, requestId, status, offset, value);
+  return nativeModule().sendResponse(deviceId, requestId, status, offset, value);
 }
 
 /**
@@ -410,20 +467,25 @@ export async function updateCharacteristicValue(
   assertValidUuid(serviceUuid, 'service');
   assertValidUuid(characteristicUuid, 'characteristic');
   assertValidBytes(value, 'characteristic');
-  return ExpoGattServerModule.updateCharacteristicValue(serviceUuid, characteristicUuid, value);
+  return nativeModule().updateCharacteristicValue(serviceUuid, characteristicUuid, value);
 }
 
+/** Does nothing when the module is unsupported, for the same reason as `stopAdvertising`. */
 export function stopServer(): void {
-  ExpoGattServerModule.stopServer();
+  ExpoGattServerModule?.stopServer();
 }
 
 /**
  * Reads the current Bluetooth adapter state. Safe to call before `createServer`, though iOS
  * cannot report anything more specific than `unknown` or `unauthorized` until a server exists,
  * because `CBPeripheralManager.state` requires an instantiated manager.
+ *
+ * Resolves to `unsupported` where the native module is absent, which is what that state already
+ * means — no BLE peripheral support on this device — so a consumer branching on the state needs no
+ * separate check.
  */
 export async function getBluetoothState(): Promise<BluetoothState> {
-  return ExpoGattServerModule.getBluetoothState();
+  return ExpoGattServerModule?.getBluetoothState() ?? 'unsupported';
 }
 
 /**
@@ -443,7 +505,7 @@ export async function getBluetoothState(): Promise<BluetoothState> {
  * negotiation happens.
  */
 export async function getMtu(deviceId: string): Promise<DeviceMtu> {
-  return ExpoGattServerModule.getMtu(deviceId);
+  return nativeModule().getMtu(deviceId);
 }
 
 /**
@@ -452,9 +514,11 @@ export async function getMtu(deviceId: string): Promise<DeviceMtu> {
  *
  * See `ConnectedDevice` for what "connected" means on each platform — Android reports connections
  * directly, while iOS can only derive them from ATT activity, so the two are not equivalent.
+ *
+ * Also resolves to an empty array where the native module is absent — nothing can be connected.
  */
 export async function getConnectedDevices(): Promise<ConnectedDevice[]> {
-  return ExpoGattServerModule.getConnectedDevices();
+  return ExpoGattServerModule?.getConnectedDevices() ?? [];
 }
 
 /**
@@ -480,7 +544,7 @@ export async function getConnectedDevices(): Promise<ConnectedDevice[]> {
  * no server exists.
  */
 export async function disconnectDevice(deviceId: string): Promise<void> {
-  return ExpoGattServerModule.disconnectDevice(deviceId);
+  return nativeModule().disconnectDevice(deviceId);
 }
 
 /**
@@ -490,10 +554,10 @@ export async function disconnectDevice(deviceId: string): Promise<void> {
  * platforms destroy the published database when the adapter goes down. The module re-publishes it on
  * the next transition to `poweredOn`, at which point this becomes `true` again without any further
  * call, so it is the right thing to check before advertising rather than remembering whether
- * `createServer` was ever called.
+ * `createServer` was ever called. Also `false` where the native module is absent.
  */
 export async function isServerRunning(): Promise<boolean> {
-  return ExpoGattServerModule.isServerRunning();
+  return ExpoGattServerModule?.isServerRunning() ?? false;
 }
 
 /**
@@ -502,10 +566,10 @@ export async function isServerRunning(): Promise<boolean> {
  * iOS reads `CBPeripheralManager.isAdvertising`. Android has no equivalent query —
  * `BluetoothLeAdvertiser` exposes none — so the module tracks it from `AdvertiseCallback`, and
  * additionally clears it when an `AdvertiseConfig.timeoutMs` elapses, because the platform stops
- * advertising at that limit without reporting it.
+ * advertising at that limit without reporting it. Also `false` where the native module is absent.
  */
 export async function isAdvertising(): Promise<boolean> {
-  return ExpoGattServerModule.isAdvertising();
+  return ExpoGattServerModule?.isAdvertising() ?? false;
 }
 
 /**
@@ -516,13 +580,13 @@ export async function isAdvertising(): Promise<boolean> {
 export function addMtuChangedListener(
   listener: (event: MtuChangedEvent) => void,
 ): EventSubscription {
-  return ExpoGattServerModule.addListener('onMtuChanged', listener);
+  return addListener('onMtuChanged', listener);
 }
 
 export function addDeviceConnectedListener(
   listener: (event: DeviceConnectedEvent) => void,
 ): EventSubscription {
-  return ExpoGattServerModule.addListener('onDeviceConnected', listener);
+  return addListener('onDeviceConnected', listener);
 }
 
 /**
@@ -538,25 +602,25 @@ export function addDeviceConnectedListener(
 export function addDeviceDisconnectedListener(
   listener: (event: DeviceDisconnectedEvent) => void,
 ): EventSubscription {
-  return ExpoGattServerModule.addListener('onDeviceDisconnected', listener);
+  return addListener('onDeviceDisconnected', listener);
 }
 
 export function addCharacteristicReadRequestListener(
   listener: (event: CharacteristicReadRequestEvent) => void,
 ): EventSubscription {
-  return ExpoGattServerModule.addListener('onCharacteristicReadRequest', listener);
+  return addListener('onCharacteristicReadRequest', listener);
 }
 
 export function addCharacteristicWriteRequestListener(
   listener: (event: CharacteristicWriteRequestEvent) => void,
 ): EventSubscription {
-  return ExpoGattServerModule.addListener('onCharacteristicWriteRequest', listener);
+  return addListener('onCharacteristicWriteRequest', listener);
 }
 
 export function addNotificationSentListener(
   listener: (event: NotificationSentEvent) => void,
 ): EventSubscription {
-  return ExpoGattServerModule.addListener('onNotificationSent', listener);
+  return addListener('onNotificationSent', listener);
 }
 
 /**
@@ -567,7 +631,7 @@ export function addNotificationSentListener(
 export function addCharacteristicSubscribedListener(
   listener: (event: CharacteristicSubscribedEvent) => void,
 ): EventSubscription {
-  return ExpoGattServerModule.addListener('onCharacteristicSubscribed', listener);
+  return addListener('onCharacteristicSubscribed', listener);
 }
 
 /**
@@ -577,7 +641,7 @@ export function addCharacteristicSubscribedListener(
 export function addCharacteristicUnsubscribedListener(
   listener: (event: CharacteristicUnsubscribedEvent) => void,
 ): EventSubscription {
-  return ExpoGattServerModule.addListener('onCharacteristicUnsubscribed', listener);
+  return addListener('onCharacteristicUnsubscribed', listener);
 }
 
 /**
@@ -587,5 +651,5 @@ export function addCharacteristicUnsubscribedListener(
 export function addBluetoothStateChangedListener(
   listener: (event: BluetoothStateChangedEvent) => void,
 ): EventSubscription {
-  return ExpoGattServerModule.addListener('onBluetoothStateChanged', listener);
+  return addListener('onBluetoothStateChanged', listener);
 }

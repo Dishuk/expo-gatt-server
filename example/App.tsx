@@ -12,6 +12,7 @@ import {
   getConnectedDevices,
   isAdvertising,
   isServerRunning,
+  isSupported,
   sendNotification,
   sendResponse,
   startAdvertising,
@@ -192,7 +193,10 @@ export default function App() {
         <Button
           label="status"
           onPress={run('status', async () => {
-            append(`running=${await isServerRunning()} advertising=${await isAdvertising()}`);
+            append(
+              `supported=${isSupported()} running=${await isServerRunning()} ` +
+                `advertising=${await isAdvertising()}`
+            );
           })}
         />
         <Button

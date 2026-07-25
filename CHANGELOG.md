@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `isSupported`, and lazy failure everywhere else. The native module is now resolved with
+  `requireOptionalNativeModule`, so **importing the package no longer throws** on web or in Expo Go —
+  `requireNativeModule` threw at import time, which took down any bundle that reached the import even
+  if it only used BLE conditionally. Calls that need the radio now reject with a message naming the
+  platform and the reason; `getBluetoothState` resolves to `unsupported`, `getConnectedDevices` to
+  `[]`, `isServerRunning` / `isAdvertising` to `false`, `stopAdvertising` / `stopServer` do nothing,
+  and every `add*Listener` returns a subscription whose `remove()` does nothing
 - `getConnectedDevices`, with the type `ConnectedDevice`, for enumerating connected centrals. Reports
   the module's own tracking rather than
   `BluetoothManager.getConnectedDevices(BluetoothProfile.GATT_SERVER)`, which would include centrals
