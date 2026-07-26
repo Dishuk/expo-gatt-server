@@ -69,6 +69,9 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      # The harness commits its own `gradle-wrapper.jar`, which the wrapper needs before it can verify
+      # anything itself. This is the check that it is the jar Gradle actually published.
+      - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
       - run: npm run test:android
       - uses: actions/upload-artifact@v4
