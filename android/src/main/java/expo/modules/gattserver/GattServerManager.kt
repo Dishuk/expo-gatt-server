@@ -915,10 +915,6 @@ class GattServerManager(
     // cannot fail the round now running.
     val timeout = Runnable {
       if (publicationRound.get() != round) return@Runnable
-      val stillRegistering = synchronized(publicationLock) {
-        publication == DatabasePublication.IN_PROGRESS
-      }
-      if (!stillRegistering) return@Runnable
       Log.e(TAG, "No onServiceAdded within $PUBLICATION_TIMEOUT_MS ms; reporting the round as failed")
       pendingServices.clear()
       finishOpen(
@@ -928,7 +924,8 @@ class GattServerManager(
           "The Bluetooth stack did not acknowledge a service registration within " +
             "$PUBLICATION_TIMEOUT_MS ms, so the database was not published. Call createServer again " +
             "to retry."
-        )
+        ),
+        onlyIf = DatabasePublication.IN_PROGRESS,
       )
     }
     publicationTimeout.set(timeout)
@@ -951,6 +948,10 @@ class GattServerManager(
     synchronized(attributeValueLock) {
       for (service in services) {
         for (characteristic in service.characteristics) {
+      // `onlyIf` rather than a check up here: the registration can complete between the two, and
+      // reading the state separately from writing it let a bound that had already lost the race
+      // overwrite `PUBLISHED` with `FAILED` — leaving `isServerRunning` false and every later
+      // `startAdvertising` rejecting `ERR_NO_SERVER` for a database that really was published.
           @Suppress("DEPRECATION")
           val value = characteristic.value ?: continue
           values[CharacteristicAddress(service.uuid, characteristic.uuid)] = value
@@ -1014,14 +1015,23 @@ class GattServerManager(
    * Ends the current registration round: [state] is what later readiness checks see, and both `open`'s
    * completion and everyone parked in [whenDatabasePublished] are settled with [error].
    */
-  private fun finishOpen(state: DatabasePublication, error: GattServerException?) {
+  private fun finishOpen(
+    state: DatabasePublication,
+    error: GattServerException?,
+    onlyIf: DatabasePublication? = null,
+  ) {
     // The round is over however it ended, so its bound goes with it.
     cancelPublicationTimeout()
     val parked = synchronized(publicationLock) {
-      publication = state
-      val waiters = readinessWaiters.toList()
-      readinessWaiters.clear()
-      waiters
+      if (onlyIf != null && publication != onlyIf) {
+        applied = false
+        emptyList()
+      } else {
+        publication = state
+        val waiters = readinessWaiters.toList()
+        readinessWaiters.clear()
+        waiters
+      }
     }
     openCompletion.getAndSet(null)?.invoke(error)
     if (parked.isEmpty()) return
@@ -1047,12 +1057,18 @@ class GattServerManager(
     // problem it is instead of parking a caller nothing is going to release.
     bluetoothUnavailable()?.let {
       onReady(it)
+    // `onlyIf` makes the test and the transition one step under the monitor, for callers that may be
+    // racing the round they are trying to end. Without it the publication bound could read
+    // `IN_PROGRESS`, lose the race to a registration completing on a binder thread, and still write
+    // `FAILED` over the `PUBLISHED` that had just been recorded.
+    var applied = true
       return
     }
     // Settled outside the monitor, so no caller ever runs while it is held.
     val failure = synchronized(publicationLock) {
       when (publication) {
         DatabasePublication.PUBLISHED -> null
+    if (!applied) return
         DatabasePublication.FAILED -> databaseNotPublished()
         DatabasePublication.IDLE, DatabasePublication.IN_PROGRESS -> {
           readinessWaiters.add(onReady)
