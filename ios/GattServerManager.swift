@@ -704,11 +704,20 @@ class GattServerManager: NSObject {
     }
 
     guard let centrals = subscribedCentrals[deviceId],
-          let central = centrals[address] else {
+          let subscribed = centrals[address] else {
       throw GattServerError.noSubscriber(
         deviceId: deviceId, characteristic: characteristicUuid
       )
     }
+
+    // The subscription map records *that* this central subscribed; the instance to address and size
+    // against is the one the most recent callback handed over. CoreBluetooth may vend a distinct
+    // `CBCentral` per callback, and `maximumUpdateValueLength` is read from whichever one is current —
+    // which is why `noteActivity` refreshes `connectedCentrals` on every callback and `mtu(for:)` reads
+    // from there. Sizing against the instance captured at subscribe time instead meant a central that
+    // negotiated a larger MTU after subscribing had `getMtu` report the new budget while this call
+    // rejected the very payload it had just been told would fit.
+    let central = connectedCentrals[deviceId] ?? subscribed
 
     // `updateValue` documents that a value exceeding `maximumUpdateValueLength` "will be truncated to
     // fit", and a notification has no continuation mechanism — unlike a read, which the central can
@@ -766,9 +775,13 @@ class GattServerManager: NSObject {
       entry.completion(GattServerError.serverStopped)
       return true
     }
+    // Resolved again rather than reusing the instance the entry was queued with, for the reason given in
+    // `sendNotification`: the current instance is the one CoreBluetooth matches and sizes against, and an
+    // entry can wait here across any number of callbacks that replaced it.
+    let central = connectedCentrals[entry.deviceId] ?? entry.central
     // Re-checked as well as at enqueue time: the link budget can shrink while an entry waits for the
     // transmit queue, and the payload must never reach CoreBluetooth if it cannot be carried intact.
-    let maxPayload = entry.central.maximumUpdateValueLength
+    let maxPayload = central.maximumUpdateValueLength
     guard entry.value.count <= maxPayload else {
       entry.completion(GattServerError.payloadExceedsMtu(
         maxPayload: maxPayload, payloadSize: entry.value.count
@@ -776,7 +789,7 @@ class GattServerManager: NSObject {
       return true
     }
     guard peripheral.updateValue(
-      entry.value, for: entry.characteristic, onSubscribedCentrals: [entry.central]
+      entry.value, for: entry.characteristic, onSubscribedCentrals: [central]
     ) else {
       return false
     }
