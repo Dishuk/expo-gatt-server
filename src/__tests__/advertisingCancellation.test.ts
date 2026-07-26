@@ -132,6 +132,44 @@ describe('a start that was replaced before its cancellation could compensate', (
     // third: it no longer owns the radio.
     expect(nativeModuleMock.stopAdvertising).toHaveBeenCalledTimes(2);
   });
+
+  /**
+   * A start that never reached the radio replaced nothing. Claiming the generation on entry rather than
+   * at the hand-over meant a rejected configuration took ownership from the start genuinely in flight,
+   * which then rejected saying nothing was on the air while the radio was still advertising.
+   */
+  it('is not replaced by a start that its own validation rejected', async () => {
+    const releaseFirst = deferNativeStart();
+
+    const first = startAdvertising({ localName: 'first' });
+    stopAdvertising();
+    await expect(startAdvertising({ timeoutMs: -1 })).rejects.toThrow(
+      /Invalid advertising timeout/,
+    );
+    releaseFirst();
+
+    await expect(first).rejects.toMatchObject({ code: 'ERR_ADVERTISE' });
+    // Twice, exactly as though the rejected start had never been made.
+    expect(nativeModuleMock.stopAdvertising).toHaveBeenCalledTimes(2);
+  });
+
+  /** The same claim, released on the failure path, so a cancelled start still compensates when it fails. */
+  it('still stops the advertisement when a cancelled start rejects natively', async () => {
+    let reject: (error: Error) => void = () => {};
+    nativeModuleMock.startAdvertising.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((_resolve, rejectPromise) => {
+          reject = (error) => rejectPromise(error);
+        }),
+    );
+
+    const start = startAdvertising({ localName: 'first' });
+    stopAdvertising();
+    reject(new Error('native failure'));
+
+    await expect(start).rejects.toThrow(/native failure/);
+    expect(nativeModuleMock.stopAdvertising).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('a start with no stop against it', () => {

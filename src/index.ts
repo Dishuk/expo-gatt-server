@@ -373,7 +373,6 @@ export async function createServer(
 ): Promise<void> {
   // Read before anything else, so every stop issued from here on counts as having come after this call.
   const epoch = serverStopEpoch;
-  const generation = ++serverStartEpoch;
   // Rebuilt rather than mutated, so the caller's own configuration object is left as they wrote it.
   const normalizedServices = (services ?? []).map((service) => {
     const uuid = normalizeUuid(service?.uuid, 'service');
@@ -403,19 +402,35 @@ export async function createServer(
       );
     }
   }
-  await nativeModule().createServer(normalizedServices, options);
-  if (serverStopEpoch !== epoch) {
-    // The application asked to stop while this create was in flight, and the native side may or may not
-    // have seen the two in that order — so the server is stopped again here rather than left to an
-    // ordering nothing guarantees.
-    //
-    // Only the most recent create may do that: `stopServer` is not addressed to a particular server, so a
-    // later create that already replaced this one — and resolved — would be torn down by a stop meant to
-    // undo a call the application had abandoned. That create owns the server now, and cancels itself the
-    // same way if it needs to.
-    if (serverStartEpoch === generation) {
+  // Claimed here rather than on entry, so only a call that actually reaches the native side takes
+  // ownership. Claiming it first meant a create rejected by the validation above — which never reached
+  // any server — still counted as the most recent one, and the check below then refused the compensating
+  // stop to the create genuinely in flight. That create rejected saying the database was not published
+  // while it was, which is the exact outcome this whole mechanism exists to prevent.
+  const generation = ++serverStartEpoch;
+  // Both natives stop advertising as part of accepting a new server, so a `startAdvertising` still in
+  // flight has had the radio taken from under it and must not go on to resolve as though it were on the
+  // air. `stopServer` bumps this for the same reason.
+  advertisingStopEpoch += 1;
+  try {
+    await nativeModule().createServer(normalizedServices, options);
+  } finally {
+    // In a `finally`, so a create whose native call rejects still releases its claim. Left to the
+    // success path alone, a rejected create stayed the most recent one for good and every later
+    // cancellation silently stopped compensating.
+    if (serverStopEpoch !== epoch && serverStartEpoch === generation) {
+      // The application asked to stop while this create was in flight, and the native side may or may
+      // not have seen the two in that order — so the server is stopped again here rather than left to an
+      // ordering nothing guarantees.
+      //
+      // Only the most recent create may do that: `stopServer` is not addressed to a particular server,
+      // so a later create that already replaced this one — and resolved — would be torn down by a stop
+      // meant to undo a call the application had abandoned. That create owns the server now, and cancels
+      // itself the same way if it needs to.
       ExpoGattServerModule?.stopServer();
     }
+  }
+  if (serverStopEpoch !== epoch) {
     throw serverStoppedError();
   }
 }
@@ -496,7 +511,6 @@ function assertOneOf<T extends string>(value: unknown, allowed: T[], field: stri
 export async function startAdvertising(config: AdvertiseConfig = {}): Promise<void> {
   // Read before anything else, so every stop issued from here on counts as having come after this call.
   const epoch = advertisingStopEpoch;
-  const generation = ++advertisingStartEpoch;
   // Expanded here so both platforms are addressed with one spelling. It costs nothing on the wire:
   // Android encodes an advertised UUID as "the shortest representation" and sizes the 31-byte budget
   // the same way, and iOS — where `CBUUID` would otherwise advertise the full sixteen octets it was
@@ -555,19 +569,27 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
       );
     }
   }
-  await nativeModule().startAdvertising({ ...config, serviceUuids, serviceData });
-  if (advertisingStopEpoch !== epoch) {
-    // The application asked to stop while this start was in flight, and the native side may or may not
-    // have seen the two in that order — so the advertisement is stopped again here rather than left to
-    // an ordering nothing guarantees. One stop means one thing.
-    //
-    // Only the most recent start may do that, though: `stopAdvertising` is not addressed to a
-    // particular advertisement, so a later start that already replaced this one — and resolved — would
-    // be taken off the air by a stop meant to undo a call the application had abandoned. That start
-    // owns the radio now, and cancels itself the same way if it needs to.
-    if (advertisingStartEpoch === generation) {
+  // Claimed here rather than on entry, and released in a `finally`, for the same reasons as
+  // `createServer`'s: a start rejected by the validation above never reached the radio and must not
+  // take ownership of it from the start that did, and a start whose native call rejects must not keep
+  // that ownership for good.
+  const generation = ++advertisingStartEpoch;
+  try {
+    await nativeModule().startAdvertising({ ...config, serviceUuids, serviceData });
+  } finally {
+    if (advertisingStopEpoch !== epoch && advertisingStartEpoch === generation) {
+      // The application asked to stop while this start was in flight, and the native side may or may
+      // not have seen the two in that order — so the advertisement is stopped again here rather than
+      // left to an ordering nothing guarantees. One stop means one thing.
+      //
+      // Only the most recent start may do that, though: `stopAdvertising` is not addressed to a
+      // particular advertisement, so a later start that already replaced this one — and resolved —
+      // would be taken off the air by a stop meant to undo a call the application had abandoned. That
+      // start owns the radio now, and cancels itself the same way if it needs to.
       ExpoGattServerModule?.stopAdvertising();
     }
+  }
+  if (advertisingStopEpoch !== epoch) {
     throw advertisingCancelledError();
   }
 }
