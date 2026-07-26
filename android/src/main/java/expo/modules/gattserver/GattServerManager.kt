@@ -1371,6 +1371,11 @@ class GattServerManager(
         // running until the adapter-state receiver happened to clear it.
         advertising.set(false)
       }
+      // Nothing reached the air, so the rename this start applied has nothing left to justify it — the
+      // same reason `onStartFailure` restores it. Without this, a start that threw because the adapter
+      // went off between the check above and the call left the phone named after the application for
+      // good, visible in Settings and to every peer.
+      restoreAdapterName()
       // Swallowed rather than reported when a stop settled this call first: settling it twice throws.
       if (!ours) {
         Log.w(TAG, "Advertising start failed after the call had already been settled", e)
@@ -1396,6 +1401,10 @@ class GattServerManager(
       if (pendingAdvertiseResult.compareAndSet(onResult, null)) {
         onResult(advertisingStopped())
       }
+      // The stop's own restore was a no-op if it ran before this call applied the rename, because there
+      // was no original name recorded yet to put back. Repeated here for that ordering; it no-ops when
+      // the stop did reach it, since nothing is recorded any more.
+      restoreAdapterName()
     }
   }
 
