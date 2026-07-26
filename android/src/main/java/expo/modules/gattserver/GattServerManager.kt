@@ -2439,5 +2439,17 @@ class GattServerManager(
     subscriptions.clear()
     delegations.clear()
     delegationsByCharacteristic.clear()
+    // Last, so everything above still reports through it — the disconnects a teardown raises are the
+    // consumer's signal that the centrals are gone.
+    //
+    // Cleared at all because `close()` disconnects nobody and the callback stays registered until it
+    // completes, so a `STATE_DISCONNECTED` or a late `onNotificationSent` can still arrive on a binder
+    // thread afterwards. A manager this call displaced would then emit those to JavaScript
+    // indistinguishably from the server that replaced it, and one whose module has since been destroyed
+    // would reach `sendEvent` on a torn-down `AppContext`, which throws where nothing catches. The
+    // Only the listener, and not `timeoutHandler`'s queue: [finishOpen] above posts the release of
+    // everyone parked in [whenDatabasePublished] to that looper, so clearing it here would strand the
+    // very `startAdvertising` promises the stop is meant to settle.
+    listener = null
   }
 }
