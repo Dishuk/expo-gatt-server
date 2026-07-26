@@ -581,7 +581,7 @@ class GattServerManager(
   @SuppressLint("MissingPermission")
   private fun handleAdapterOff(): Unit = synchronized(serverLifecycleLock) {
     logDebug { "Adapter off — closing GATT server" }
-    pendingServices.clear()
+    discardPublicationRound()
     // IDLE rather than FAILED: the next power-on re-registers the services, so a caller arriving in the
     // window between the STATE_ON broadcast and that round has to park rather than be turned away.
     finishOpen(DatabasePublication.IDLE, GattServerException(
@@ -903,7 +903,7 @@ class GattServerManager(
       }
       if (status != BluetoothGatt.GATT_SUCCESS) {
         Log.e(TAG, "onServiceAdded: service=${service.uuid} failed with status=$status")
-        pendingServices.clear()
+        discardPublicationRound()
         finishOpen(DatabasePublication.FAILED, GattServerException(
           "ERR_CREATE_SERVER", "Failed to add service ${service.uuid} (status $status)"
         ))
@@ -1020,7 +1020,7 @@ class GattServerManager(
     val timeout = Runnable {
       if (publicationRound.get() != round) return@Runnable
       Log.e(TAG, "No onServiceAdded within $PUBLICATION_TIMEOUT_MS ms; reporting the round as failed")
-      pendingServices.clear()
+      discardPublicationRound()
       // `onlyIf` rather than a check up here: the registration can complete between the two, and
       // reading the state separately from writing it let a bound that had already lost the race
       // overwrite `PUBLISHED` with `FAILED` — leaving `isServerRunning` false and every later
@@ -1086,6 +1086,22 @@ class GattServerManager(
   }
 
   /**
+   * Ends the current registration round for a reason other than its own completion, so that a
+   * registration still in flight cannot speak for it.
+   *
+   * Emptying [pendingServices] alone was not enough. [addNextService] reads an empty queue as "every
+   * service registered" and reports the database as published — and the round guard in `onServiceAdded`
+   * could not tell the difference, because the round was only ever advanced by [openServer]. An
+   * `onServiceAdded` delivered between a teardown's clear and its [finishOpen] therefore published a
+   * database that was about to be closed: `createServer` resolved successfully, the `ERR_BLUETOOTH` the
+   * teardown meant to report was dropped, and a stopped manager was left reporting `isServerRunning`.
+   */
+  private fun discardPublicationRound() {
+    publicationRound.incrementAndGet()
+    pendingServices.clear()
+  }
+
+  /**
    * Only ever called from [open] or from `onServiceAdded`, so at most one `addService` is ever in
    * flight — which is what the platform requires.
    */
@@ -1099,7 +1115,7 @@ class GattServerManager(
     }
     val server = gattServer
     if (server == null) {
-      pendingServices.clear()
+      discardPublicationRound()
       finishOpen(DatabasePublication.FAILED, GattServerException(
         "ERR_NO_SERVER", "The GATT server was closed before service ${next.uuid} could be registered"
       ))
@@ -1108,7 +1124,7 @@ class GattServerManager(
     // A false return means the registration was never initiated, so no callback will arrive.
     if (!server.addService(next)) {
       Log.e(TAG, "addService: could not initiate registration of ${next.uuid}")
-      pendingServices.clear()
+      discardPublicationRound()
       finishOpen(DatabasePublication.FAILED, GattServerException(
         "ERR_CREATE_SERVER", "Could not initiate registration of service ${next.uuid}"
       ))
@@ -2406,7 +2422,7 @@ class GattServerManager(
     stopAdvertising()
     unregisterStateReceiver()
     onStateChange = null
-    pendingServices.clear()
+    discardPublicationRound()
     finishOpen(
       DatabasePublication.FAILED,
       GattServerException("ERR_NO_SERVER", "Server was stopped before it finished opening")
