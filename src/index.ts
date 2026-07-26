@@ -340,6 +340,34 @@ export async function createServer(
  */
 const MAX_ADVERTISING_TIMEOUT_MS = 180_000;
 
+/**
+ * Bumped by everything that asks for advertising to stop. `startAdvertising` reads it before calling in
+ * and again once the native call has resolved, so a stop the application issued while the start was in
+ * flight is honoured whichever order the two reach the native side in.
+ *
+ * **That order is not guaranteed.** `stopAdvertising` is a synchronous Expo `Function`, so its body runs
+ * on the JavaScript thread the moment it is called, while `startAdvertising` is an `AsyncFunction`, whose
+ * body runs later on Expo's own worker queue. A stop issued *second* can therefore reach the manager
+ * first — and be read as the baseline by the start that follows it, which then passes its own
+ * generation check and puts the radio on the air after the application explicitly asked for the
+ * opposite. Neither platform can tell the two apart, because neither is told which call the application
+ * made first; JavaScript is single-threaded, so this is the only place that knows.
+ */
+let advertisingStopEpoch = 0;
+
+/**
+ * Carries `ERR_ADVERTISE`, the code a stop already gives a start it cancelled natively, so a consumer
+ * branching on the code cannot tell the two apart — the outcome is the same either way.
+ */
+function advertisingCancelledError(): Error {
+  const error: Error & { code?: string } = new Error(
+    '[expo-gatt-server] startAdvertising was cancelled by a stopAdvertising issued while it was still ' +
+      'in flight. The advertisement has been stopped again, so nothing is on the air.',
+  );
+  error.code = 'ERR_ADVERTISE';
+  return error;
+}
+
 const ADVERTISING_MODES: AdvertisingMode[] = ['lowPower', 'balanced', 'lowLatency'];
 const ADVERTISING_TX_POWERS: AdvertisingTxPower[] = ['ultraLow', 'low', 'medium', 'high'];
 
@@ -368,6 +396,8 @@ function assertOneOf<T extends string>(value: unknown, allowed: T[], field: stri
  * Calling it again replaces the current advertisement rather than adding a second one.
  */
 export async function startAdvertising(config: AdvertiseConfig = {}): Promise<void> {
+  // Read before anything else, so every stop issued from here on counts as having come after this call.
+  const epoch = advertisingStopEpoch;
   // Expanding an advertised UUID costs nothing on the wire: Android encodes it as "the shortest
   // representation" and sizes the 31-byte budget the same way, so a 16-bit alias still goes out as
   // two octets.
@@ -425,14 +455,25 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
       );
     }
   }
-  return nativeModule().startAdvertising({ ...config, serviceUuids, serviceData });
+  await nativeModule().startAdvertising({ ...config, serviceUuids, serviceData });
+  if (advertisingStopEpoch !== epoch) {
+    // The application asked to stop while this start was in flight, and the native side may or may not
+    // have seen the two in that order — so the advertisement is stopped again here rather than left to
+    // an ordering nothing guarantees. One stop means one thing.
+    ExpoGattServerModule?.stopAdvertising();
+    throw advertisingCancelledError();
+  }
 }
 
 /**
  * Does nothing when the module is unsupported: nothing can be advertising, and a teardown path is the
  * wrong place to raise a configuration error the setup path already reported.
+ *
+ * Cancels a `startAdvertising` still in flight, whichever order the two reach the native side in — see
+ * `advertisingStopEpoch`.
  */
 export function stopAdvertising(): void {
+  advertisingStopEpoch += 1;
   ExpoGattServerModule?.stopAdvertising();
 }
 
@@ -560,8 +601,14 @@ export async function updateCharacteristicValue(
   );
 }
 
-/** Does nothing when the module is unsupported, for the same reason as `stopAdvertising`. */
+/**
+ * Does nothing when the module is unsupported, for the same reason as `stopAdvertising`.
+ *
+ * Stopping the server stops advertising with it on both platforms, so this cancels a `startAdvertising`
+ * still in flight too.
+ */
 export function stopServer(): void {
+  advertisingStopEpoch += 1;
   ExpoGattServerModule?.stopServer();
 }
 

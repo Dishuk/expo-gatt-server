@@ -220,9 +220,12 @@ public class ExpoGattServerModule: Module {
 
     // Kept synchronous, so the JavaScript signature stays `void` and matches Android's. The teardown
     // itself is deferred because it must run on the main queue, and blocking the JavaScript thread on
-    // it invites a deadlock against a main thread already waiting on JavaScript. Nothing observes the
-    // difference: every other entry point reaches the manager through the same serial queue, so it is
-    // ordered behind this.
+    // it invites a deadlock against a main thread already waiting on JavaScript.
+    //
+    // This body runs on the JavaScript thread, while an `AsyncFunction` body runs on Expo's own worker
+    // queue — so this is **not** ordered against an un-awaited `startAdvertising`, and a stop issued
+    // second can reach the manager first. The shared layer carries the application's call order across
+    // that gap; see `advertisingStopEpoch` in `src/index.ts`.
     Function("stopAdvertising") {
       DispatchQueue.main.async { self.manager?.stopAdvertising() }
     }
