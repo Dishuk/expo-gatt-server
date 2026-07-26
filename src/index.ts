@@ -334,10 +334,46 @@ function assertUniqueUuids(
   }
 }
 
+/**
+ * Bumped by everything that asks the server to stop, and read by `createServer` before it hands over — the
+ * same hazard `advertisingStopEpoch` covers, for the same reason.
+ *
+ * `stopServer` is a synchronous Expo `Function`, so its body runs on the JavaScript thread the moment it is
+ * called, while `createServer` is an `AsyncFunction` whose body runs later on Expo's worker queue. A stop
+ * issued *second* therefore reaches the native side first, finds no manager to stop, and the create behind
+ * it then publishes the whole database anyway — leaving a server the application explicitly asked not to
+ * have. Neither platform can tell the two apart, because neither is told which call the application made
+ * first; JavaScript is single-threaded, so this is the only place that knows.
+ *
+ * iOS carries a `serverStopEpoch` of its own, but it is read inside the `AsyncFunction` body — after the
+ * JavaScript call has already returned — so it only ever catches a stop that lands while the configuration
+ * is still being parsed, not the ordinary mount/unmount case. Android has no equivalent at all.
+ */
+let serverStopEpoch = 0;
+
+/**
+ * Counts `createServer` calls, so only the most recent one may issue the compensating stop that a cancelled
+ * create uses to undo itself — the same rule, and for the same reason, as `advertisingStartEpoch`.
+ */
+let serverStartEpoch = 0;
+
+/** Carries `ERR_NO_SERVER`, the code both platforms already reject a stopped-before-published create with. */
+function serverStoppedError(): Error {
+  const error: Error & { code?: string } = new Error(
+    '[expo-gatt-server] createServer was cancelled by a stopServer issued while it was still in flight. ' +
+      'The server has been stopped again, so no database is published.',
+  );
+  error.code = 'ERR_NO_SERVER';
+  return error;
+}
+
 export async function createServer(
   services: GattServiceConfig[],
   options: CreateServerOptions = {},
 ): Promise<void> {
+  // Read before anything else, so every stop issued from here on counts as having come after this call.
+  const epoch = serverStopEpoch;
+  const generation = ++serverStartEpoch;
   // Rebuilt rather than mutated, so the caller's own configuration object is left as they wrote it.
   const normalizedServices = (services ?? []).map((service) => {
     const uuid = normalizeUuid(service?.uuid, 'service');
@@ -367,7 +403,21 @@ export async function createServer(
       );
     }
   }
-  return nativeModule().createServer(normalizedServices, options);
+  await nativeModule().createServer(normalizedServices, options);
+  if (serverStopEpoch !== epoch) {
+    // The application asked to stop while this create was in flight, and the native side may or may not
+    // have seen the two in that order — so the server is stopped again here rather than left to an
+    // ordering nothing guarantees.
+    //
+    // Only the most recent create may do that: `stopServer` is not addressed to a particular server, so a
+    // later create that already replaced this one — and resolved — would be torn down by a stop meant to
+    // undo a call the application had abandoned. That create owns the server now, and cancels itself the
+    // same way if it needs to.
+    if (serverStartEpoch === generation) {
+      ExpoGattServerModule?.stopServer();
+    }
+    throw serverStoppedError();
+  }
 }
 
 /**
@@ -666,6 +716,7 @@ export async function updateCharacteristicValue(
  */
 export function stopServer(): void {
   advertisingStopEpoch += 1;
+  serverStopEpoch += 1;
   ExpoGattServerModule?.stopServer();
 }
 

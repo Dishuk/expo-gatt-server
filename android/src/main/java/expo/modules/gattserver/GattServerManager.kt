@@ -447,6 +447,13 @@ class GattServerManager(
    * this may take that, never the reverse — so the two cannot deadlock.
    */
   private val serverLifecycleLock = Any()
+
+  /**
+   * Whether [stop] has run, so an [open] that lost the race against it cannot publish a server nothing
+   * holds a handle to. Written and read under [serverLifecycleLock], and never cleared: the module builds
+   * a fresh manager for every `createServer`.
+   */
+  private var stopped = false
   private var publication = DatabasePublication.IDLE
   private val readinessWaiters = mutableListOf<(GattServerException?) -> Unit>()
 
@@ -887,6 +894,16 @@ class GattServerManager(
     onReady: (error: GattServerException?) -> Unit,
     buildServices: () -> List<BluetoothGattService>,
   ): Unit = synchronized(serverLifecycleLock) {
+    // A stop that landed between this manager being installed and this call refuses the open outright.
+    // `stopServer` is synchronous on the JavaScript thread while `createServer` runs on Expo's worker
+    // queue, so the two can arrive in that order; without this the open re-armed the service factory,
+    // re-registered the state receiver and published a GATT server that the module no longer holds a
+    // reference to — unreclaimable for the life of the process. A manager is never reused after `stop`,
+    // so this flag only ever refuses the call that lost the race.
+    if (stopped) {
+      onReady(GattServerException("ERR_NO_SERVER", "Server was stopped before it finished opening"))
+      return
+    }
     openCompletion.set(onReady)
     // Both installed before the adapter is checked, so a server created while Bluetooth happens to be
     // off still publishes itself when Bluetooth returns — which is what the module documents, and what
@@ -2272,6 +2289,7 @@ class GattServerManager(
 
   @SuppressLint("MissingPermission")
   fun stop(): Unit = synchronized(serverLifecycleLock) {
+    stopped = true
     unregisterStateReceiver()
     onStateChange = null
     serviceFactory.set(null)
