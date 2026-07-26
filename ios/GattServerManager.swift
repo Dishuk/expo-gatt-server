@@ -214,6 +214,9 @@ protocol GattServerManagerDelegate: AnyObject {
   )
   func onNotificationSent(deviceId: String, characteristicUuid: String, status: Int)
   func onMtuChanged(deviceId: String, mtu: DeviceMtu)
+  /// The published database went away for a reason no promise is waiting to report. See
+  /// `reportPublicationFailure`.
+  func onServerPublicationFailed(code: String, message: String)
   func onCharacteristicSubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
   func onCharacteristicUnsubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
 }
@@ -368,6 +371,11 @@ class GattServerManager: NSObject {
   /// left awaiting registration and publish a database that is missing a service.
   private var registrationFailed = false
 
+  /// Whether this round's outcome already reached a caller through `openCompletion`. Cleared when a
+  /// round starts. `openCompletion` alone cannot answer that: the `didAdd` failure path settles it as
+  /// soon as the first service reports, and by the time the round ends it is `nil` either way.
+  private var roundReportedToCaller = false
+
   /// Centrals the module believes are connected, keyed by `CBCentral.identifier`.
   ///
   /// `CBPeripheralManagerDelegate` declares no connection-level callback, so membership is derived
@@ -497,6 +505,7 @@ class GattServerManager: NSObject {
   private func completeOpen(_ error: Error?) {
     guard let completion = openCompletion else { return }
     openCompletion = nil
+    roundReportedToCaller = true
     completion(error)
   }
 
@@ -508,10 +517,31 @@ class GattServerManager: NSObject {
     }
   }
 
+  /// Reports a publication that failed with nobody waiting to be told.
+  ///
+  /// Every transition to `poweredOn` re-publishes the database, and both terminal failure paths of a
+  /// round report only through `completeOpen` and `flushReadinessWaiters`. After the original
+  /// `createServer` has resolved there is no completion left and nothing is parked, so a failed
+  /// re-publication called `removeAllServices` — the database really was gone — and rejected no promise
+  /// and emitted no event. An application that does not re-advertise from `onBluetoothStateChanged`
+  /// learnt nothing until it happened to poll `isServerRunning`.
+  ///
+  /// Emitted only in that case: where a promise is carrying the same failure, reporting it twice would
+  /// make an ordinary rejected `createServer` look like a second, separate fault.
+  private func reportPublicationFailure(_ error: Error) {
+    guard openCompletion == nil, !roundReportedToCaller, readinessWaiters.isEmpty else { return }
+    let gattError = error as? GattServerError
+    delegate?.onServerPublicationFailed(
+      code: gattError?.code ?? "ERR_CREATE_SERVER",
+      message: gattError?.message ?? error.localizedDescription
+    )
+  }
+
   private func publishConfiguredServices(on peripheral: CBPeripheralManager) {
     publicationGeneration += 1
     publication = .inProgress
     registrationFailed = false
+    roundReportedToCaller = false
     servicesAwaitingRegistration = Set(serviceConfiguration.map { $0.uuid })
     guard !servicesAwaitingRegistration.isEmpty else {
       publication = .published
@@ -554,6 +584,7 @@ class GattServerManager: NSObject {
       // returns at once unless `publication == .inProgress`, which was just cleared.
       self.servicesAwaitingRegistration.removeAll()
       self.unpublishFailedRegistration()
+      self.reportPublicationFailure(error)
       self.completeOpen(error)
       self.flushReadinessWaiters(error)
     }
@@ -1451,6 +1482,8 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     if registrationFailed {
       publication = .failed
       unpublishFailedRegistration()
+      // Before the waiters are flushed, because it reports only when nothing is waiting.
+      reportPublicationFailure(GattServerError.databaseNotPublished)
       // Settled here rather than left parked for a re-publish that is not coming: nothing retries a
       // failed registration, so the next state update is the only other thing that could release them.
       flushReadinessWaiters(GattServerError.databaseNotPublished)

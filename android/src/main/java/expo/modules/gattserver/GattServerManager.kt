@@ -266,6 +266,12 @@ class GattServerManager(
     fun onMtuChanged(deviceId: String, mtu: DeviceMtu)
     fun onCharacteristicSubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
     fun onCharacteristicUnsubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
+
+    /**
+     * The published database went away for a reason no promise is waiting to report. See
+     * [reportPublicationFailure].
+     */
+    fun onServerPublicationFailed(code: String, message: String)
   }
 
   // Set from the binding and cleared by `stop` on the JavaScript thread, then read from binder and main
@@ -1141,6 +1147,28 @@ class GattServerManager(
    * database that was about to be closed: `createServer` resolved successfully, the `ERR_BLUETOOTH` the
    * teardown meant to report was dropped, and a stopped manager was left reporting `isServerRunning`.
    */
+  /**
+   * Reports a publication that failed with nobody waiting to be told.
+   *
+   * Every transition to `STATE_ON` re-registers the services, and a round reports only through
+   * [openCompletion] and the callers parked in [whenDatabasePublished]. Once the original `createServer`
+   * has resolved there is neither, so a re-registration that failed left the database genuinely absent
+   * while no promise rejected and no event fired — an application that does not re-advertise from
+   * `onBluetoothStateChanged` learnt nothing until it happened to poll `isServerRunning`.
+   *
+   * Only [DatabasePublication.FAILED]: `IDLE` is the adapter going down, which `onBluetoothStateChanged`
+   * already reports, and a re-registration is coming for it. Only when nothing else carried the error,
+   * so an ordinary rejected `createServer` does not also look like a second, separate fault.
+   */
+  private fun reportPublicationFailure(
+    state: DatabasePublication,
+    error: GattServerException?,
+    reported: Boolean,
+  ) {
+    if (reported || state != DatabasePublication.FAILED || error == null) return
+    listener?.onServerPublicationFailed(error.code, error.message ?: "The database was not published")
+  }
+
   private fun discardPublicationRound() {
     publicationRound.incrementAndGet()
     pendingServices.clear()
@@ -1204,7 +1232,9 @@ class GattServerManager(
       }
     }
     if (!applied) return
-    openCompletion.getAndSet(null)?.invoke(error)
+    val completion = openCompletion.getAndSet(null)
+    completion?.invoke(error)
+    reportPublicationFailure(state, error, reported = completion != null || parked.isNotEmpty())
     if (parked.isEmpty()) return
     // Released on the manager's own looper rather than on the binder thread that delivered the last
     // `onServiceAdded`: a released caller goes straight on to make binder calls of its own — the

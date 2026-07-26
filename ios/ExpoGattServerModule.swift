@@ -63,7 +63,8 @@ public class ExpoGattServerModule: Module {
       "onCharacteristicSubscribed",
       "onCharacteristicUnsubscribed",
       "onBluetoothStateChanged",
-      "onMtuChanged"
+      "onMtuChanged",
+      "onServerPublicationFailed"
     )
 
     AsyncFunction("getMtu") { (deviceId: String, promise: Promise) in
@@ -778,6 +779,13 @@ extension ExpoGattServerModule: GattServerManagerDelegate {
       "deviceId": deviceId,
       "mtu": mtu.mtu,
       "maxNotificationPayload": mtu.maxNotificationPayload
+    ])
+  }
+
+  func onServerPublicationFailed(code: String, message: String) {
+    sendEvent("onServerPublicationFailed", [
+      "code": code,
+      "message": message
     ])
   }
 

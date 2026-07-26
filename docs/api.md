@@ -28,6 +28,7 @@ Complete reference for all exported functions, types, events, and constants.
   - [addCharacteristicSubscribedListener](#addcharacteristicsubscribedlistener)
   - [addCharacteristicUnsubscribedListener](#addcharacteristicunsubscribedlistener)
   - [addBluetoothStateChangedListener](#addbluetoothstatechangedlistener)
+  - [addServerPublicationFailedListener](#addserverpublicationfailedlistener)
 - [Types](#types)
 - [Constants](#constants)
 - [Error Codes](#error-codes)
@@ -1188,6 +1189,35 @@ than they would on iOS rather than alongside the state change. Branching on `res
 lost database works on iOS only; branch on `poweredOff`, or on `isServerRunning` after it, for
 behaviour that holds on both.
 
+### addServerPublicationFailedListener
+
+```typescript
+addServerPublicationFailedListener(
+  listener: (event: ServerPublicationFailedEvent) => void
+): EventSubscription
+```
+
+Fires when the published database goes away for a reason no promise reported.
+
+The module re-publishes the services on every transition to `poweredOn` / `STATE_ON`. That
+re-publication can fail — a service the platform refuses, or a registration round that never completes
+— and by then `createServer` has long since resolved, so there is no promise left to reject. Only a
+`startAdvertising` parked at that exact moment would otherwise have heard about it.
+
+The database really is absent afterwards, on both platforms: `isServerRunning` reports `false`, nothing
+retries, and recovering means calling `createServer` again. This event is the signal to do that.
+
+**Not** emitted when Bluetooth is turned off — [`addBluetoothStateChangedListener`](#addbluetoothstatechangedlistener)
+already reports that, and the next power-on re-publishes from it. Nor when a `createServer` or a parked
+`startAdvertising` rejected with the same failure, which would report one fault as two.
+
+```typescript
+addServerPublicationFailedListener(({ code, message }) => {
+  console.warn(`the GATT database is gone: ${code} ${message}`);
+  createServer(SERVICES);
+});
+```
+
 ## Types
 
 ### GattServiceConfig
@@ -1659,6 +1689,18 @@ Adapter state, normalised so consumers never have to branch on platform.
 | `unauthorized` | The app may not use Bluetooth | `CBManagerState.unauthorized` | Not reported; Android surfaces this as a rejected call instead |
 | `unknown` | Not determined yet | Reported until the first state callback arrives, and by `getBluetoothState` before a server exists | Only when no React context is available |
 
+### ServerPublicationFailedEvent
+
+```typescript
+interface ServerPublicationFailedEvent {
+  code: string;
+  message: string;
+}
+```
+
+`code` is the same code the equivalent `createServer` rejection would have carried, usually
+`ERR_CREATE_SERVER`. See [`addServerPublicationFailedListener`](#addserverpublicationfailedlistener).
+
 ### BluetoothStateChangedEvent
 
 ```typescript
@@ -1680,6 +1722,7 @@ type GattServerEvents = {
   onCharacteristicSubscribed(event: CharacteristicSubscribedEvent): void;
   onCharacteristicUnsubscribed(event: CharacteristicUnsubscribedEvent): void;
   onBluetoothStateChanged(event: BluetoothStateChangedEvent): void;
+  onServerPublicationFailed(event: ServerPublicationFailedEvent): void;
 };
 ```
 

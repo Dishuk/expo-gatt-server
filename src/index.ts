@@ -24,6 +24,7 @@ import type {
   CharacteristicUnsubscribedEvent,
   BluetoothState,
   BluetoothStateChangedEvent,
+  ServerPublicationFailedEvent,
   ConnectedDevice,
   DeviceMtu,
   MtuChangedEvent,
@@ -58,6 +59,7 @@ export {
   type CharacteristicUnsubscribedEvent,
   type BluetoothState,
   type BluetoothStateChangedEvent,
+  type ServerPublicationFailedEvent,
   type ConnectedDevice,
   type DeviceMtu,
   type MtuChangedEvent,
@@ -966,4 +968,17 @@ export function addBluetoothStateChangedListener(
   listener: (event: BluetoothStateChangedEvent) => void,
 ): EventSubscription {
   return addListener('onBluetoothStateChanged', listener);
+}
+
+/**
+ * Fires when the published database goes away for a reason no promise reported — a re-publication that
+ * failed after `createServer` had already resolved. See `ServerPublicationFailedEvent`.
+ *
+ * This is the signal to call `createServer` again: nothing retries a failed registration, and
+ * `isServerRunning` stays `false` until something does.
+ */
+export function addServerPublicationFailedListener(
+  listener: (event: ServerPublicationFailedEvent) => void,
+): EventSubscription {
+  return addListener('onServerPublicationFailed', listener);
 }

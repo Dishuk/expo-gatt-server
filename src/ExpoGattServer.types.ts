@@ -501,6 +501,24 @@ export interface BluetoothStateChangedEvent {
  * `deviceId` is unaffected: it is an opaque handle (a MAC address on Android, a `CBCentral.identifier`
  * on iOS), not a Bluetooth UUID.
  */
+/**
+ * The published GATT database went away for a reason no promise reported.
+ *
+ * The module re-publishes the services on every transition to `poweredOn` / `STATE_ON`, and until this
+ * event existed a re-publication that failed rejected nothing and emitted nothing — `createServer` had
+ * long since resolved, and only a `startAdvertising` parked at that moment would have heard about it.
+ * The database really is absent afterwards: `isServerRunning` reports `false`, and recovering means
+ * calling `createServer` again.
+ *
+ * Not emitted when Bluetooth is simply turned off, which `onBluetoothStateChanged` already reports and
+ * which the next power-on re-publishes from.
+ */
+export interface ServerPublicationFailedEvent {
+  /** The same code the equivalent `createServer` rejection would carry, usually `ERR_CREATE_SERVER`. */
+  code: string;
+  message: string;
+}
+
 export type GattServerEvents = {
   onDeviceConnected(event: DeviceConnectedEvent): void;
   onDeviceDisconnected(event: DeviceDisconnectedEvent): void;
@@ -511,6 +529,7 @@ export type GattServerEvents = {
   onCharacteristicSubscribed(event: CharacteristicSubscribedEvent): void;
   onCharacteristicUnsubscribed(event: CharacteristicUnsubscribedEvent): void;
   onBluetoothStateChanged(event: BluetoothStateChangedEvent): void;
+  onServerPublicationFailed(event: ServerPublicationFailedEvent): void;
 };
 
 /**

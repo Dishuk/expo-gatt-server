@@ -8,6 +8,7 @@ import {
   addDeviceDisconnectedListener,
   addMtuChangedListener,
   addNotificationSentListener,
+  addServerPublicationFailedListener,
   createServer,
   getBluetoothState,
   getConnectedDevices,
@@ -121,6 +122,11 @@ describe('listener helpers', () => {
       'addBluetoothStateChangedListener',
       'onBluetoothStateChanged',
       addBluetoothStateChangedListener,
+    ],
+    [
+      'addServerPublicationFailedListener',
+      'onServerPublicationFailed',
+      addServerPublicationFailedListener,
     ],
   ];
 

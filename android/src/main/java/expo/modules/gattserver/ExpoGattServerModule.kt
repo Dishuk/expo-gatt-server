@@ -50,7 +50,8 @@ class ExpoGattServerModule : Module() {
       "onCharacteristicSubscribed",
       "onCharacteristicUnsubscribed",
       "onBluetoothStateChanged",
-      "onMtuChanged"
+      "onMtuChanged",
+      "onServerPublicationFailed"
     )
 
     AsyncFunction("getMtu") { deviceId: String, promise: Promise ->
@@ -386,6 +387,13 @@ class ExpoGattServerModule : Module() {
         "deviceId" to deviceId,
         "mtu" to mtu.mtu,
         "maxNotificationPayload" to mtu.maxNotificationPayload
+      ))
+    }
+
+    override fun onServerPublicationFailed(code: String, message: String) {
+      sendEvent("onServerPublicationFailed", bundleOf(
+        "code" to code,
+        "message" to message
       ))
     }
 
