@@ -24,9 +24,11 @@ export interface CharacteristicDelegateConfig {
    * outstanding — a newer value is never reverted to what the batch assembled.
    *
    * Apple requires exactly one response per write callback, taken from the first request of the
-   * batch, so on iOS every event produced by one batch shares a single `requestId` and the first
-   * `sendResponse` for it answers the whole batch. An Android execute of a reliable write behaves the
-   * same way, since the execute is a single request.
+   * batch, so on iOS every event produced by one batch shares a single `requestId` and one
+   * `sendResponse` answers the whole batch. Exactly one of those events carries
+   * `responseNeeded: true`; a second delegated characteristic in the same batch is still reported and
+   * can commit its value with `updateCharacteristicValue`, but must not answer again. An Android
+   * execute of a reliable write behaves the same way, since the execute is a single request.
    */
   write?: boolean;
 }

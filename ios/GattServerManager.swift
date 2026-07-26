@@ -1491,10 +1491,10 @@ extension GattServerManager: CBPeripheralManagerDelegate {
         deviceId: request.central.identifier.uuidString,
         requestId: batchId,
         serviceUuid: address.service.normalizedString,
-        characteristicUuid: request.characteristic.uuid.normalizedString,
-        offset: request.offset,
-        value: request.value ?? Data(),
-        responseNeeded: delegated.contains(address)
+        characteristicUuid: address.characteristic.normalizedString,
+        offset: 0,
+        value: assembled[address] ?? Data(),
+        responseNeeded: address == responder
       )
     }
   }
@@ -1508,3 +1508,16 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     drainPendingNotifications()
   }
 }
+    // Reported once per attribute, from offset 0 and carrying the value as assembled — the shape
+    // Android reports, rather than replaying the fragments the central happened to split the value
+    // into. Replaying them handed every fragment the batch's single `requestId`, so a long write to a
+    // delegated characteristic raised three events all claiming `responseNeeded`, and the second and
+    // third `sendResponse` rejected with `REQUEST_NOT_FOUND` after the first had answered the batch.
+    //
+    // Exactly one attribute is marked `responseNeeded`, because Apple's rule is one
+    // `respond(to:withResult:)` per callback and the batch is answered as a unit — the answer covers
+    // every attribute in it. A second delegated attribute still receives its event and can commit its
+    // value with `updateCharacteristicValue`; it simply must not answer a second time.
+    let responder = addresses.first { delegated.contains($0) }
+    var reported: Set<CharacteristicAddress> = []
+      guard reported.insert(address).inserted else { continue }
