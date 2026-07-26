@@ -9,6 +9,11 @@
 // imports ExpoModulesCore, which has no host build — the configuration parsing that lives there is
 // covered by the TypeScript suite, which validates the same configuration before it is ever handed
 // over.
+//
+// That leaves the binding itself compiled by nothing here, so `.github/workflows/ci.yml` has an
+// `ios-integration` job that prebuilds the example app and builds the `ExpoGattServer` pod target for
+// real — the counterpart of `android-integration`. Without it a binding that no longer matched the
+// manager would reach consumers unnoticed.
 import PackageDescription
 
 let package = Package(

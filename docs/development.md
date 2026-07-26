@@ -144,14 +144,27 @@ Kotlin sources in place. It exists separately from `android/build.gradle` becaus
 by `expo-module-gradle-plugin`, which only resolves inside a host app's Gradle build -- running tests
 through it would mean prebuilding the example app and dragging in the whole React Native toolchain.
 
-That harness excludes `ExpoGattServerModule.kt`, the only source that imports Expo. CI closes the gap
-with a job that runs `expo prebuild` on the example app and compiles `:expo-gatt-server` for real, so a
-binding that no longer matches the parsers fails there rather than in someone's app. To run it locally:
+Each harness excludes exactly one source — the platform's Expo binding, which cannot compile on the host:
+`ExpoGattServerModule.kt` for Android, `ExpoGattServerModule.swift` for iOS. CI closes both gaps with a
+job per platform that runs `expo prebuild` on the example app and compiles the module for real, so a
+binding that no longer matches the parsers or the manager fails there rather than in someone's app. To run
+them locally:
 
 ```bash
 cd example && npx expo prebuild --platform android
 cd android && ./gradlew :expo-gatt-server:compileDebugKotlin
 ```
+
+```bash
+cd example && npx expo prebuild --platform ios
+cd ios && pod install
+xcodebuild -workspace expogattserverexample.xcworkspace -scheme ExpoGattServer \
+  -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+  build CODE_SIGNING_ALLOWED=NO
+```
+
+Building the `ExpoGattServer` scheme rather than the app's compiles the module and its dependencies and
+nothing else, which is all that is needed and much the faster of the two.
 
 ### Manual testing
 

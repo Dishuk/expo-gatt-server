@@ -88,6 +88,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -104,3 +105,35 @@ jobs:
       # app.
       - run: ./gradlew :expo-gatt-server:compileReleaseKotlin --console=plain
         working-directory: example/android
+
+  ios-integration:
+    name: iOS module builds against Expo
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm ci
+        working-directory: example
+      - run: npx expo prebuild --platform ios --no-install
+        working-directory: example
+      - run: pod install
+        working-directory: example/ios
+      # The counterpart of `android-integration`, and for the same reason: `Package.swift` compiles
+      # `GattServerManager.swift` alone, because `ExpoGattServerModule.swift` imports ExpoModulesCore and
+      # has no host build — so until this job existed, a third of the iOS source was compiled by nothing
+      # in CI and a binding that no longer matched the manager would have shipped. Only the module's own
+      # pod target is built, not the whole app, which is all it takes to catch that.
+      - name: Compile the ExpoGattServer pod target
+        working-directory: example/ios
+        run: |
+          xcodebuild \
+            -workspace "$(ls -d *.xcworkspace | head -1)" \
+            -scheme ExpoGattServer \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -configuration Release \
+            build CODE_SIGNING_ALLOWED=NO
