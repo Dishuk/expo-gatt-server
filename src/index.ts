@@ -391,6 +391,18 @@ function assertOneOf<T extends string>(value: unknown, allowed: T[], field: stri
  *
  * A publication still in flight is waited for on both platforms, so the call is safe before
  * `createServer` resolves and from a `poweredOn` event handler. A wait is settled rather than left
+/**
+ * Counts `startAdvertising` calls, so only the most recent one may issue the compensating stop that a
+ * cancelled start uses to undo itself.
+ *
+ * Without it that stop is unconditional, and stops whatever is on the air rather than "the
+ * advertisement this call put there". In `start(A); stop(); await start(B);` the stop cancels A, B
+ * reads the bumped epoch and resolves normally — and then A's native call finally returns, sees the
+ * epoch moved, and issues a stop that takes B off the air. The caller awaited B, B resolved, nothing
+ * is advertising, and no promise ever reported a failure.
+ */
+let advertisingStartEpoch = 0;
+
  * pending if the publication fails, the server is stopped, or Bluetooth goes off.
  *
  * Calling it again replaces the current advertisement rather than adding a second one.
@@ -460,7 +472,14 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
     // The application asked to stop while this start was in flight, and the native side may or may not
     // have seen the two in that order — so the advertisement is stopped again here rather than left to
     // an ordering nothing guarantees. One stop means one thing.
-    ExpoGattServerModule?.stopAdvertising();
+    //
+    // Only the most recent start may do that, though: `stopAdvertising` is not addressed to a
+    // particular advertisement, so a later start that already replaced this one — and resolved — would
+    // be taken off the air by a stop meant to undo a call the application had abandoned. That start
+    // owns the radio now, and cancels itself the same way if it needs to.
+    if (advertisingStartEpoch === generation) {
+      ExpoGattServerModule?.stopAdvertising();
+    }
     throw advertisingCancelledError();
   }
 }

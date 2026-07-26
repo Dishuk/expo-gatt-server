@@ -92,6 +92,48 @@ describe('a stop issued while a start is in flight', () => {
   });
 });
 
+/**
+ * The compensating stop is not addressed to a particular advertisement — `stopAdvertising` takes no
+ * argument and stops whatever is on the air. So a cancelled start issuing one after a *later* start has
+ * already taken over silently undoes work the application never asked to undo.
+ */
+describe('a start that was replaced before its cancellation could compensate', () => {
+  it('leaves the newer advertisement on the air', async () => {
+    const releaseFirst = deferNativeStart();
+
+    const first = startAdvertising({ localName: 'first' });
+    stopAdvertising();
+    // Issued after the stop, so this one is not cancelled by it and resolves normally.
+    await expect(startAdvertising({ localName: 'second' })).resolves.toBeUndefined();
+
+    // Only now does the abandoned first start come back from the native side.
+    releaseFirst();
+    await expect(first).rejects.toMatchObject({ code: 'ERR_ADVERTISE' });
+
+    // Once, for the application's own stopAdvertising. A second call here would be the first start
+    // taking the second one off the air after it had already resolved.
+    expect(nativeModuleMock.stopAdvertising).toHaveBeenCalledTimes(1);
+  });
+
+  /** The newest start still compensates for itself when the stop was aimed at it. */
+  it('still compensates when it is the most recent start', async () => {
+    const releaseFirst = deferNativeStart();
+    const releaseSecond = deferNativeStart();
+
+    const first = startAdvertising({ localName: 'first' });
+    const second = startAdvertising({ localName: 'second' });
+    stopAdvertising();
+    releaseFirst();
+    releaseSecond();
+
+    await expect(first).rejects.toMatchObject({ code: 'ERR_ADVERTISE' });
+    await expect(second).rejects.toMatchObject({ code: 'ERR_ADVERTISE' });
+    // The application's own stop, plus one from the newest start. The superseded start does not add a
+    // third: it no longer owns the radio.
+    expect(nativeModuleMock.stopAdvertising).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('a start with no stop against it', () => {
   it('resolves, and does not stop the advertisement it just started', async () => {
     await expect(startAdvertising({ localName: 'Harness' })).resolves.toBeUndefined();
