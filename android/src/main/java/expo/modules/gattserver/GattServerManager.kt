@@ -133,10 +133,16 @@ private const val PUBLICATION_TIMEOUT_MS = 30_000L
  * 64 sends queued behind it, and every one after that rejected `ERR_NOTIFY_QUEUE_FULL`, with no recovery
  * short of a disconnect.
  *
- * Set to the ATT transaction timeout, which is the longest an indication can legitimately take to be
- * confirmed (Core Spec Vol 3, Part F, §3.3.3).
+ * Set *above* the ATT transaction timeout, which is the longest an indication can legitimately take to be
+ * confirmed (Core Spec Vol 3, Part F, §3.3.3). Setting it to exactly that made this bound race the stack's
+ * own report rather than outlive it: an unconfirmed indication expired here first, so the real
+ * `onNotificationSent` — carrying the genuine failure status — arrived to an entry that had already been
+ * settled and was discarded, and the recovery pumped the next entry while the stack still considered the
+ * previous one in flight, which it refuses with `ERROR_GATT_WRITE_REQUEST_BUSY`, rejecting the whole
+ * backlog in one sweep. This is the outer bound for a callback that never comes at all, so it has to be
+ * the last thing to fire.
  */
-private const val NOTIFICATION_TIMEOUT_MS = 30_000L
+private const val NOTIFICATION_TIMEOUT_MS = 35_000L
 
 open class GattServerException(val code: String, message: String) : Exception(message)
 class MtuException(code: String, message: String) : GattServerException(code, message)
@@ -1673,8 +1679,14 @@ class GattServerManager(
         queue.inFlight = candidate
         candidate
       }
-      armNotificationTimeout(deviceId, queue, next)
-      val error = dispatchNotification(deviceId, next) ?: return
+      // Armed only once the stack has accepted the send, because the bound exists for a callback that
+      // never arrives — and a dispatch that fails outright settles the entry here instead, which would
+      // leave a timer running against an entry already gone.
+      val error = dispatchNotification(deviceId, next)
+      if (error == null) {
+        armNotificationTimeout(deviceId, queue, next)
+        return
+      }
       // Only the thread that still owns the entry may settle it: a disconnect or a stop can take it
       // during the dispatch and settle it first, and a second settle throws on a release build.
       val stillOurs = synchronized(queue) {
