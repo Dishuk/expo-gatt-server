@@ -428,6 +428,25 @@ class GattServerManager(
   fun setDelegations(map: Map<CharacteristicAddress, CharacteristicDelegation>) {
     delegations.clear()
     delegationsByCharacteristic.clear()
+
+  /**
+   * Serialises the four entry points that open or close the `BluetoothGattServer`: [open], [stop],
+   * [handleAdapterOn] and [handleAdapterOff].
+   *
+   * The class otherwise reads as if the server lifecycle were single-threaded, and it is not. [open]
+   * runs on Expo's `AsyncFunctionQueue` HandlerThread; the adapter handlers run on the main thread,
+   * because `registerReceiver` is called without one; [stop] runs on the JS thread, since `stopServer`
+   * is a synchronous `Function`. Nothing serialised them, so a `createServer` racing a `STATE_ON`
+   * broadcast could run `openGattServer` twice against the same shared callback — one of the two
+   * servers then had no reference left to close it, leaking a GATT interface registration for the life
+   * of the process while still serving a live copy of the database, and both rounds drove
+   * `addNextService` over the same `pendingServices`.
+   *
+   * Held across the binder calls into the Bluetooth process, which is what makes the pairing of
+   * `gattServer` with its round indivisible. Ordering with [publicationLock] is one-way — code holding
+   * this may take that, never the reverse — so the two cannot deadlock.
+   */
+  private val serverLifecycleLock = Any()
     delegations.putAll(map)
     val occurrences = map.keys.groupingBy { it.characteristic }.eachCount()
     for ((address, delegation) in map) {
@@ -485,7 +504,7 @@ class GattServerManager(
    * than relying on undocumented survival of the old one.
    */
   @SuppressLint("MissingPermission")
-  private fun handleAdapterOff() {
+  private fun handleAdapterOff(): Unit = synchronized(serverLifecycleLock) {
     Log.d(TAG, "Adapter off — closing GATT server")
     pendingServices.clear()
     // IDLE rather than FAILED: the next power-on re-registers the services, so a caller arriving in the
@@ -518,7 +537,7 @@ class GattServerManager(
     subscriptions.clear()
   }
 
-  private fun handleAdapterOn() {
+  private fun handleAdapterOn(): Unit = synchronized(serverLifecycleLock) {
     // The later attempt [restoreAdapterName] logs about when it fails. `setName` cannot succeed while the
     // adapter is off, which is exactly when a teardown is most likely to run, so a rename that
     // `android.setAdapterName` made would otherwise survive the power cycle that prevented its undo.
@@ -820,7 +839,7 @@ class GattServerManager(
   fun open(
     onReady: (error: GattServerException?) -> Unit,
     buildServices: () -> List<BluetoothGattService>,
-  ) {
+  ): Unit = synchronized(serverLifecycleLock) {
     openCompletion.set(onReady)
     // Both installed before the adapter is checked, so a server created while Bluetooth happens to be
     // off still publishes itself when Bluetooth returns — which is what the module documents, and what
@@ -2097,7 +2116,7 @@ class GattServerManager(
   }
 
   @SuppressLint("MissingPermission")
-  fun stop() {
+  fun stop(): Unit = synchronized(serverLifecycleLock) {
     unregisterStateReceiver()
     onStateChange = null
     serviceFactory.set(null)
