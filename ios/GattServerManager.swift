@@ -512,6 +512,14 @@ class GattServerManager: NSObject {
   /// A stop that lands while the call is held rejects it with the error a stop already gives a start in
   /// flight, so one stop means one thing: proceeding instead would put the radio on the air after the
   /// application explicitly asked for the opposite.
+      // Abandoned explicitly, after the error above has read it. `unpublishFailedRegistration` waits
+      // for this set to empty so it never runs with sibling `add(_:)` calls outstanding — but on this
+      // path it can only be non-empty, because a round whose services had all reported would have
+      // cancelled this timer in `didAdd`. Left as it was, the unpublish returned every time and the
+      // services this round did manage to register stayed in the process-wide GATT database while the
+      // module reported no server at all. A late acknowledgement cannot resurrect them: `didAdd`
+      // returns at once unless `publication == .inProgress`, which was just cleared.
+      self.servicesAwaitingRegistration.removeAll()
   func startAdvertising(
     localName: String?,
     serviceUuids: [CBUUID]?,
