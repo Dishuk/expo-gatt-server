@@ -67,6 +67,19 @@ internal fun rebasedResponseValue(
 ): ByteArray {
   if (!isRead) return value
 
+  // Re-checked here rather than trusted from the TypeScript layer, on the same grounds the duplicate
+  // UUID and byte-range checks in `GattConfiguration.kt` are: the native module is reachable directly.
+  // A negative supplied offset passed the relation below — `-4` is not greater than `0` — and produced a
+  // positive `skip`, so the response was silently trimmed from the front and sent to the central
+  // labelled as the whole attribute. Nothing reported it on either side.
+  if (suppliedOffset < 0 || requestedOffset < 0) {
+    throw GattServerException(
+      "ERR_RESPONSE_OFFSET",
+      "Request $requestId was answered with offset $suppliedOffset against a requested offset of " +
+        "$requestedOffset. An ATT offset is an unsigned 16-bit value."
+    )
+  }
+
   if (suppliedOffset > requestedOffset) {
     throw GattServerException(
       "ERR_RESPONSE_OFFSET",

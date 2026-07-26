@@ -319,6 +319,14 @@ class GattServerManager(
      * central saw refused.
      */
     val clientConfigurations: List<Pair<BluetoothGattDescriptor, Int>> = emptyList(),
+    /**
+     * The plain (non-CCCD) descriptor values the same execute carried, withheld for the same reason.
+     * These used to be applied while the batch was assembled, before delegation was even worked out, so
+     * a rejected execute still left a vendor descriptor holding the new value — the server and the
+     * central disagreeing about an execute the central saw refused, which is exactly what the
+     * queued-write procedure's atomicity forbids.
+     */
+    val deferredDescriptors: Map<BluetoothGattDescriptor, ByteArray> = emptyMap(),
   ) {
     // Assigned once, immediately after construction, because the expiry has to name the entry it expires.
     // Volatile because it is armed on a binder thread and read from the main looper and the caller's.
@@ -338,14 +346,6 @@ class GattServerManager(
     class ToCharacteristic(
       val characteristic: BluetoothGattCharacteristic,
       override val offset: Int,
-    /**
-     * The plain (non-CCCD) descriptor values the same execute carried, withheld for the same reason.
-     * These used to be applied while the batch was assembled, before delegation was even worked out, so
-     * a rejected execute still left a vendor descriptor holding the new value — the server and the
-     * central disagreeing about an execute the central saw refused, which is exactly what the
-     * queued-write procedure's atomicity forbids.
-     */
-    val deferredDescriptors: Map<BluetoothGattDescriptor, ByteArray> = emptyMap(),
       override val value: ByteArray,
     ) : PreparedWrite()
 
@@ -428,6 +428,25 @@ class GattServerManager(
   // window just after the transition that would have released it. Nothing that can re-enter the module
   // runs under it: every parked caller is invoked after it is released.
   private val publicationLock = Any()
+
+  /**
+   * Serialises the four entry points that open or close the `BluetoothGattServer`: [open], [stop],
+   * [handleAdapterOn] and [handleAdapterOff].
+   *
+   * The class otherwise reads as if the server lifecycle were single-threaded, and it is not. [open]
+   * runs on Expo's `AsyncFunctionQueue` HandlerThread; the adapter handlers run on the main thread,
+   * because `registerReceiver` is called without one; [stop] runs on the JS thread, since `stopServer`
+   * is a synchronous `Function`. Nothing serialised them, so a `createServer` racing a `STATE_ON`
+   * broadcast could run `openGattServer` twice against the same shared callback — one of the two
+   * servers then had no reference left to close it, leaking a GATT interface registration for the life
+   * of the process while still serving a live copy of the database, and both rounds drove
+   * `addNextService` over the same `pendingServices`.
+   *
+   * Held across the binder calls into the Bluetooth process, which is what makes the pairing of
+   * `gattServer` with its round indivisible. Ordering with [publicationLock] is one-way — code holding
+   * this may take that, never the reverse — so the two cannot deadlock.
+   */
+  private val serverLifecycleLock = Any()
   private var publication = DatabasePublication.IDLE
   private val readinessWaiters = mutableListOf<(GattServerException?) -> Unit>()
 
@@ -455,25 +474,6 @@ class GattServerManager(
   fun setDelegations(map: Map<CharacteristicAddress, CharacteristicDelegation>) {
     delegations.clear()
     delegationsByCharacteristic.clear()
-
-  /**
-   * Serialises the four entry points that open or close the `BluetoothGattServer`: [open], [stop],
-   * [handleAdapterOn] and [handleAdapterOff].
-   *
-   * The class otherwise reads as if the server lifecycle were single-threaded, and it is not. [open]
-   * runs on Expo's `AsyncFunctionQueue` HandlerThread; the adapter handlers run on the main thread,
-   * because `registerReceiver` is called without one; [stop] runs on the JS thread, since `stopServer`
-   * is a synchronous `Function`. Nothing serialised them, so a `createServer` racing a `STATE_ON`
-   * broadcast could run `openGattServer` twice against the same shared callback — one of the two
-   * servers then had no reference left to close it, leaking a GATT interface registration for the life
-   * of the process while still serving a live copy of the database, and both rounds drove
-   * `addNextService` over the same `pendingServices`.
-   *
-   * Held across the binder calls into the Bluetooth process, which is what makes the pairing of
-   * `gattServer` with its round indivisible. Ordering with [publicationLock] is one-way — code holding
-   * this may take that, never the reverse — so the two cannot deadlock.
-   */
-  private val serverLifecycleLock = Any()
     delegations.putAll(map)
     val occurrences = map.keys.groupingBy { it.characteristic }.eachCount()
     for ((address, delegation) in map) {
@@ -848,6 +848,12 @@ class GattServerManager(
     }
 
     override fun onServiceAdded(status: Int, service: BluetoothGattService) {
+      // A registration belonging to a round that has since been discarded says nothing about the one
+      // running now, and must not advance or fail it.
+      if (publicationRound.get() != round) {
+        Log.d(TAG, "onServiceAdded: ignoring service=${service.uuid} from discarded round $round")
+        return
+      }
       if (status != BluetoothGatt.GATT_SUCCESS) {
         Log.e(TAG, "onServiceAdded: service=${service.uuid} failed with status=$status")
         pendingServices.clear()
@@ -878,12 +884,6 @@ class GattServerManager(
    * the adapter is disabled and re-enabled, so it must return freshly constructed services.
    */
   fun open(
-      // A registration belonging to a round that has since been discarded says nothing about the one
-      // running now, and must not advance or fail it.
-      if (publicationRound.get() != round) {
-        Log.d(TAG, "onServiceAdded: ignoring service=${service.uuid} from discarded round $round")
-        return
-      }
     onReady: (error: GattServerException?) -> Unit,
     buildServices: () -> List<BluetoothGattService>,
   ): Unit = synchronized(serverLifecycleLock) {
@@ -947,6 +947,10 @@ class GattServerManager(
       if (publicationRound.get() != round) return@Runnable
       Log.e(TAG, "No onServiceAdded within $PUBLICATION_TIMEOUT_MS ms; reporting the round as failed")
       pendingServices.clear()
+      // `onlyIf` rather than a check up here: the registration can complete between the two, and
+      // reading the state separately from writing it let a bound that had already lost the race
+      // overwrite `PUBLISHED` with `FAILED` — leaving `isServerRunning` false and every later
+      // `startAdvertising` rejecting `ERR_NO_SERVER` for a database that really was published.
       finishOpen(
         DatabasePublication.FAILED,
         GattServerException(
@@ -978,10 +982,6 @@ class GattServerManager(
     synchronized(attributeValueLock) {
       for (service in services) {
         for (characteristic in service.characteristics) {
-      // `onlyIf` rather than a check up here: the registration can complete between the two, and
-      // reading the state separately from writing it let a bound that had already lost the race
-      // overwrite `PUBLISHED` with `FAILED` — leaving `isServerRunning` false and every later
-      // `startAdvertising` rejecting `ERR_NO_SERVER` for a database that really was published.
           @Suppress("DEPRECATION")
           val value = characteristic.value ?: continue
           values[CharacteristicAddress(service.uuid, characteristic.uuid)] = value
@@ -1052,6 +1052,11 @@ class GattServerManager(
   ) {
     // The round is over however it ended, so its bound goes with it.
     cancelPublicationTimeout()
+    // `onlyIf` makes the test and the transition one step under the monitor, for callers that may be
+    // racing the round they are trying to end. Without it the publication bound could read
+    // `IN_PROGRESS`, lose the race to a registration completing on a binder thread, and still write
+    // `FAILED` over the `PUBLISHED` that had just been recorded.
+    var applied = true
     val parked = synchronized(publicationLock) {
       if (onlyIf != null && publication != onlyIf) {
         applied = false
@@ -1063,6 +1068,7 @@ class GattServerManager(
         waiters
       }
     }
+    if (!applied) return
     openCompletion.getAndSet(null)?.invoke(error)
     if (parked.isEmpty()) return
     // Released on the main looper rather than on the binder thread that delivered the last
@@ -1087,18 +1093,12 @@ class GattServerManager(
     // problem it is instead of parking a caller nothing is going to release.
     bluetoothUnavailable()?.let {
       onReady(it)
-    // `onlyIf` makes the test and the transition one step under the monitor, for callers that may be
-    // racing the round they are trying to end. Without it the publication bound could read
-    // `IN_PROGRESS`, lose the race to a registration completing on a binder thread, and still write
-    // `FAILED` over the `PUBLISHED` that had just been recorded.
-    var applied = true
       return
     }
     // Settled outside the monitor, so no caller ever runs while it is held.
     val failure = synchronized(publicationLock) {
       when (publication) {
         DatabasePublication.PUBLISHED -> null
-    if (!applied) return
         DatabasePublication.FAILED -> databaseNotPublished()
         DatabasePublication.IDLE, DatabasePublication.IN_PROGRESS -> {
           readinessWaiters.add(onReady)
@@ -1584,21 +1584,21 @@ class GattServerManager(
     // replaced the first — stranding whatever the loser had recorded, so the central looked unsubscribed
     // to every later send. The removal had the matching hazard: `remove(deviceId, forDevice)` matches on
     // the instance, so a subscription added between the emptiness check and the removal went with it.
-    subscriptions.compute(deviceId) { _, forDevice ->
-      if (bits == 0) {
-        forDevice?.remove(address)
-        if (forDevice.isNullOrEmpty()) null else forDevice
-      } else {
-        (forDevice ?: ConcurrentHashMap()).also { it[address] = bits }
     //
     // The previous state is read inside the same `compute` for the same reason. Sampling it separately
     // left the *decision* racy even though the map was not: two enabling writes could both observe "not
     // subscribed" and emit two `onCharacteristicSubscribed`, and an enable interleaved with a disable
     // could emit two subscribes and no unsubscribe, so a consumer counting subscribers drifted.
     var wasEnabled = false
-      }
+    subscriptions.compute(deviceId) { _, forDevice ->
       val previous = forDevice?.get(address) ?: 0
       wasEnabled = previous and (CCCD_NOTIFY_BIT or CCCD_INDICATE_BIT) != 0
+      if (bits == 0) {
+        forDevice?.remove(address)
+        if (forDevice.isNullOrEmpty()) null else forDevice
+      } else {
+        (forDevice ?: ConcurrentHashMap()).also { it[address] = bits }
+      }
     }
 
     val serviceUuid = address.service.toString()
@@ -1636,6 +1636,7 @@ class GattServerManager(
         queue.inFlight = candidate
         candidate
       }
+      armNotificationTimeout(deviceId, queue, next)
       val error = dispatchNotification(deviceId, next) ?: return
       // Only the thread that still owns the entry may settle it: a disconnect or a stop can take it
       // during the dispatch and settle it first, and a second settle throws on a release build.
@@ -1649,23 +1650,9 @@ class GattServerManager(
       }
       if (!stillOurs) return
       next.onResult(error)
-      armNotificationTimeout(deviceId, queue, next)
     }
   }
 
-  /** Returns `null` when the stack accepted the send and a callback is now expected. */
-  private fun dispatchNotification(deviceId: String, entry: QueuedNotification): GattServerException? {
-    val server = gattServer ?: return serverUnavailable()
-    // Re-checked as well as at enqueue time: the MTU can change while an entry waits its turn, and the
-    // payload must never reach the stack if it cannot be carried intact.
-    mtuErrorFor(deviceId, entry.value.size)?.let { return it }
-    return notifyValue(server, entry.device, entry.characteristic, entry.confirm, entry.value)
-  }
-
-  /**
-   * Removes [entry] from [queue] if it is still there, reporting whether this call is the one that took
-   * it — so an entry a concurrent drain has already claimed is not settled a second time.
-   */
   /**
    * Bounds the wait for one entry's `onNotificationSent`.
    *
@@ -1694,6 +1681,19 @@ class GattServerManager(
     }, NOTIFICATION_TIMEOUT_MS)
   }
 
+  /** Returns `null` when the stack accepted the send and a callback is now expected. */
+  private fun dispatchNotification(deviceId: String, entry: QueuedNotification): GattServerException? {
+    val server = gattServer ?: return serverUnavailable()
+    // Re-checked as well as at enqueue time: the MTU can change while an entry waits its turn, and the
+    // payload must never reach the stack if it cannot be carried intact.
+    mtuErrorFor(deviceId, entry.value.size)?.let { return it }
+    return notifyValue(server, entry.device, entry.characteristic, entry.confirm, entry.value)
+  }
+
+  /**
+   * Removes [entry] from [queue] if it is still there, reporting whether this call is the one that took
+   * it — so an entry a concurrent drain has already claimed is not settled a second time.
+   */
   private fun takeQueued(queue: NotificationQueue, entry: QueuedNotification): Boolean =
     synchronized(queue) {
       if (queue.inFlight === entry) {
@@ -1776,6 +1776,8 @@ class GattServerManager(
     val delegated: Set<BluetoothGattCharacteristic> = emptySet(),
     /** Values withheld until JavaScript accepts the execute; empty unless it is partially delegated. */
     val deferredValues: Map<BluetoothGattCharacteristic, DeferredWrite> = emptyMap(),
+    /** Plain descriptor values withheld for the same reason, and on the same condition. */
+    val deferredDescriptors: Map<BluetoothGattDescriptor, ByteArray> = emptyMap(),
   )
 
   /**
@@ -1835,8 +1837,6 @@ class GattServerManager(
    * Merges every queued part onto the value its attribute holds *now* and commits the result, the whole
    * read-modify-write under [attributeValueLock]. Assembling outside it would merge onto a value a
    * concurrent write or `updateCharacteristicValue` had already replaced, and the commit would then lose
-    /** Plain descriptor values withheld for the same reason, and on the same condition. */
-    val deferredDescriptors: Map<BluetoothGattDescriptor, ByteArray> = emptyMap(),
    * that write.
    *
    * Nothing is committed unless every part validates. A CCCD is only assembled and returned, because
@@ -1885,7 +1885,16 @@ class GattServerManager(
         }
       }
 
+      // Decided per characteristic, as the direct write path already does: one that never opted in must
+      // still have its value applied, even when a sibling in the same execute delegates. Worked out
+      // before anything is committed, because whether this execute is still refusable is what decides
+      // which parts of it may be applied now.
+      val delegated = characteristicValues.keys.filterTo(LinkedHashSet()) { delegationFor(it).write }
+      val automatic = characteristicValues.filterKeys { it !in delegated }
+      val refusable = delegated.isNotEmpty()
+
       val clientConfigurations = ArrayList<Pair<BluetoothGattDescriptor, Int>>()
+      val plainDescriptors = LinkedHashMap<BluetoothGattDescriptor, ByteArray>()
       for ((descriptor, value) in descriptorValues) {
         if (descriptor.uuid == CCCD_UUID) {
           clientConfigurations.add(descriptor to cccdBits(value))
@@ -1894,16 +1903,18 @@ class GattServerManager(
         }
       }
 
-      // Decided per characteristic, as the direct write path already does: one that never opted in must
-      // still have its value applied, even when a sibling in the same execute delegates.
-      val delegated = characteristicValues.keys.filterTo(LinkedHashSet()) { delegationFor(it).write }
-      val automatic = characteristicValues.filterKeys { it !in delegated }
       // Applied straight away only when nothing in the execute is delegated. Otherwise the execute is
-      // one atomic operation that JavaScript may still reject, so these wait for its answer too.
-      if (delegated.isEmpty()) {
+      // one atomic operation that JavaScript may still reject, so these wait for its answer too — the
+      // characteristic values, the CCCD transitions and the plain descriptors alike. Committing the
+      // descriptors here regardless was the one part of an execute a refusal could not take back.
+      if (!refusable) {
         for ((characteristic, value) in automatic) {
           @Suppress("DEPRECATION")
           characteristic.value = value
+        }
+        for ((descriptor, value) in plainDescriptors) {
+          @Suppress("DEPRECATION")
+          descriptor.value = value
         }
       }
 
@@ -1911,13 +1922,14 @@ class GattServerManager(
         characteristicValues = characteristicValues,
         clientConfigurations = clientConfigurations,
         delegated = delegated,
-        deferredValues = if (delegated.isEmpty()) {
-          emptyMap()
-        } else {
+        deferredValues = if (refusable) {
           automatic.mapValues { (characteristic, value) ->
             DeferredWrite(value, baselines[characteristic])
           }
+        } else {
+          emptyMap()
         },
+        deferredDescriptors = if (refusable) plainDescriptors else emptyMap(),
       )
     }
 
@@ -1942,16 +1954,8 @@ class GattServerManager(
     offset: Int,
     isRead: Boolean,
     deferredValues: Map<BluetoothGattCharacteristic, DeferredWrite> = emptyMap(),
-      // Decided per characteristic, as the direct write path already does: one that never opted in must
-      // still have its value applied, even when a sibling in the same execute delegates. Worked out
-      // before anything is committed, because whether this execute is still refusable is what decides
-      // which parts of it may be applied now.
-      val delegated = characteristicValues.keys.filterTo(LinkedHashSet()) { delegationFor(it).write }
-      val automatic = characteristicValues.filterKeys { it !in delegated }
-      val refusable = delegated.isNotEmpty()
-
     clientConfigurations: List<Pair<BluetoothGattDescriptor, Int>> = emptyList(),
-      val plainDescriptors = LinkedHashMap<BluetoothGattDescriptor, ByteArray>()
+    deferredDescriptors: Map<BluetoothGattDescriptor, ByteArray> = emptyMap(),
   ) {
     val key = RequestKey(deviceId, requestId)
     val pending =
@@ -1971,10 +1975,6 @@ class GattServerManager(
 
   /**
    * Answers a request JavaScript left unanswered, so the central's transaction completes with an
-        for ((descriptor, value) in plainDescriptors) {
-          @Suppress("DEPRECATION")
-          descriptor.value = value
-        }
    * error rather than stalling until its own ATT transaction timeout drops the connection.
    *
    * "Unlikely Error" is the closest the specification offers: the request was valid and the server
@@ -1988,7 +1988,37 @@ class GattServerManager(
     gattServer?.sendResponse(device, key.requestId, ATT_ERROR_UNLIKELY_ERROR, pending.offset, null)
   }
 
-        deferredDescriptors = if (refusable) plainDescriptors else emptyMap(),
+  /**
+   * Answers every matching request with [status] and then forgets it — the counterpart of iOS's
+   * `answerAndDiscardPendingRequests`, and the reason [discardPendingRequests] is reserved for the
+   * paths where the link is already gone.
+   *
+   * `stop` disconnects nobody, so a central whose read or write is still outstanding is very likely
+   * still connected, and dropping the request silently stalls its ATT bearer until the 30 s
+   * transaction timeout retires it — after which no further request, notification or indication may
+   * be sent on it at all (Core Spec Vol 3, Part F, §3.3.3).
+   *
+   * Must run while `gattServer` and `connectedDevices` are still populated, which is why `stop`
+   * calls it before `close()` rather than alongside its other bookkeeping.
+   */
+  @SuppressLint("MissingPermission")
+  private fun answerAndDiscardPendingRequests(status: Int, predicate: (RequestKey) -> Boolean) {
+    val iterator = pendingRequests.entries.iterator()
+    while (iterator.hasNext()) {
+      val (key, pending) = iterator.next()
+      if (!predicate(key)) continue
+      pending.timeout?.let { timeoutHandler.removeCallbacks(it) }
+      iterator.remove()
+      val device = connectedDevices[key.deviceId] ?: continue
+      gattServer?.sendResponse(device, key.requestId, status, pending.offset, null)
+    }
+  }
+
+  /**
+   * Forgets every matching request without answering it. Correct only where the central cannot hear
+   * a response anyway — a disconnect, or the adapter going down. Everywhere else use
+   * [answerAndDiscardPendingRequests].
+   */
   private fun discardPendingRequests(predicate: (RequestKey) -> Boolean) {
     val iterator = pendingRequests.entries.iterator()
     while (iterator.hasNext()) {
@@ -2014,12 +2044,21 @@ class GattServerManager(
    */
   @SuppressLint("MissingPermission")
   fun sendResponse(deviceId: String, requestId: Int, status: Int, offset: Int, value: ByteArray) {
-    deferredDescriptors: Map<BluetoothGattDescriptor, ByteArray> = emptyMap(),
     // Every rejection the caller could have caused is checked before the pending entry is touched, so a
     // rejected attempt leaves the request answerable instead of stranding the central until its ATT
     // transaction times out. The request is looked up first, so answering one the server has forgotten —
     // which is what losing the database to a stop or a power cycle leaves behind — reports the same code
     // iOS reports for it.
+    // Range-checked natively as well as in JavaScript, because the module is reachable directly. The
+    // framework narrows `status` to a byte on its way into the stack, so a wider value would go out as an
+    // unrelated ATT error rather than be reported — 257 becoming 0x01 "Invalid Handle", say.
+    if (status !in 0..0xFF) {
+      throw GattServerException(
+        "ERR_RESPONSE",
+        "Invalid response status $status. An ATT error code is a single byte, so it must be between " +
+          "0 and 255."
+      )
+    }
     val key = RequestKey(deviceId, requestId)
     val pending = pendingRequests[key] ?: throw unknownRequest(deviceId, requestId)
     val server = gattServer ?: throw serverUnavailable()
@@ -2044,12 +2083,33 @@ class GattServerManager(
     } else {
       emptyMap()
     }
+    // The plain descriptors of the same execute, held back for the same reason and applied at the same
+    // moment. Unlike a characteristic there is nothing else that writes a descriptor between the
+    // assembly and here, so no baseline comparison is needed — but the revert below still has to undo
+    // them, since a response the stack refuses did not complete the execute either.
+    val previousDescriptorValues = LinkedHashMap<BluetoothGattDescriptor, ByteArray?>()
+    if (status == BluetoothGatt.GATT_SUCCESS) {
+      synchronized(attributeValueLock) {
+        for ((descriptor, value) in pending.deferredDescriptors) {
+          @Suppress("DEPRECATION")
+          previousDescriptorValues[descriptor] = descriptor.value
+          @Suppress("DEPRECATION")
+          descriptor.value = value
+        }
+      }
+    }
 
     // The offset handed to the stack is the request's own, so it always describes where `payload` sits
     // within the attribute regardless of what the caller passed.
     if (!server.sendResponse(device, requestId, status, pending.offset, payload)) {
       // The central never received the response, so the execute did not complete for it either.
       revertDeferredValues(committed)
+      synchronized(attributeValueLock) {
+        for ((descriptor, previous) in previousDescriptorValues) {
+          @Suppress("DEPRECATION")
+          descriptor.value = previous
+        }
+      }
       throw GattServerException(
         "ERR_RESPONSE",
         "The Bluetooth stack did not accept the response for request $requestId"
@@ -2125,58 +2185,6 @@ class GattServerManager(
   }
 
   /** See [expo.modules.gattserver.rebasedResponseValue], which this supplies the request's offset to. */
-  /**
-   * Answers every matching request with [status] and then forgets it — the counterpart of iOS's
-   * `answerAndDiscardPendingRequests`, and the reason [discardPendingRequests] is reserved for the
-   * paths where the link is already gone.
-   *
-   * `stop` disconnects nobody, so a central whose read or write is still outstanding is very likely
-   * still connected, and dropping the request silently stalls its ATT bearer until the 30 s
-   * transaction timeout retires it — after which no further request, notification or indication may
-   * be sent on it at all (Core Spec Vol 3, Part F, §3.3.3).
-   *
-   * Must run while `gattServer` and `connectedDevices` are still populated, which is why `stop`
-   * calls it before `close()` rather than alongside its other bookkeeping.
-   */
-  @SuppressLint("MissingPermission")
-  private fun answerAndDiscardPendingRequests(status: Int, predicate: (RequestKey) -> Boolean) {
-    val iterator = pendingRequests.entries.iterator()
-    // The plain descriptors of the same execute, held back for the same reason and applied at the same
-    // moment. Unlike a characteristic there is nothing else that writes a descriptor between the
-    // assembly and here, so no baseline comparison is needed — but the revert below still has to undo
-    // them, since a response the stack refuses did not complete the execute either.
-    val previousDescriptorValues = LinkedHashMap<BluetoothGattDescriptor, ByteArray?>()
-    if (status == BluetoothGatt.GATT_SUCCESS) {
-      synchronized(attributeValueLock) {
-        for ((descriptor, value) in pending.deferredDescriptors) {
-          @Suppress("DEPRECATION")
-          previousDescriptorValues[descriptor] = descriptor.value
-          @Suppress("DEPRECATION")
-          descriptor.value = value
-        }
-      }
-    }
-    while (iterator.hasNext()) {
-      val (key, pending) = iterator.next()
-      if (!predicate(key)) continue
-      pending.timeout?.let { timeoutHandler.removeCallbacks(it) }
-      iterator.remove()
-      val device = connectedDevices[key.deviceId] ?: continue
-      synchronized(attributeValueLock) {
-        for ((descriptor, previous) in previousDescriptorValues) {
-          @Suppress("DEPRECATION")
-          descriptor.value = previous
-        }
-      }
-      gattServer?.sendResponse(device, key.requestId, status, pending.offset, null)
-    }
-  }
-
-  /**
-   * Forgets every matching request without answering it. Correct only where the central cannot hear
-   * a response anyway — a disconnect, or the adapter going down. Everywhere else use
-   * [answerAndDiscardPendingRequests].
-   */
   private fun responsePayload(
     pending: PendingRequest,
     requestId: Int,
@@ -2268,6 +2276,9 @@ class GattServerManager(
       DatabasePublication.FAILED,
       GattServerException("ERR_NO_SERVER", "Server was stopped before it finished opening")
     )
+    // Answered rather than dropped, and before `close()` takes the server and the device handles the
+    // response needs with it. `stop` disconnects nobody, so these transactions are still live.
+    answerAndDiscardPendingRequests(ATT_ERROR_UNLIKELY_ERROR) { true }
     gattServer?.close()
     gattServer = null
     connectedDevices.clear()
@@ -2279,6 +2290,3 @@ class GattServerManager(
     delegationsByCharacteristic.clear()
   }
 }
-    // Answered rather than dropped, and before `close()` takes the server and the device handles the
-    // response needs with it. `stop` disconnects nobody, so these transactions are still live.
-    answerAndDiscardPendingRequests(ATT_ERROR_UNLIKELY_ERROR) { true }

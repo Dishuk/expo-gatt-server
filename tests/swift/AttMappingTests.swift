@@ -9,6 +9,43 @@ import XCTest
 /// UUID spelling is what a consumer's `===` compares against, and the state string is what a consumer
 /// branches on. All three have an Android counterpart that must agree.
 final class AttMappingTests: XCTestCase {
+  // MARK: - Advertised UUID width
+
+  /// The shared TypeScript layer expands every UUID to 128 bits, which is right for addressing and for
+  /// event payloads and free on Android — but `CBUUID` advertises the width it was built from, so on iOS
+  /// that expansion costs fourteen of the advertisement's thirty-one bytes per UUID.
+  func testABaseRangeUuidContractsToItsShortestSpelling() {
+    let expanded = CBUUID(string: "0000180D-0000-1000-8000-00805F9B34FB")
+    XCTAssertEqual(expanded.data.count, 16, "precondition: the expanded form really is 16 octets")
+
+    let advertised = expanded.advertisedForm
+    XCTAssertEqual(advertised.data.count, 2)
+    XCTAssertEqual(advertised, CBUUID(string: "180D"))
+    // Contracting must not change which attribute it names.
+    XCTAssertEqual(advertised.normalizedString, expanded.normalizedString)
+  }
+
+  func testA32BitAliasContractsToFourOctets() {
+    let expanded = CBUUID(string: "12345678-0000-1000-8000-00805F9B34FB")
+
+    XCTAssertEqual(expanded.advertisedForm.data.count, 4)
+    XCTAssertEqual(expanded.advertisedForm.normalizedString, expanded.normalizedString)
+  }
+
+  /// A vendor UUID is not in the base range and has no shorter spelling, so it must survive untouched.
+  func testAVendorUuidIsLeftAlone() {
+    let vendor = CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+
+    XCTAssertEqual(vendor.advertisedForm, vendor)
+    XCTAssertEqual(vendor.advertisedForm.data.count, 16)
+  }
+
+  /// Already-short input is idempotent, so the advertising path can apply this unconditionally.
+  func testAlreadyShortUuidsAreUnchanged() {
+    XCTAssertEqual(CBUUID(string: "180D").advertisedForm, CBUUID(string: "180D"))
+    XCTAssertEqual(CBUUID(string: "180D").advertisedForm.data.count, 2)
+  }
+
   // MARK: - ATT error codes
 
   /// The whole point of the mapping is that it is the identity over the specified range: JavaScript

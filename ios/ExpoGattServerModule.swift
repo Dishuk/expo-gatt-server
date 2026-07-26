@@ -333,8 +333,16 @@ public class ExpoGattServerModule: Module {
         return
       }
       DispatchQueue.main.async {
+        // `REQUEST_NOT_FOUND` rather than `ERR_NO_SERVER`, because that is what the situation is and
+        // what Android reports: its `sendResponse` looks the request up before it checks the server, so
+        // answering one the module no longer holds is a missing request on both platforms. With no
+        // manager there are no pending requests at all — `stop` answered and discarded them — so the
+        // lookup could only have failed anyway. `docs/api.md` invites branching on `code` without
+        // branching on `Platform.OS`, and this was one of the places that did not hold.
         guard let mgr = self.manager else {
-          promise.reject("ERR_NO_SERVER", "Server not created")
+          promise.reject(
+            "REQUEST_NOT_FOUND", "Request \(requestId) not found or already responded"
+          )
           return
         }
         do {
@@ -391,14 +399,6 @@ public class ExpoGattServerModule: Module {
 
     // Synchronous and deferred for the same reasons as `stopAdvertising`.
     Function("stopServer") {
-      DispatchQueue.main.async {
-        self.manager?.stop()
-        self.manager = nil
-      }
-    }
-
-    OnDestroy {
-      // The block captures the module strongly, so deferring the teardown cannot skip it.
       // Recorded here, on the JS thread, rather than inside the block: a `createServer` still parsing
       // on the worker queue reaches the main queue after this block does, and would otherwise publish
       // a database this call was meant to prevent.
@@ -408,10 +408,18 @@ public class ExpoGattServerModule: Module {
         self.manager = nil
       }
     }
+
+    OnDestroy {
+      // The block captures the module strongly, so deferring the teardown cannot skip it.
+      self.recordServerStop()
+      DispatchQueue.main.async {
+        self.manager?.stop()
+        self.manager = nil
+      }
+    }
   }
 
   /// `CBPeripheralManager.startAdvertising` silently ignores every key but the local name and service
-      self.recordServerStop()
   /// UUIDs. Only the options that change what a scanner *observes* are rejected here, since dropping
   /// those yields a peripheral that appears to advertise yet can never be found by a central filtering
   /// on them. `mode`, `txPowerLevel` and `includeTxPowerLevel` are merely radio hints, warned about in

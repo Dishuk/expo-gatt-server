@@ -285,6 +285,7 @@ adding a second one, and settles the earlier call's promise with `ERR_ADVERTISE`
 | `ERR_UNSUPPORTED` | iOS: `manufacturerData`, `serviceData` or `connectable: false` was supplied. Android: the adapter has no BLE advertising support, which no amount of retrying changes |
 | `ERR_BLUETOOTH` | Bluetooth is off, or the device has no BLE support |
 | `ERR_ADVERTISE` | The platform refused the advertisement -- data over the 31-byte budget, too many advertisers, already started, or `android.setAdapterName` without a `localName` |
+| `ERR_CREATE_SERVER` | The call was waiting for the database and the registration round hit its 30 s bound without the stack acknowledging every service. Unlike the others this one is worth retrying, since nothing retries a timed-out round by itself |
 
 An invalid `mode`, `txPowerLevel`, `timeoutMs`, `companyId` or byte value is rejected in the shared
 TypeScript layer as a plain `Error`, before either platform sees it.
@@ -526,14 +527,17 @@ await sendResponse(deviceId, requestId, GATT_SUCCESS, event.offset, wholeValue.s
 after `createServer`'s `requestTimeoutMs`; `REQUEST_DEVICE_MISMATCH` if the request belongs to a
 different device than `deviceId`; `ERR_RESPONSE_OFFSET` if `offset` is past the offset the request
 asked for -- which would leave the requested bytes missing from the response;
-`ERR_DEVICE_DISCONNECTED` if the central went away; `ERR_NO_SERVER` if no server exists;
-`ERR_BLUETOOTH` if Bluetooth is off; and `ERR_RESPONSE` if the Bluetooth stack does not accept the
-response. A `status`, `offset` or byte value outside its range is rejected as a plain `Error` before
-either platform sees it.
+`ERR_DEVICE_DISCONNECTED` if the central went away (**Android only**); `ERR_BLUETOOTH` if Bluetooth is
+off (**Android only**); and `ERR_RESPONSE` if the Bluetooth stack does not accept the response
+(**Android only** -- `CBPeripheralManager.respond(to:withResult:)` returns `Void` and reports nothing,
+so iOS resolves whether or not the response reached the central). A `status`, `offset` or byte value
+outside its range is rejected as a plain `Error` before either platform sees it.
 
 The request is looked up **first**, so answering one the server no longer holds -- which is what losing
 the database to a `stopServer` or a Bluetooth power cycle leaves behind -- reports `REQUEST_NOT_FOUND`
-rather than the reason the database went away.
+rather than the reason the database went away. That holds on both platforms: iOS reports it without a
+server too, since `stopServer` answers and discards every pending request, leaving nothing the lookup
+could have found.
 
 A rejected call leaves the request still answerable, rather than consuming it -- so a mistake here
 does not strand the central until its own ATT transaction times out.
@@ -831,10 +835,23 @@ must be answered with [`sendResponse`](#sendresponse)**, or it is completed with
 | Field | Type | Description |
 |-------|------|-------------|
 | `event.deviceId` | `string` | Requesting device |
-| `event.requestId` | `number` | Use in `sendResponse`. Unique per request, and only valid until answered or expired |
-| `event.serviceUuid` | `string` | Service UUID, or `''` when the platform could not identify the owning service |
+| `event.requestId` | `number` | Use in `sendResponse`. Only valid until answered or expired, and **unique only per device** -- see below |
+| `event.serviceUuid` | `string` | Service UUID, or `''` when the platform could not identify the owning service (**Android only** -- on iOS an unresolvable characteristic fails the request with `ATT_ERROR_UNLIKELY_ERROR` instead of raising the event) |
 | `event.characteristicUuid` | `string` | Characteristic UUID |
 | `event.offset` | `number` | Read offset. Non-zero for a Read Blob continuation |
+
+> **`requestId` is not globally unique on Android.** Android passes through the raw ATT transaction
+> id, which the stack assigns from a counter held on the *per-connection* control block, so two
+> connected centrals both produce `1`, `2`, `3`. iOS uses a module-owned counter that is unique across
+> the process. `sendResponse` is safe either way -- it is given the `deviceId` too, and matches on the
+> pair -- but a listener that keeps its own state must key it the same way:
+>
+> ```ts
+> // Wrong: on Android a second central's request overwrites the first's context.
+> pending.set(event.requestId, context);
+> // Right, on both platforms.
+> pending.set(`${event.deviceId}:${event.requestId}`, context);
+> ```
 
 A read reaches this listener in exactly two cases, on both platforms:
 
@@ -868,8 +885,8 @@ not JavaScript has to answer it.
 | Field | Type | Description |
 |-------|------|-------------|
 | `event.deviceId` | `string` | Writing device |
-| `event.requestId` | `number` | Pass to `sendResponse` when `responseNeeded` is `true` |
-| `event.serviceUuid` | `string` | Service UUID, or `''` when the platform could not identify the owning service |
+| `event.requestId` | `number` | Pass to `sendResponse` when `responseNeeded` is `true`. Unique only per device -- see the note under `onCharacteristicReadRequest` |
+| `event.serviceUuid` | `string` | Service UUID, or `''` when the platform could not identify the owning service (**Android only** -- on iOS an unresolvable characteristic fails the request with `ATT_ERROR_UNLIKELY_ERROR` instead of raising the event) |
 | `event.characteristicUuid` | `string` | Characteristic UUID |
 | `event.offset` | `number` | Where `value` begins within the attribute. Always `0` for a reassembled long write |
 | `event.value` | `number[]` | Written byte array |
@@ -951,6 +968,10 @@ plain characteristic written beside it.
 > must not call `sendResponse` again, and a second call for the same id rejects with
 > `REQUEST_NOT_FOUND`. On Android each direct write request has its own id, but an execute is a single
 > request, so a reliable write behaves the same way there.
+>
+> Fragments are **not** replayed. A long write split into several `ATT_PREPARE_WRITE_REQ` PDUs raises
+> one event per attribute, carrying the assembled value at `offset: 0` — the same shape Android
+> reports.
 
 #### Long writes and reliable writes
 
@@ -968,10 +989,6 @@ execute:
   were received, then applied atomically. One event per attribute is emitted with the **reassembled**
   value and `offset: 0`, rather than one per fragment.
 - **Flag `0x00`** -- everything queued is discarded and nothing is applied or emitted.
->
-> Fragments are **not** replayed. A long write split into several `ATT_PREPARE_WRITE_REQ` PDUs raises
-> one event per attribute, carrying the assembled value at `offset: 0` — the same shape Android
-> reports.
 - A fragment starting past the end of its attribute fails the whole execute with
   `ATT_ERROR_INVALID_OFFSET` and discards the queue.
 - More than 64 queued fragments are refused with `ATT_ERROR_PREPARE_QUEUE_FULL`; the already-queued
@@ -1128,6 +1145,12 @@ both platforms: Android registers a receiver for `BluetoothAdapter.ACTION_STATE_
 On iOS the first event usually arrives shortly after `createServer` and carries the state
 CoreBluetooth resolved to; before that the state is `'unknown'`.
 
+> **Android sends no initial event.** It listens for `BluetoothAdapter.ACTION_STATE_CHANGED`, which is
+> not a sticky broadcast, so nothing is delivered until the adapter actually changes state. A listener
+> registered while Bluetooth is already on will not hear about it. Code that waits for a first
+> `'poweredOn'` before advertising therefore works on iOS and hangs on Android — read the state once
+> with [`getBluetoothState`](#getbluetoothstate) and treat the listener as reporting *changes* only.
+
 `poweredOff` destroys the published GATT database on both platforms, and every subscription with it,
 so expect `onCharacteristicUnsubscribed` and `onDeviceDisconnected` for everything that was live. The
 module **re-publishes the services** on the next transition to `poweredOn`, at which point
@@ -1152,6 +1175,14 @@ documents any state below it as clearing the local database and disconnecting ev
 module discards the same state and emits the same events. `isServerRunning` goes `false` for the
 duration. Treat the state itself as transient exactly as before -- the services are re-published on the
 `poweredOn` that follows -- but do not assume connections or subscriptions survive it.
+
+**On Android `resetting` is only a label.** It is what `STATE_TURNING_OFF` and `STATE_TURNING_ON`
+normalise to, and neither tears anything down: the teardown happens on the `STATE_OFF` that follows,
+which is where the platform actually discards the database. So `isServerRunning` still reports `true`
+through an Android `resetting`, and the subscription and disconnection events arrive a moment later
+than they would on iOS rather than alongside the state change. Branching on `resetting` to detect a
+lost database works on iOS only; branch on `poweredOff`, or on `isServerRunning` after it, for
+behaviour that holds on both.
 
 ## Types
 

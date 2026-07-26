@@ -1,3 +1,4 @@
+import { withGattServer, type ExpoGattServerPluginProps } from '../index';
 import { applyBluetoothLeFeature } from '../withGattServerAndroid';
 import { applyBluetoothInfoPlist, type BluetoothInfoPlist } from '../withGattServerIos';
 
@@ -177,5 +178,59 @@ describe('applyBluetoothInfoPlist', () => {
     applyBluetoothInfoPlist(plist, { bluetoothPeripheralBackgroundMode: true });
 
     expect(plist.UIBackgroundModes).toEqual(['bluetooth-peripheral']);
+  });
+});
+
+/**
+ * Props arrive from `app.json`, which is untyped JSON at prebuild time — so the declared types
+ * constrain nobody, and a wrong type does not fail. It succeeds into something quietly wrong: a
+ * non-string usage description is not a valid plist string, so iOS reads the key as absent and
+ * terminates the app on first Bluetooth use; `"false"` is a truthy string, so it filters the app off
+ * Google Play. Both used to prebuild clean.
+ */
+describe('plugin prop validation', () => {
+  const config = { name: 'harness', slug: 'harness' } as never;
+  const apply = (props: unknown) => withGattServer(config, props as ExpoGattServerPluginProps);
+
+  it('accepts an omitted options object', () => {
+    expect(() => withGattServer(config, undefined as never)).not.toThrow();
+  });
+
+  it('accepts well-formed props', () => {
+    expect(() =>
+      apply({
+        bluetoothAlwaysPermission: 'We use Bluetooth to talk to nearby devices.',
+        bluetoothPeripheralBackgroundMode: true,
+        requireBluetoothLeHardware: false,
+      }),
+    ).not.toThrow();
+  });
+
+  it('accepts false for the usage description, which means "leave the key alone"', () => {
+    expect(() => apply({ bluetoothAlwaysPermission: false })).not.toThrow();
+  });
+
+  it('rejects a non-string usage description', () => {
+    expect(() => apply({ bluetoothAlwaysPermission: true })).toThrow(
+      /bluetoothAlwaysPermission must be a string/,
+    );
+  });
+
+  it('rejects an empty usage description, which iOS treats as missing', () => {
+    expect(() => apply({ bluetoothAlwaysPermission: '' })).toThrow(/cannot be empty/);
+  });
+
+  it('rejects a string where a boolean is required, since "false" is truthy', () => {
+    expect(() => apply({ requireBluetoothLeHardware: 'false' })).toThrow(
+      /requireBluetoothLeHardware must be a boolean/,
+    );
+    expect(() => apply({ bluetoothPeripheralBackgroundMode: 'true' })).toThrow(
+      /bluetoothPeripheralBackgroundMode must be a boolean/,
+    );
+  });
+
+  /** `props = {}` defaults only for `undefined`, so an explicit null used to reach a property access. */
+  it('rejects null with a message naming the plugin', () => {
+    expect(() => apply(null)).toThrow(/expo-gatt-server config plugin: expected an options object/);
   });
 });

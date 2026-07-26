@@ -239,6 +239,27 @@ extension CBUUID {
     guard lower.count < 36 else { return lower }
     return String(repeating: "0", count: 8 - lower.count) + lower + bluetoothBaseUuidSuffix
   }
+
+  /// The shortest spelling of this UUID that means the same thing, for use in an advertisement.
+  ///
+  /// Unlike Android's encoder, `CBUUID` advertises whatever width it was constructed from: a 16-bit
+  /// alias occupies two octets of the 31-byte budget, its 128-bit expansion sixteen. The shared
+  /// TypeScript layer expands every UUID to 128 bits so both platforms see one spelling — correct for
+  /// addressing and for event payloads, and free on Android, but on iOS it silently cost fourteen bytes
+  /// of advertising space per UUID. That is enough to push a service UUID out of the advertisement and
+  /// into the Apple-only scan-response overflow area, where a non-Apple central filtering on it stops
+  /// finding the peripheral at all.
+  ///
+  /// Only exact members of the Bluetooth base range contract; a vendor UUID has no shorter form and is
+  /// returned unchanged.
+  var advertisedForm: CBUUID {
+    let lower = uuidString.lowercased()
+    guard lower.count == 36, lower.hasSuffix(bluetoothBaseUuidSuffix) else { return self }
+    let leading = String(lower.prefix(8))
+    // A 16-bit alias is a 32-bit one whose top half is zero, and `CBUUID(string:)` accepts both widths.
+    let short = leading.hasPrefix("0000") ? String(leading.suffix(4)) : leading
+    return CBUUID(string: short)
+  }
 }
 
 /// Maps `CBManagerState` onto the platform-neutral state union shared with Android.
@@ -491,6 +512,14 @@ class GattServerManager: NSObject {
       // Set so the deferred unpublish below recognises this as a failed round, and so a late
       // acknowledgement cannot publish a database this has already reported as absent.
       self.registrationFailed = true
+      // Abandoned explicitly, after the error above has read it. `unpublishFailedRegistration` waits
+      // for this set to empty so it never runs with sibling `add(_:)` calls outstanding — but on this
+      // path it can only be non-empty, because a round whose services had all reported would have
+      // cancelled this timer in `didAdd`. Left as it was, the unpublish returned every time and the
+      // services this round did manage to register stayed in the process-wide GATT database while the
+      // module reported no server at all. A late acknowledgement cannot resurrect them: `didAdd`
+      // returns at once unless `publication == .inProgress`, which was just cleared.
+      self.servicesAwaitingRegistration.removeAll()
       self.unpublishFailedRegistration()
       self.completeOpen(error)
       self.flushReadinessWaiters(error)
@@ -512,14 +541,6 @@ class GattServerManager: NSObject {
   /// A stop that lands while the call is held rejects it with the error a stop already gives a start in
   /// flight, so one stop means one thing: proceeding instead would put the radio on the air after the
   /// application explicitly asked for the opposite.
-      // Abandoned explicitly, after the error above has read it. `unpublishFailedRegistration` waits
-      // for this set to empty so it never runs with sibling `add(_:)` calls outstanding — but on this
-      // path it can only be non-empty, because a round whose services had all reported would have
-      // cancelled this timer in `didAdd`. Left as it was, the unpublish returned every time and the
-      // services this round did manage to register stayed in the process-wide GATT database while the
-      // module reported no server at all. A late acknowledgement cannot resurrect them: `didAdd`
-      // returns at once unless `publication == .inProgress`, which was just cleared.
-      self.servicesAwaitingRegistration.removeAll()
   func startAdvertising(
     localName: String?,
     serviceUuids: [CBUUID]?,
@@ -570,7 +591,9 @@ class GattServerManager: NSObject {
       advertisementData[CBAdvertisementDataLocalNameKey] = name
     }
     if let uuids = serviceUuids, !uuids.isEmpty {
-      advertisementData[CBAdvertisementDataServiceUUIDsKey] = uuids
+      // Contracted here and nowhere else: the advertisement is the one place a UUID's width is spent
+      // rather than merely spelled. See `CBUUID.advertisedForm`.
+      advertisementData[CBAdvertisementDataServiceUUIDsKey] = uuids.map { $0.advertisedForm }
     }
     cancelAdvertisingTimeout()
     peripheralManager?.startAdvertising(advertisementData)
@@ -662,6 +685,12 @@ class GattServerManager: NSObject {
       )
     }
 
+    // This establishes that the characteristic *declares* the transport asked for; it cannot guarantee
+    // the transport actually used. `updateValue(_:for:onSubscribedCentrals:)` takes no confirm flag and
+    // picks the PDU from the declared properties, so a characteristic declaring both `notify` and
+    // `indicate` may be sent as an indication whatever `confirm` says. Android honours the flag, because
+    // `notifyCharacteristicChanged` takes it. Declaring exactly one of the two is the only way to be sure
+    // on iOS, which `docs/api.md` now states.
     guard characteristic.properties.contains(confirm ? .indicate : .notify) else {
       throw GattServerError.confirmUnsupported(
         characteristic: characteristicUuid, confirm: confirm
@@ -1076,35 +1105,6 @@ class GattServerManager: NSObject {
     offsets.count > 1 || offsets.contains { $0 > 0 }
   }
 
-  private func nextRequestId() -> Int {
-    requestCounter += 1
-    return requestCounter
-  }
-
-  /// Records ATT activity from `central` and reports a first sighting as a connection. The stored
-  /// reference is always refreshed, because CoreBluetooth may hand out a distinct `CBCentral` instance
-  /// per callback and `maximumUpdateValueLength` is read from whichever one is current.
-  @discardableResult
-  private func noteActivity(from central: CBCentral) -> String {
-    let deviceId = central.identifier.uuidString
-    let isFirstSighting = connectedCentrals[deviceId] == nil
-    connectedCentrals[deviceId] = central
-    if isFirstSighting {
-      // CoreBluetooth exposes no name for a central — only `CBPeripheral` has one.
-      delegate?.onDeviceConnected(deviceId: deviceId, name: nil)
-    }
-
-    let payloadLength = central.maximumUpdateValueLength
-    if centralPayloadLengths.updateValue(payloadLength, forKey: deviceId) != payloadLength {
-      delegate?.onMtuChanged(
-        deviceId: deviceId, mtu: DeviceMtu(maxNotificationPayload: payloadLength)
-      )
-    }
-    return deviceId
-  }
-
-  /// The current link budget for `deviceId`, or `nil` when no such central is known. Read live from the
-  /// retained `CBCentral` rather than from the change-detection cache.
   /// One `CBATTRequest`'s worth of a write, reduced to what the assembly actually depends on.
   ///
   /// `CBATTRequest` has no public initialiser, so a test cannot build one. Folding over this instead is
@@ -1153,6 +1153,35 @@ class GattServerManager: NSObject {
     return assembled
   }
 
+  private func nextRequestId() -> Int {
+    requestCounter += 1
+    return requestCounter
+  }
+
+  /// Records ATT activity from `central` and reports a first sighting as a connection. The stored
+  /// reference is always refreshed, because CoreBluetooth may hand out a distinct `CBCentral` instance
+  /// per callback and `maximumUpdateValueLength` is read from whichever one is current.
+  @discardableResult
+  private func noteActivity(from central: CBCentral) -> String {
+    let deviceId = central.identifier.uuidString
+    let isFirstSighting = connectedCentrals[deviceId] == nil
+    connectedCentrals[deviceId] = central
+    if isFirstSighting {
+      // CoreBluetooth exposes no name for a central — only `CBPeripheral` has one.
+      delegate?.onDeviceConnected(deviceId: deviceId, name: nil)
+    }
+
+    let payloadLength = central.maximumUpdateValueLength
+    if centralPayloadLengths.updateValue(payloadLength, forKey: deviceId) != payloadLength {
+      delegate?.onMtuChanged(
+        deviceId: deviceId, mtu: DeviceMtu(maxNotificationPayload: payloadLength)
+      )
+    }
+    return deviceId
+  }
+
+  /// The current link budget for `deviceId`, or `nil` when no such central is known. Read live from the
+  /// retained `CBCentral` rather than from the change-detection cache.
   func mtu(for deviceId: String) -> DeviceMtu? {
     guard let central = connectedCentrals[deviceId] else { return nil }
     return DeviceMtu(maxNotificationPayload: central.maximumUpdateValueLength)
@@ -1529,7 +1558,20 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       registerPendingRequest(batchId, request: first, isRead: false, deferredValues: deferred)
     }
 
+    // Reported once per attribute, from offset 0 and carrying the value as assembled — the shape
+    // Android reports, rather than replaying the fragments the central happened to split the value
+    // into. Replaying them handed every fragment the batch's single `requestId`, so a long write to a
+    // delegated characteristic raised three events all claiming `responseNeeded`, and the second and
+    // third `sendResponse` rejected with `REQUEST_NOT_FOUND` after the first had answered the batch.
+    //
+    // Exactly one attribute is marked `responseNeeded`, because Apple's rule is one
+    // `respond(to:withResult:)` per callback and the batch is answered as a unit — the answer covers
+    // every attribute in it. A second delegated attribute still receives its event and can commit its
+    // value with `updateCharacteristicValue`; it simply must not answer a second time.
+    let responder = addresses.first { delegated.contains($0) }
+    var reported: Set<CharacteristicAddress> = []
     for (request, address) in zip(requests, addresses) {
+      guard reported.insert(address).inserted else { continue }
       delegate?.onCharacteristicWriteRequest(
         deviceId: request.central.identifier.uuidString,
         requestId: batchId,
@@ -1551,16 +1593,3 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     drainPendingNotifications()
   }
 }
-    // Reported once per attribute, from offset 0 and carrying the value as assembled — the shape
-    // Android reports, rather than replaying the fragments the central happened to split the value
-    // into. Replaying them handed every fragment the batch's single `requestId`, so a long write to a
-    // delegated characteristic raised three events all claiming `responseNeeded`, and the second and
-    // third `sendResponse` rejected with `REQUEST_NOT_FOUND` after the first had answered the batch.
-    //
-    // Exactly one attribute is marked `responseNeeded`, because Apple's rule is one
-    // `respond(to:withResult:)` per callback and the batch is answered as a unit — the answer covers
-    // every attribute in it. A second delegated attribute still receives its event and can commit its
-    // value with `updateCharacteristicValue`; it simply must not answer a second time.
-    let responder = addresses.first { delegated.contains($0) }
-    var reported: Set<CharacteristicAddress> = []
-      guard reported.insert(address).inserted else { continue }

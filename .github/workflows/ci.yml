@@ -24,6 +24,13 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      # The example is the only consumer-facing usage of the public API, and `expo prebuild` in the
+      # integration jobs does not typecheck it — so until this ran, the app the guides point readers at
+      # could break against the API it demonstrates and still ship green.
+      - run: npm ci
+        working-directory: example
+      - run: npx tsc --noEmit -p tsconfig.json
+        working-directory: example
       # Both build outputs are published but not committed, so a break in either only ever surfaces at
       # `npm publish` otherwise.
       - run: npm run build
@@ -111,6 +118,26 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      # The runner's default is Xcode 16.4, whose Swift tools are 6.1. One of the packages Expo's
+      # prebuilt React Native artefacts resolve declares `swift-tools-version: 6.2`, so SwiftPM
+      # refuses the whole dependency graph and the build dies in `ExpoModulesJSI` — before it ever
+      # reaches this module's sources, which made the job fail on something unrelated to what it
+      # exists to check. Picking the newest installed Xcode rather than a pinned path keeps this
+      # working as the image rolls forward; the explicit version check is so that a runner image
+      # without one fails here, with a reason, instead of 300 lines deep in a build log.
+      - name: Select an Xcode new enough for Expo's Swift packages
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$latest" ]; then echo "No versioned Xcode on this runner." >&2; exit 1; fi
+          sudo xcode-select -s "$latest"
+          echo "Selected $latest"
+          swift --version
+          major=$(swift --version | sed -n 's/.*Swift version \([0-9]*\)\.\([0-9]*\).*/\1/p' | head -1)
+          minor=$(swift --version | sed -n 's/.*Swift version \([0-9]*\)\.\([0-9]*\).*/\2/p' | head -1)
+          if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 2 ]; }; then
+            echo "Swift $major.$minor is too old; Expo's packages need 6.2+." >&2
+            exit 1
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: 20

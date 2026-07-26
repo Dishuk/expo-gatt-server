@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.UUID
@@ -103,6 +104,29 @@ class AttOperationsTest {
 
   private fun rebase(value: ByteArray, supplied: Int, requested: Int, isRead: Boolean = true) =
     rebasedResponseValue(value, isRead, supplied, requested, requestId = 7)
+
+  /**
+   * The TypeScript layer rejects a negative offset, but the native module is reachable directly and the
+   * rest of this file re-checks what JavaScript checks for exactly that reason. A negative supplied
+   * offset used to pass the `supplied > requested` relation — `-4` is not greater than `0` — and produce
+   * a positive `skip`, so the value was trimmed from the front and handed to the central labelled as the
+   * whole attribute, with nothing reported on either side.
+   */
+  @Test
+  fun `a negative supplied offset is rejected rather than trimming the response`() {
+    val error = assertThrows(GattServerException::class.java) {
+      rebase(bytes(0, 1, 2, 3, 4, 5, 6, 7, 8, 9), supplied = -4, requested = 0)
+    }
+    assertEquals("ERR_RESPONSE_OFFSET", error.code)
+  }
+
+  @Test
+  fun `a negative requested offset is rejected`() {
+    val error = assertThrows(GattServerException::class.java) {
+      rebase(bytes(1, 2, 3), supplied = 0, requested = -1)
+    }
+    assertEquals("ERR_RESPONSE_OFFSET", error.code)
+  }
 
   @Test
   fun `the whole value at offset zero answers a plain read`() {

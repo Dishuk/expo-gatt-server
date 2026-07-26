@@ -223,6 +223,41 @@ function assertEachOneOf<T extends string>(values: unknown, allowed: T[], field:
   }
 }
 
+/**
+ * Rejects a `delegate` that would silently do nothing.
+ *
+ * Both native layers read the two flags as `delegate["read"] as? Boolean ?: false`, so a typo or a
+ * non-boolean is not an error there — it is simply absent. The characteristic then publishes as fully
+ * automatic: the listener never fires, reads are answered from whatever value is cached, and nothing
+ * anywhere reports a problem. `delegate` was the only sub-object `normalizeCharacteristic` passed
+ * through unchecked, which is exactly the silent-drop failure `assertEachOneOf` exists to prevent for
+ * properties and permissions.
+ */
+function assertValidDelegate(delegate: unknown, characteristicUuid: string): void {
+  if (delegate === undefined) return;
+  if (typeof delegate !== 'object' || delegate === null || Array.isArray(delegate)) {
+    throw new Error(
+      `Invalid delegate ${JSON.stringify(delegate)} on characteristic ${characteristicUuid}. ` +
+        'Expected an object with optional boolean "read" and "write" properties.',
+    );
+  }
+  for (const [key, value] of Object.entries(delegate)) {
+    if (key !== 'read' && key !== 'write') {
+      throw new Error(
+        `Unknown delegate option ${JSON.stringify(key)} on characteristic ${characteristicUuid}. ` +
+          'Only "read" and "write" are recognised, and an unrecognised one would publish the ' +
+          'characteristic as though nothing had been delegated.',
+      );
+    }
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new Error(
+        `Invalid delegate.${key} ${JSON.stringify(value)} on characteristic ` +
+          `${characteristicUuid}. Expected a boolean.`,
+      );
+    }
+  }
+}
+
 function normalizeCharacteristic(
   characteristic: GattCharacteristicConfig,
 ): GattCharacteristicConfig {
@@ -236,6 +271,7 @@ function normalizeCharacteristic(
   if (characteristic.value !== undefined) {
     assertValidBytes(characteristic.value, 'characteristic');
   }
+  assertValidDelegate(characteristic?.delegate, uuid);
   const descriptors = characteristic.descriptors?.map((descriptor) => {
     const descriptorUuid = normalizeUuid(descriptor?.uuid, 'descriptor');
     if (descriptorUuid === CLIENT_CHARACTERISTIC_CONFIGURATION_UUID) {
@@ -356,6 +392,18 @@ const MAX_ADVERTISING_TIMEOUT_MS = 180_000;
 let advertisingStopEpoch = 0;
 
 /**
+ * Counts `startAdvertising` calls, so only the most recent one may issue the compensating stop that a
+ * cancelled start uses to undo itself.
+ *
+ * Without it that stop is unconditional, and stops whatever is on the air rather than "the
+ * advertisement this call put there". In `start(A); stop(); await start(B);` the stop cancels A, B
+ * reads the bumped epoch and resolves normally — and then A's native call finally returns, sees the
+ * epoch moved, and issues a stop that takes B off the air. The caller awaited B, B resolved, nothing
+ * is advertising, and no promise ever reported a failure.
+ */
+let advertisingStartEpoch = 0;
+
+/**
  * Carries `ERR_ADVERTISE`, the code a stop already gives a start it cancelled natively, so a consumer
  * branching on the code cannot tell the two apart — the outcome is the same either way.
  */
@@ -391,18 +439,6 @@ function assertOneOf<T extends string>(value: unknown, allowed: T[], field: stri
  *
  * A publication still in flight is waited for on both platforms, so the call is safe before
  * `createServer` resolves and from a `poweredOn` event handler. A wait is settled rather than left
-/**
- * Counts `startAdvertising` calls, so only the most recent one may issue the compensating stop that a
- * cancelled start uses to undo itself.
- *
- * Without it that stop is unconditional, and stops whatever is on the air rather than "the
- * advertisement this call put there". In `start(A); stop(); await start(B);` the stop cancels A, B
- * reads the bumped epoch and resolves normally — and then A's native call finally returns, sees the
- * epoch moved, and issues a stop that takes B off the air. The caller awaited B, B resolved, nothing
- * is advertising, and no promise ever reported a failure.
- */
-let advertisingStartEpoch = 0;
-
  * pending if the publication fails, the server is stopped, or Bluetooth goes off.
  *
  * Calling it again replaces the current advertisement rather than adding a second one.
@@ -410,9 +446,11 @@ let advertisingStartEpoch = 0;
 export async function startAdvertising(config: AdvertiseConfig = {}): Promise<void> {
   // Read before anything else, so every stop issued from here on counts as having come after this call.
   const epoch = advertisingStopEpoch;
-  // Expanding an advertised UUID costs nothing on the wire: Android encodes it as "the shortest
-  // representation" and sizes the 31-byte budget the same way, so a 16-bit alias still goes out as
-  // two octets.
+  const generation = ++advertisingStartEpoch;
+  // Expanded here so both platforms are addressed with one spelling. It costs nothing on the wire:
+  // Android encodes an advertised UUID as "the shortest representation" and sizes the 31-byte budget
+  // the same way, and iOS — where `CBUUID` would otherwise advertise the full sixteen octets it was
+  // built from — contracts it back in `beginAdvertising`. See `CBUUID.advertisedForm`.
   const serviceUuids = config.serviceUuids?.map((uuid) => normalizeUuid(uuid, 'service'));
   if (config.mode !== undefined) {
     assertOneOf(config.mode, ADVERTISING_MODES, 'advertising mode');

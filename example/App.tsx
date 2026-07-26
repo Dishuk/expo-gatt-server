@@ -52,6 +52,11 @@ const SERVICES: GattServiceConfig[] = [
         properties: ['read', 'write', 'notify'],
         permissions: ['readable', 'writeable'],
         value: [0, 60],
+        // Without this the harness demonstrates neither listener: a characteristic with a cached value
+        // has its reads answered natively, and `responseNeeded` is only ever true for a delegated
+        // write — so `onCharacteristicReadRequest` never fired and the `sendResponse` branch below was
+        // unreachable, in the one example the guides point readers at.
+        delegate: { read: true, write: true },
         descriptors: [{ uuid: USER_DESCRIPTION_UUID, value: utf8('Heart Rate Measurement') }],
       },
     ],

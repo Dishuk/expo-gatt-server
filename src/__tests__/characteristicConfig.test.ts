@@ -297,3 +297,49 @@ describe('duplicate UUIDs', () => {
     expect(nativeModuleMock.createServer).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * `delegate` was the only characteristic sub-object that reached the native layers unchecked, and both
+ * of them read its flags with a `?: false` fallback — so anything that is not exactly `read` or `write`
+ * holding a boolean published the characteristic as fully automatic. The listener never fired, reads
+ * were answered from the cached value, and nothing reported a problem on either side.
+ */
+describe('delegate validation', () => {
+  const withDelegate = (delegate: unknown) =>
+    createServer([
+      {
+        uuid: SERVICE,
+        characteristics: [
+          {
+            uuid: CHARACTERISTIC,
+            properties: ['read'],
+            permissions: ['readable'],
+            delegate,
+          } as never,
+        ],
+      },
+    ]);
+
+  it('accepts the two recognised flags', async () => {
+    await expect(withDelegate({ read: true, write: false })).resolves.toBeUndefined();
+  });
+
+  it('accepts an omitted delegate', async () => {
+    await expect(withDelegate(undefined)).resolves.toBeUndefined();
+  });
+
+  it('rejects a misspelled flag rather than publishing an automatic characteristic', async () => {
+    await expect(withDelegate({ reed: true })).rejects.toThrow(/Unknown delegate option "reed"/);
+    expect(nativeModuleMock.createServer).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-boolean flag', async () => {
+    await expect(withDelegate({ read: 'yes' })).rejects.toThrow(/Invalid delegate\.read/);
+    expect(nativeModuleMock.createServer).not.toHaveBeenCalled();
+  });
+
+  it('rejects a delegate that is not an object', async () => {
+    await expect(withDelegate(true)).rejects.toThrow(/Invalid delegate/);
+    await expect(withDelegate([])).rejects.toThrow(/Invalid delegate/);
+  });
+});

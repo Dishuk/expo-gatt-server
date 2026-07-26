@@ -161,6 +161,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (iOS): a delegated long write raises one event per attribute, not one per fragment.**
+  `onCharacteristicWriteRequest` now carries the value as assembled at `offset: 0` — the shape Android
+  already reported — instead of replaying the `ATT_PREPARE_WRITE_REQ` fragments the central happened to
+  split it into. Because those fragments all shared the batch's single `requestId`, a three-fragment
+  write to a delegated characteristic raised three events all claiming `responseNeeded`, and the second
+  and third `sendResponse` rejected with `REQUEST_NOT_FOUND`. Exactly one event per batch now carries
+  `responseNeeded: true`, since Apple answers a write callback once for the whole batch.
+- **Breaking (iOS): `sendResponse` after `stopServer` rejects with `REQUEST_NOT_FOUND`, not
+  `ERR_NO_SERVER`.** Android looks the request up before it checks the server, and `docs/api.md` invites
+  branching on `code` without also branching on `Platform.OS`. With no server there are no pending
+  requests — `stopServer` answers and discards them — so the lookup could only have failed anyway.
+- **Breaking: an unrecognised or non-boolean `delegate` flag is now rejected.** Both native layers read
+  the flags with a `?: false` fallback, so `delegate: { reed: true }` published a fully automatic
+  characteristic: the listener never fired, reads were answered from the cached value, and nothing
+  reported a problem. `delegate` was the only characteristic sub-object that reached the native side
+  unchecked.
+- **Breaking: the config plugin validates its props.** `app.json` is untyped at prebuild time, so
+  `bluetoothAlwaysPermission: true` used to reach `Info.plist` as a non-string — which iOS reads as an
+  absent key, terminating the app on first Bluetooth use — and `requireBluetoothLeHardware: "false"` was
+  truthy enough to filter the app off Google Play. Both now fail the prebuild with a message naming the
+  option.
+- **iOS advertises a base-range service UUID in its shortest form.** The shared layer expands every UUID
+  to 128 bits so both platforms are addressed identically, which costs nothing on Android but made
+  `CBUUID` advertise sixteen octets where two would do — enough to push a service UUID out of the 31-byte
+  advertisement into the Apple-only overflow area, where a non-Apple central filtering on it stopped
+  finding the peripheral.
 - **The package now publishes compiled JavaScript.** `main` and `types` pointed at `src/index.ts`, so
   every consumer received raw TypeScript and type-checked this package's source under their own
   compiler settings; the `build` script's output was never shipped at all, and the test suites were.
@@ -292,6 +318,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **iOS never resolved `startAdvertising`, and never drained a backed-up notification queue.** Two
+  `CBPeripheralManagerDelegate` methods were spelled as ordinary delegate callbacks rather than as the
+  selectors CoreBluetooth dispatches — `peripheralManager(_:didStartAdvertising:)` for
+  `peripheralManagerDidStartAdvertising(_:error:)`, and `peripheralManagerIsReady(_:)` for
+  `peripheralManagerIsReady(toUpdateSubscribers:)`. Both requirements are optional, so both compiled
+  without an error or even a warning, and neither was ever called. The radio advertised but the promise
+  never settled; and the first `updateValue` the transmit queue refused parked an entry that nothing
+  could release, so after 64 queued sends every further one rejected `ERR_NOTIFY_QUEUE_FULL` for the
+  life of that connection. `tests/swift/DelegateConformanceTests.swift` now asserts the manager responds
+  to every selector it means to implement, which is the only check that catches this class of mistake.
+- **iOS silently discarded every configured characteristic and descriptor `value`.** They were decoded
+  with `map["value"] as? [Int]`, but expo-modules-core converts an untyped `[String: Any]` argument
+  through `JavaScriptValue.getAny()`, which maps every JavaScript number to `Double` — so the cast
+  never succeeded. A characteristic lost its cached value and fell through to the delegated read path,
+  stalling reads for `requestTimeoutMs` in an app that had no listener because it had configured a
+  value; a descriptor published empty, and a `0x2904` Presentation Format descriptor published at zero
+  length was rejected by CoreBluetooth, failing the whole `createServer` with `ERR_CREATE_SERVER`. The
+  parsing has moved to `ios/GattConfigurationParsing.swift` so `swift test` can reach it — it was
+  previously covered by nothing, on the mistaken grounds that the TypeScript suite validated the same
+  configuration.
+- **Android's `stopServer` left a central's ATT bearer wedged.** A delegated read or write still
+  awaiting `sendResponse` was dropped rather than answered, so the central waited out its own 30 s
+  transaction timeout — after which no further request, notification or indication may be sent on that
+  bearer at all. `stopServer` disconnects nobody, so those links stay up. It now answers each one with
+  `ATT_ERROR_UNLIKELY_ERROR` before closing the server, which is what iOS already did and what
+  `docs/api.md` already claimed for both platforms.
+- **A cancelled `startAdvertising` could take a newer advertisement off the air.** The compensating
+  `stopAdvertising` a cancelled start issues is not addressed to a particular advertisement, so in
+  `start(A); stop(); await start(B);` the abandoned start A stopped B — after B had already resolved.
+  Nothing was advertising and no promise reported a failure. Only the most recent start now compensates.
+- **A `createServer` still parsing could outlive the `stopServer` meant to cancel it on iOS.**
+  `createServer` is asynchronous and `stopServer` synchronous, so the pair could reach the main queue in
+  the opposite order — the stop finding no manager, the create then publishing the database with no
+  handle left to remove it. This is the hazard `advertisingStopEpoch` already covered for advertising;
+  `createServer` now has the same guard, and rejects with `ERR_NO_SERVER`.
+- **A registration round that timed out on iOS left its services published.** The deferred unpublish
+  waited for every service of the round to report, which on the timeout path can never happen — so
+  `removeAllServices` never ran and the services stayed discoverable while the module reported no
+  server.
+- **Android could open two GATT servers at once.** `createServer`, `stopServer` and the adapter-state
+  broadcasts run on three different threads with nothing serialising them, so a `createServer` racing a
+  `STATE_ON` could open two servers against one shared callback — leaking one for the life of the
+  process while it still served a live copy of the database. The server lifecycle is now serialised, and
+  each round's callback carries its own identity so a late acknowledgement from a discarded round can no
+  longer advance or fail the round now running.
+- **A publication bound could overwrite a database that had just published.** The timeout read the
+  publication state and wrote it in two steps, so a round completing in between was recorded as
+  `FAILED` — leaving `isServerRunning` false and every later `startAdvertising` rejecting
+  `ERR_NO_SERVER` for a database that was in fact published.
+- **An in-flight notification had no bound on Android.** A `notifyCharacteristicChanged` the stack
+  accepted but never reported as sent wedged that device's queue permanently. Every other asynchronous
+  wait in the module was already bounded; this one now is too.
+- **A partially delegated execute committed its plain descriptor values before it could be refused.**
+  Characteristic values and CCCD changes were correctly withheld until JavaScript answered; ordinary
+  descriptors were not, so a rejected reliable write left one holding the new value.
+- **Concurrent CCCD writes could emit the wrong subscribe/unsubscribe events.** The previous
+  subscription state was sampled outside the update that replaced it, so two enabling writes arriving on
+  two ATT bearers could both report a subscribe.
 - **A `stopAdvertising` could be silently overtaken by the `startAdvertising` it was meant to cancel.**
   `stopAdvertising` is synchronous, so its body runs on the JavaScript thread the moment it is called,
   while `startAdvertising` is asynchronous and its native body runs later on Expo's own worker queue —
