@@ -19,7 +19,7 @@
     "build": "expo-module build",
     "build:plugin": "expo-module build plugin",
     "clean": "expo-module clean && expo-module clean plugin",
-    "lint": "expo-module lint && expo-module lint plugin",
+    "lint": "expo-module lint --max-warnings 0 && expo-module lint plugin --max-warnings 0",
     "typecheck": "tsc --noEmit -p tsconfig.check.json && tsc --noEmit -p plugin/tsconfig.check.json",
     "test": "expo-module test",
     "test:ios": "swift test",
