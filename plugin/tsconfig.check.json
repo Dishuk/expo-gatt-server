@@ -1,0 +1,7 @@
+// Type-checks the plugin including its suite. `tsconfig.json` drives the published plugin build and
+// therefore excludes the suite, which would otherwise be emitted into `plugin/build` and shipped.
+{
+  "extends": "./tsconfig.json",
+  "include": ["./src"],
+  "exclude": []
+}

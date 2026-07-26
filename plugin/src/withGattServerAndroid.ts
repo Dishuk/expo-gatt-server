@@ -1,33 +1,43 @@
-import { withAndroidManifest, type ConfigPlugin } from 'expo/config-plugins';
+import { AndroidConfig, withAndroidManifest, type ConfigPlugin } from 'expo/config-plugins';
 
 import type { ExpoGattServerPluginProps } from './index';
 
 const BLUETOOTH_LE_FEATURE = 'android.hardware.bluetooth_le';
 
+type AndroidManifestRoot = AndroidConfig.Manifest.AndroidManifest['manifest'];
+
+/**
+ * Declares `android.hardware.bluetooth_le` on the app manifest, raising an existing declaration but
+ * never relaxing one.
+ *
+ * Separated from the mod so the rule can be exercised without Expo's mod pipeline: a declaration this
+ * quietly overwrote would take the app off Google Play's BLE filter with nothing in the build saying so,
+ * which is invisible until a release reaches devices that should not have been offered it.
+ */
+export function applyBluetoothLeFeature(manifest: AndroidManifestRoot, required: boolean): void {
+  manifest['uses-feature'] ??= [];
+  const features = manifest['uses-feature'];
+  const declared = features.find((feature) => feature.$['android:name'] === BLUETOOTH_LE_FEATURE);
+  if (declared) {
+    // A declaration another plugin or the app config already made is left alone unless this one is
+    // raising it: overwriting it with the module's own `false` would take the app off Google Play's
+    // BLE filter with nothing in the build reporting it. An entry carrying no `android:required` is
+    // left alone for the same reason — the attribute defaults to `true`.
+    if (required) {
+      declared.$['android:required'] = 'true';
+    }
+    return;
+  }
+  features.push({
+    $: {
+      'android:name': BLUETOOTH_LE_FEATURE,
+      'android:required': required ? 'true' : 'false',
+    },
+  });
+}
+
 export const withGattServerAndroid: ConfigPlugin<ExpoGattServerPluginProps> = (config, props) =>
   withAndroidManifest(config, (config) => {
-    const { manifest } = config.modResults;
-
-    const features = (manifest['uses-feature'] ??= []);
-    const declared = features.find(
-      (feature) => feature.$['android:name'] === BLUETOOTH_LE_FEATURE,
-    );
-    if (declared) {
-      // A declaration another plugin or the app config already made is left alone unless this one is
-      // raising it: overwriting it with the module's own `false` would take the app off Google Play's
-      // BLE filter with nothing in the build reporting it. An entry carrying no `android:required` is
-      // left alone for the same reason — the attribute defaults to `true`.
-      if (props.requireBluetoothLeHardware) {
-        declared.$['android:required'] = 'true';
-      }
-    } else {
-      features.push({
-        $: {
-          'android:name': BLUETOOTH_LE_FEATURE,
-          'android:required': props.requireBluetoothLeHardware ? 'true' : 'false',
-        },
-      });
-    }
-
+    applyBluetoothLeFeature(config.modResults.manifest, props.requireBluetoothLeHardware ?? false);
     return config;
   });

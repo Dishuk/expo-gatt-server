@@ -28,9 +28,9 @@ no `build/` cannot bundle. If you ever clear it, `npm run build` puts it back.
 | `npm run build` | Compile TypeScript to `build/`, which is what the package's `main` points at |
 | `npm run build:plugin` | Compile the config plugin to `plugin/build/` |
 | `npm run clean` | Remove build artifacts |
-| `npm run lint` | Run ESLint |
-| `npm run typecheck` | Type-check everything, test suites included |
-| `npm test` | Jest, for the TypeScript layer |
+| `npm run lint` | Run ESLint over `src` and `plugin/src` |
+| `npm run typecheck` | Type-check `src` and `plugin/src`, test suites included |
+| `npm test` | Jest, for the TypeScript layer and the config plugin |
 | `npm run test:ios` | XCTest, for the iOS peripheral's ATT logic |
 | `npm run test:android` | JUnit and Robolectric, for the Android peripheral's ATT logic |
 
@@ -38,7 +38,9 @@ Most scripts delegate to `expo-module-scripts`. `prepublishOnly` cleans and rebu
 `plugin/build/`, neither of which is committed.
 
 `tsconfig.json` drives the published build and excludes the test suites, so they are never emitted into
-`build/`. `tsconfig.check.json` includes them, and is what `npm run typecheck` uses.
+`build/`. `tsconfig.check.json` includes them, and is what `npm run typecheck` uses. The plugin has the
+same pair — `plugin/tsconfig.json` builds it, `plugin/tsconfig.check.json` checks it with its suite —
+and `npm run typecheck` runs both, so nothing under `src/` or `plugin/src/` goes unchecked.
 
 ## Project Layout
 
@@ -116,6 +118,7 @@ worth pinning.
 | Suite | Covers |
 |---|---|
 | `src/__tests__/` | UUID normalisation and expansion, configuration validation, argument bounds, the ATT constants, delegation to the native module, the unsupported-platform fallbacks, and the three `Platform.OS` branches |
+| `plugin/src/__tests__/` | The two decisions the config plugin makes that only surface in a build: that it raises an existing `android.hardware.bluetooth_le` requirement but never relaxes one, and the three-way precedence of `bluetoothAlwaysPermission` |
 | `tests/swift/` | Write assembly and the queued-write distinction, response rebasing, the ATT error-code mapping, UUID spelling, adapter-state mapping, MTU arithmetic, every rejection code and the messages that have to say something specific |
 | `tests/android/` | The same ATT contracts as the Swift suite, case for case, plus configuration parsing against the real `android.bluetooth` classes -- including the CCCD permission derivation that stops an unbonded central subscribing to an encrypted characteristic |
 

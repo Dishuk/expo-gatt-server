@@ -15,8 +15,25 @@ const preset = require('expo-module-scripts/jest-preset');
  * depend on.
  */
 const project = preset.projects.find((candidate) => candidate.displayName.name === 'Android');
+if (!project) {
+  // Named rather than left to throw on the spread below, which reports only that `displayName` is
+  // undefined. The preset's project list is not a documented API, so a rename is a real possibility.
+  throw new Error(
+    'expo-module-scripts/jest-preset no longer exposes an "Android" project; ' +
+      `saw ${preset.projects.map((candidate) => candidate.displayName?.name).join(', ')}. ` +
+      'Pick a different one in jest.config.js.',
+  );
+}
 
 module.exports = {
   ...preset,
-  projects: [{ ...project, displayName: { ...project.displayName, name: 'expo-gatt-server' } }],
+  projects: [
+    {
+      ...project,
+      displayName: { ...project.displayName, name: 'expo-gatt-server' },
+      // The preset roots at `src` alone, which silently walled off `plugin/src` — a test placed there
+      // would never have run, and the plugin had shipped a regression already.
+      roots: ['<rootDir>/src', '<rootDir>/plugin/src'],
+    },
+  ],
 };

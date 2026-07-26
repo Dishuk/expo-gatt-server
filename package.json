@@ -18,13 +18,13 @@
   "scripts": {
     "build": "expo-module build",
     "build:plugin": "expo-module build plugin",
-    "clean": "expo-module clean",
-    "lint": "expo-module lint",
-    "typecheck": "tsc --noEmit -p tsconfig.check.json",
+    "clean": "expo-module clean && expo-module clean plugin",
+    "lint": "expo-module lint && expo-module lint plugin",
+    "typecheck": "tsc --noEmit -p tsconfig.check.json && tsc --noEmit -p plugin/tsconfig.check.json",
     "test": "expo-module test",
     "test:ios": "swift test",
     "test:android": "./scripts/test-android.sh",
-    "prepare": "expo-module build",
+    "prepare": "expo-module build && expo-module build plugin",
     "prepublishOnly": "expo-module prepublishOnly && expo-module build plugin"
   },
   "keywords": [
