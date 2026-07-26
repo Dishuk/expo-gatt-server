@@ -118,26 +118,37 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      # The runner's default is Xcode 16.4, whose Swift tools are 6.1. One of the packages Expo's
-      # prebuilt React Native artefacts resolve declares `swift-tools-version: 6.2`, so SwiftPM
-      # refuses the whole dependency graph and the build dies in `ExpoModulesJSI` — before it ever
-      # reaches this module's sources, which made the job fail on something unrelated to what it
-      # exists to check. Picking the newest installed Xcode rather than a pinned path keeps this
-      # working as the image rolls forward; the explicit version check is so that a runner image
-      # without one fails here, with a reason, instead of 300 lines deep in a build log.
-      - name: Select an Xcode new enough for Expo's Swift packages
+      # Expo's toolchain window is bounded at both ends, so neither the runner default nor the newest
+      # installed Xcode works.
+      #
+      # Too old: the default is Xcode 16.4, whose Swift tools are 6.1, and one of the packages Expo's
+      # prebuilt React Native artefacts resolve declares `swift-tools-version: 6.2` — SwiftPM refuses
+      # the whole dependency graph and the build dies in `ExpoModulesJSI` before it reaches this
+      # module's sources.
+      #
+      # Too new: Xcode 26.3 (Swift 6.2.4) fails to type-check `JavaScriptCodable+Date.swift` inside
+      # that same package — `abs(milliseconds) <= maxJavaScriptDateMilliseconds` is reported as
+      # ambiguous, though it compiles standalone. That is an upstream defect against a compiler Expo
+      # 57.0.4 predates, and nothing in this repository can work around it.
+      #
+      # So the version is pinned rather than discovered. Selecting the newest was what let a runner
+      # image update change the compiler under this job and turn it red on something this repository
+      # does not own; a list keeps the toolchain the same on every run while still tolerating an
+      # image that drops one entry. Revisit when Expo ships a release that builds under a newer one.
+      - name: Select an Xcode within Expo's supported Swift range
         run: |
-          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
-          if [ -z "$latest" ]; then echo "No versioned Xcode on this runner." >&2; exit 1; fi
-          sudo xcode-select -s "$latest"
-          echo "Selected $latest"
-          swift --version
-          major=$(swift --version | sed -n 's/.*Swift version \([0-9]*\)\.\([0-9]*\).*/\1/p' | head -1)
-          minor=$(swift --version | sed -n 's/.*Swift version \([0-9]*\)\.\([0-9]*\).*/\2/p' | head -1)
-          if [ "$major" -lt 6 ] || { [ "$major" -eq 6 ] && [ "$minor" -lt 2 ]; }; then
-            echo "Swift $major.$minor is too old; Expo's packages need 6.2+." >&2
-            exit 1
-          fi
+          for version in 26.2 26.1.1 26.0.1; do
+            candidate="/Applications/Xcode_${version}.app"
+            if [ -d "$candidate" ]; then
+              sudo xcode-select -s "$candidate"
+              echo "Selected $candidate"
+              swift --version
+              exit 0
+            fi
+          done
+          echo "None of the known-good Xcode versions (26.2, 26.1.1, 26.0.1) is installed." >&2
+          echo "Installed: $(ls -d /Applications/Xcode_*.app 2>/dev/null | tr '\n' ' ')" >&2
+          exit 1
       - uses: actions/setup-node@v4
         with:
           node-version: 20
