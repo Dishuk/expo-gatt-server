@@ -39,6 +39,7 @@ enum GattServerError: Error {
   case requestNotFound(requestId: Int)
   case requestDeviceMismatch(requestId: Int, owner: String, supplied: String)
   case responseOffsetAfterRequest(requestId: Int, requested: Int, supplied: Int)
+  case responseOffsetNegative(requestId: Int, requested: Int, supplied: Int)
   case bluetoothUnavailable(state: CBManagerState)
   case serviceRegistrationFailed(uuid: String, reason: String)
   case publicationTimedOut(awaiting: [String], timeoutMs: Int)
@@ -57,7 +58,7 @@ enum GattServerError: Error {
     case .payloadExceedsMtu: return "PAYLOAD_EXCEEDS_MTU"
     case .requestNotFound: return "REQUEST_NOT_FOUND"
     case .requestDeviceMismatch: return "REQUEST_DEVICE_MISMATCH"
-    case .responseOffsetAfterRequest: return "ERR_RESPONSE_OFFSET"
+    case .responseOffsetAfterRequest, .responseOffsetNegative: return "ERR_RESPONSE_OFFSET"
     case .bluetoothUnavailable(let state):
       return state == .unauthorized ? "ERR_PERMISSION" : "ERR_BLUETOOTH"
     case .serviceRegistrationFailed, .publicationTimedOut: return "ERR_CREATE_SERVER"
@@ -90,6 +91,9 @@ enum GattServerError: Error {
         "response supplies it from offset \(supplied), which leaves the requested bytes missing. " +
         "Pass the value together with the offset it starts at — offset 0 with the whole value " +
         "always works."
+    case .responseOffsetNegative(let requestId, let requested, let supplied):
+      return "Request \(requestId) was answered with offset \(supplied) against a requested offset " +
+        "of \(requested). An ATT offset is an unsigned 16-bit value."
     case .bluetoothUnavailable(let state):
       switch state {
       case .poweredOff: return "Bluetooth is turned off"
@@ -954,6 +958,18 @@ class GattServerManager: NSObject {
   ) throws -> Data {
     // A Write Response carries no value, so there is nothing to rebase.
     guard isRead else { return value }
+
+    // Re-checked here rather than trusted from the TypeScript layer, on the same grounds as the
+    // duplicate-UUID and byte-range checks in the binding: the native module is reachable directly.
+    // A negative supplied offset passed the relation below — `-4` is not greater than `0` — and
+    // produced a positive `skip`, so the response was trimmed from the front and sent to the central
+    // labelled as the whole attribute, with nothing reporting it on either side. Android rejects the
+    // same input with the same code.
+    guard suppliedOffset >= 0, requestedOffset >= 0 else {
+      throw GattServerError.responseOffsetNegative(
+        requestId: requestId, requested: requestedOffset, supplied: suppliedOffset
+      )
+    }
 
     guard suppliedOffset <= requestedOffset else {
       throw GattServerError.responseOffsetAfterRequest(

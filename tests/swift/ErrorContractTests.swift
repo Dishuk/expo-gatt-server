@@ -15,6 +15,7 @@ final class ErrorContractTests: XCTestCase {
     ("REQUEST_NOT_FOUND", .requestNotFound(requestId: 1)),
     ("REQUEST_DEVICE_MISMATCH", .requestDeviceMismatch(requestId: 1, owner: "A", supplied: "B")),
     ("ERR_RESPONSE_OFFSET", .responseOffsetAfterRequest(requestId: 1, requested: 0, supplied: 2)),
+    ("ERR_RESPONSE_OFFSET", .responseOffsetNegative(requestId: 1, requested: 0, supplied: -4)),
     ("ERR_BLUETOOTH", .bluetoothUnavailable(state: .poweredOff)),
     ("ERR_CREATE_SERVER", .serviceRegistrationFailed(uuid: "180d", reason: "why")),
     ("ERR_CREATE_SERVER", .publicationTimedOut(awaiting: ["180d"], timeoutMs: 30_000)),
@@ -29,9 +30,37 @@ final class ErrorContractTests: XCTestCase {
     ("ERR_UNSUPPORTED", .configurationUnsupported(option: "permission", reason: "no member.")),
   ]
 
+  /// What makes the table above's "adding a case forces a decision" true rather than aspirational.
+  ///
+  /// `GattServerError` carries associated values, so it cannot be `CaseIterable` and the table cannot be
+  /// derived from it. Left at that, a new case inherited whatever `GattServerError.code` happened to
+  /// return for it and was covered by nothing. A `switch` with no `default` does not compile until the
+  /// new case is named here, and naming it is what sends the author to the table.
+  private static func declaredCode(for error: GattServerError) -> String {
+    switch error {
+    case .payloadExceedsMtu: return "PAYLOAD_EXCEEDS_MTU"
+    case .requestNotFound: return "REQUEST_NOT_FOUND"
+    case .requestDeviceMismatch: return "REQUEST_DEVICE_MISMATCH"
+    case .responseOffsetAfterRequest, .responseOffsetNegative: return "ERR_RESPONSE_OFFSET"
+    case .bluetoothUnavailable(let state):
+      return state == .unauthorized ? "ERR_PERMISSION" : "ERR_BLUETOOTH"
+    case .serviceRegistrationFailed, .publicationTimedOut: return "ERR_CREATE_SERVER"
+    case .serverStopped, .databaseNotPublished: return "ERR_NO_SERVER"
+    case .characteristicNotFound: return "ERR_CHARACTERISTIC_NOT_FOUND"
+    case .notifyQueueFull: return "ERR_NOTIFY_QUEUE_FULL"
+    case .deviceDisconnected: return "ERR_DEVICE_DISCONNECTED"
+    case .noSubscriber: return "ERR_NO_SUBSCRIBER"
+    case .confirmUnsupported: return "ERR_CONFIRM_UNSUPPORTED"
+    case .advertisingOptionUnsupported, .configurationUnsupported: return "ERR_UNSUPPORTED"
+    }
+  }
+
   func testEachCaseReportsItsDocumentedCode() {
     for (expected, error) in Self.codes {
       XCTAssertEqual(error.code, expected, "\(error)")
+      // Independently restated, so a code changed in one place and not the other fails here rather
+      // than agreeing with itself.
+      XCTAssertEqual(Self.declaredCode(for: error), expected, "\(error)")
     }
   }
 

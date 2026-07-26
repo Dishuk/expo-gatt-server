@@ -96,6 +96,39 @@ final class ResponseRebasingTests: XCTestCase {
     XCTAssertNoThrow(try rebase([1, 2, 3], supplied: 2, requested: 2))
   }
 
+  /// A negative supplied offset passes the "not after the request" relation — `-4` is not greater than
+  /// `0` — and used to produce a positive skip, so the response was trimmed from the front and sent to
+  /// the central labelled as the whole attribute. Nothing reported it on either side. Android rejects
+  /// the same input with the same code, and these two cases are what holds the pair together.
+  func testANegativeSuppliedOffsetIsRejectedRatherThanTrimmingTheResponse() {
+    XCTAssertThrowsError(try rebase([1, 2, 3, 4, 5], supplied: -4, requested: 0)) { error in
+      guard let error = error as? GattServerError else {
+        return XCTFail("expected a GattServerError, got \(error)")
+      }
+      XCTAssertEqual(error.code, "ERR_RESPONSE_OFFSET")
+      XCTAssertTrue(
+        error.message.contains("unsigned 16-bit"),
+        "the message should say what an ATT offset is: \(error.message)"
+      )
+    }
+  }
+
+  /// A negative *requested* offset would be refused by the relation below whichever way round it is, so
+  /// the message is what distinguishes the two: it has to say the offset is out of range rather than
+  /// tell the caller their value starts too late, which would send them looking at the wrong argument.
+  func testANegativeRequestedOffsetIsRejectedAsOutOfRange() {
+    XCTAssertThrowsError(try rebase([1, 2, 3], supplied: 0, requested: -1)) { error in
+      guard let error = error as? GattServerError else {
+        return XCTFail("expected a GattServerError, got \(error)")
+      }
+      XCTAssertEqual(error.code, "ERR_RESPONSE_OFFSET")
+      XCTAssertTrue(
+        error.message.contains("unsigned 16-bit"),
+        "a negative offset is out of range, not a value supplied too late: \(error.message)"
+      )
+    }
+  }
+
   // MARK: - Writes
 
   /// A Write Response carries no value, so nothing is rebased and nothing is rejected — including the
