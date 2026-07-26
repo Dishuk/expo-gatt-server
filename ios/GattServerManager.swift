@@ -922,19 +922,46 @@ class GattServerManager: NSObject {
   /// Assembles one written fragment into an attribute's value, or returns `nil` when `offset` is past
   /// the current end — which the specification answers with "Invalid Offset".
   ///
-  /// A fragment at offset 0 replaces the value rather than being spliced into it: `ATT_WRITE_REQ`
-  /// carries only a handle and a value, and "the attribute value shall be truncated or lengthened to
-  /// match the length of the Attribute Value parameter" (Core Spec Vol 3, Part F, §3.4.5.1), so a
-  /// shorter write has to shorten the attribute. A non-zero offset reaches this delegate only from the
-  /// queued-write procedure CoreBluetooth runs below the app layer, where the offset is "the offset of
-  /// the first octet where the Part Attribute Value parameter is to be written" (§3.4.6.1).
-  private func spliced(_ current: Data, offset: Int, part: Data) -> Data? {
-    guard offset > 0 else { return part }
+  /// `queued` selects between the two write procedures, which disagree about the octets *after* the
+  /// fragment:
+  ///
+  /// - An unqueued `ATT_WRITE_REQ` carries only a handle and a value, and "the attribute value shall be
+  ///   truncated or lengthened to match the length of the Attribute Value parameter" (Core Spec Vol 3,
+  ///   Part F, §3.4.5.1) — so a shorter write shortens the attribute, tail and all.
+  /// - A queued write's part goes at "the offset of the first octet where the Part Attribute Value
+  ///   parameter is to be written" (§3.4.6.1), which says nothing about the octets beyond it, so they
+  ///   are preserved. Android's prepared-write path does exactly this, and matching it is what keeps
+  ///   one long write leaving the same attribute behind on both platforms.
+  ///
+  /// Assembling a queued part at offset 0 as a replacement — which this used to do, having only the
+  /// offset to go on — truncated an attribute that a long write did not cover to its end, while Android
+  /// kept the remainder.
+  private func spliced(_ current: Data, offset: Int, part: Data, queued: Bool) -> Data? {
     guard offset <= current.count else { return nil }
+    guard queued else { return part }
     var result = Data(current.prefix(offset))
     result.append(part)
     result.append(contentsOf: current.dropFirst(offset + part.count))
     return result
+  }
+
+  /// Whether a batch of write offsets can only have come from the queued-write procedure.
+  ///
+  /// CoreBluetooth runs that procedure below the app layer and delivers its result through the same
+  /// callback as an ordinary write, with no flag telling them apart — so the shape of the batch is the
+  /// only evidence. More than one request, or any request at a non-zero offset, is beyond what a single
+  /// `ATT_WRITE_REQ` can produce and therefore names a queued write.
+  ///
+  /// What is left genuinely ambiguous is a lone part at offset 0: identical in shape to an unqueued
+  /// write, so it is assembled as one. That is the single case where a long write can still leave a
+  /// different attribute behind than it does on Android, which sees the procedure directly and keeps the
+  /// tail. It costs a tail only when a client splits a value into exactly one part *and* stops short of
+  /// the attribute's end.
+  ///
+  /// Takes the offsets rather than the requests, because `CBATTRequest` has no public initialiser and
+  /// this is the whole of what the decision depends on.
+  private func isQueuedWriteBatch(offsets: [Int]) -> Bool {
+    offsets.count > 1 || offsets.contains { $0 > 0 }
   }
 
   private func nextRequestId() -> Int {
@@ -1287,11 +1314,12 @@ extension GattServerManager: CBPeripheralManagerDelegate {
 
     // Everything is assembled before anything is applied or answered, so a fragment the attribute
     // cannot take fails the whole batch rather than half of it.
+    let queued = isQueuedWriteBatch(offsets: requests.map { $0.offset })
     var assembled: [CharacteristicAddress: Data] = [:]
     for (request, address) in zip(requests, addresses) {
       let current = assembled[address] ?? characteristicValues[address] ?? Data()
       guard let merged = spliced(
-        current, offset: request.offset, part: request.value ?? Data()
+        current, offset: request.offset, part: request.value ?? Data(), queued: queued
       ) else {
         peripheral.respond(to: first, withResult: .invalidOffset)
         return

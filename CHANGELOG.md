@@ -245,6 +245,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A long write to iOS truncated any part of the attribute it did not cover, while Android kept it.**
+  CoreBluetooth runs the queued-write procedure below the app layer and delivers its result through the
+  same delegate callback as an ordinary write, with no flag telling the two apart — so every fragment at
+  offset 0 was assembled as a whole-value replacement. Writing 4 octets of an 8-octet attribute left 4
+  octets on iOS and 8 on Android. The batch's shape is now what decides: more than one request, or any
+  request at a non-zero offset, is beyond what a single `ATT_WRITE_REQ` can produce and is assembled as
+  a queued write, preserving the octets past the fragment as Android does. A lone part at offset 0 stays
+  genuinely ambiguous — identical in shape to an unqueued write — and is still assembled as one, which
+  is now stated rather than accidental.
+
 - The same failure reported a different `code` on each platform, so branching on one meant branching on
   `Platform.OS` too. Every case now reports the more specific of the two codes on both platforms:
   `sendNotification` with an unknown `deviceId` rejects with `ERR_DEVICE_DISCONNECTED` and with an
