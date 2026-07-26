@@ -1570,7 +1570,6 @@ class GattServerManager(
       return
     }
 
-    val wasEnabled = isSubscribed(deviceId, address)
     // Both branches go through `compute`, which holds the bin lock for the key, so the whole
     // read-modify-write is one step on the outer map. Android 13+ gives one connection several concurrent
     // ATT bearers, so two CCCD writes from the same central really do arrive on two binder threads.
@@ -1585,7 +1584,15 @@ class GattServerManager(
         if (forDevice.isNullOrEmpty()) null else forDevice
       } else {
         (forDevice ?: ConcurrentHashMap()).also { it[address] = bits }
+    //
+    // The previous state is read inside the same `compute` for the same reason. Sampling it separately
+    // left the *decision* racy even though the map was not: two enabling writes could both observe "not
+    // subscribed" and emit two `onCharacteristicSubscribed`, and an enable interleaved with a disable
+    // could emit two subscribes and no unsubscribe, so a consumer counting subscribers drifted.
+    var wasEnabled = false
       }
+      val previous = forDevice?.get(address) ?: 0
+      wasEnabled = previous and (CCCD_NOTIFY_BIT or CCCD_INDICATE_BIT) != 0
     }
 
     val serviceUuid = address.service.toString()
