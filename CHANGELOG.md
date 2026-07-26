@@ -128,6 +128,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `sendNotification`'s documented promise contract said the resolution meant the notification had been
+  delivered. That is true on Android, which resolves from `onNotificationSent`, but **not on iOS**,
+  where the peripheral role has no delivery callback at all and the promise resolves once CoreBluetooth
+  accepts the payload for transmission — as the platform table further down the same page already said.
+  The behaviour is unchanged and cannot be made to agree; the documentation now states the difference
+  wherever the promise is described, and says not to build an application-level acknowledgement on it.
+
 - 16-bit and 32-bit UUIDs are expanded onto the Bluetooth Base UUID in the shared TypeScript layer, so
   both platforms accept identical input. `CBUUID` took all three forms while Java's `UUID.fromString`
   requires the 8-4-4-4-12 form, so `'180D'` used to be accepted on iOS and throw on Android. Applies to

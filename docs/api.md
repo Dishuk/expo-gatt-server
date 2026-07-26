@@ -427,10 +427,20 @@ keep in step in the first place.
 > of the deprecated overload taking its payload from `characteristic.getValue()`. A consumer relying on
 > that must now call `updateCharacteristicValue` itself. See the [changelog](../CHANGELOG.md).
 
-The returned promise resolves once the platform reports the notification as delivered, not when the
-call is handed to the Bluetooth stack. Calls made while an earlier notification for the same device
-is still in flight are queued in order and sent as the link drains, so awaiting the promise paces a
-stream against the connection instead of overrunning it.
+The returned promise resolves later than the call being handed to the Bluetooth stack, and calls made
+while an earlier notification for the same device is still in flight are queued in order and sent as
+the link drains — so awaiting it paces a stream against the connection instead of overrunning it.
+
+**What the resolution reports differs by platform, and the difference cannot be removed:**
+
+| | Android | iOS |
+|---|---|---|
+| Resolves when | `onNotificationSent` fires — the stack finished transmitting, and for an indication the central confirmed | `updateValue(_:for:onSubscribedCentrals:)` accepts the payload for transmission |
+| Means | Delivered | **Queued, not delivered** |
+| Indication confirmed? | Yes, implied by the callback | Never surfaced — the peripheral role has no delivery callback at all |
+
+Treat a resolution as "the platform took it", not "the central has it". Do not build an
+application-level acknowledgement out of it on either platform — have the central write back instead.
 
 > **Android:** the platform allows one outstanding notification per device -- "when multiple
 > notifications are to be sent, an application must wait for this callback to be received before

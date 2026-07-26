@@ -451,10 +451,21 @@ export function stopAdvertising(): void {
  * one declaring **both** is the case iOS cannot honour, since Android sends what `confirm` asks for
  * while iOS sends whatever CoreBluetooth chooses.
  *
- * The promise settles when the platform reports the notification as delivered, not when the call
- * reaches the Bluetooth stack. A device may only have one notification outstanding at a time, so
- * sends issued while an earlier one is still in flight are queued in order rather than dropped;
- * awaiting the promise is what paces a stream against the link.
+ * The promise settles later than the call reaching the Bluetooth stack, but **what it reports differs
+ * by platform, and the difference cannot be removed**:
+ *
+ * - **Android** resolves it from `onNotificationSent`, which the platform delivers once the stack has
+ *   finished transmitting — and, for an indication, once the central has confirmed. A device may have
+ *   only one notification outstanding at a time, so sends issued while an earlier one is in flight are
+ *   queued in order rather than dropped, and awaiting the promise paces a stream against the link.
+ * - **iOS** resolves it once CoreBluetooth accepts the payload for transmission. The peripheral role
+ *   has no delivery callback at all — `peripheralManagerIsReady(toUpdateSubscribers:)` reports only
+ *   that the transmit queue has space — so a resolved promise there means *queued*, not *delivered*,
+ *   and an indication's confirmation is never surfaced. Awaiting still paces a stream, because a
+ *   payload the queue cannot take is held until it can.
+ *
+ * So treat a resolution as "the platform took it" rather than "the central has it", and do not build
+ * an application-level acknowledgement out of it — have the central write back instead.
  *
  * Rejects with `ERR_NO_SUBSCRIBER` when the device has not enabled the transmission on the
  * characteristic. See `options.requireSubscription` to send anyway where the platform allows it.
