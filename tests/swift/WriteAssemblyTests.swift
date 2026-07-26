@@ -123,22 +123,25 @@ final class WriteAssemblyTests: XCTestCase {
 
   // MARK: - The assembly loop
 
-  /// Reproduces what `didReceiveWrite` does with a batch: fold each fragment onto what the previous
-  /// ones left, starting from the attribute's current value. This is the property that actually has to
-  /// hold — a long write that stops short of the end must leave the remainder alone, which is what
-  /// Android does.
+  private let address = CharacteristicAddress(
+    service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
+  )
+  /// Drives the real assembly `didReceiveWrite` uses, rather than a copy of it.
+  ///
+  /// This used to re-implement the fold, with a comment saying so — and the copy had drifted from the
+  /// original in ways that mattered: it decided the queued-write heuristic across the whole batch
+  /// instead of per attribute, and knew nothing of the delegated/automatic split. So the cases below
+  /// asserted against the test's own accumulator. `assembleWriteBatch` exists to be called from both
+  /// places, taking plain fragments because `CBATTRequest` has no public initialiser.
   private func assemble(current: Data, fragments: [(offset: Int, bytes: [UInt8])]) -> Data? {
-    let queued = manager.isQueuedWriteBatch(offsets: fragments.map { $0.offset })
-    var accumulated = current
-    for fragment in fragments {
-      guard let merged = manager.spliced(
-        accumulated, offset: fragment.offset, part: data(fragment.bytes), queued: queued
-      ) else {
-        return nil
-      }
-      accumulated = merged
-    }
-    return accumulated
+    manager.assembleWriteBatch(
+      fragments.map {
+        GattServerManager.WriteFragment(
+          address: address, offset: $0.offset, value: data($0.bytes)
+        )
+      },
+      current: [address: current]
+    )?[address]
   }
 
   func testMultiFragmentLongWriteStoppingShortKeepsTheRemainder() {
@@ -189,5 +192,65 @@ final class WriteAssemblyTests: XCTestCase {
     let result = assemble(current: data([1, 2, 3, 4]), fragments: [(offset: 0, bytes: [9])])
 
     XCTAssertEqual(result, data([9]))
+  }
+}
+
+/// Two attributes written in one callback, which the batch-wide heuristic used to conflate.
+extension WriteAssemblyTests {
+  func testEachAttributeGetsItsOwnQueuedWriteDecision() {
+    let manager = GattServerManager(requestTimeoutMs: 1000)
+    // Two Write Without Response commands the stack coalesced: each is a lone part at offset 0, so
+    // neither is a queued write and both must truncate. Pooling the offsets made the pair look like a
+    // two-fragment run, and each attribute then kept a tail it should have dropped.
+    let fragments = [
+      GattServerManager.WriteFragment(
+        address: CharacteristicAddress(
+          service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
+        ),
+        offset: 0,
+        value: Data([9, 9])
+      ),
+      GattServerManager.WriteFragment(
+        address: CharacteristicAddress(
+          service: CBUUID(string: "180F"), characteristic: CBUUID(string: "2A19")
+        ),
+        offset: 0,
+        value: Data([8, 8])
+      ),
+    ]
+    let current = [
+      fragments[0].address: Data([1, 2, 3, 4, 5]),
+      fragments[1].address: Data([1, 2, 3, 4, 5]),
+    ]
+
+    let assembled = manager.assembleWriteBatch(fragments, current: current)
+
+    XCTAssertEqual(assembled?[fragments[0].address], Data([9, 9]))
+    XCTAssertEqual(assembled?[fragments[1].address], Data([8, 8]))
+  }
+
+  /// A genuine long write to one attribute is still read as queued when another attribute shares the
+  /// callback, so the fix does not cost the case it was protecting.
+  func testAGenuineLongWriteIsStillQueuedAlongsideAnotherAttribute() {
+    let manager = GattServerManager(requestTimeoutMs: 1000)
+    let long = CharacteristicAddress(
+      service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
+    )
+    let other = CharacteristicAddress(
+      service: CBUUID(string: "180F"), characteristic: CBUUID(string: "2A19")
+    )
+    let fragments = [
+      GattServerManager.WriteFragment(address: long, offset: 0, value: Data([10, 11])),
+      GattServerManager.WriteFragment(address: long, offset: 2, value: Data([12, 13])),
+      GattServerManager.WriteFragment(address: other, offset: 0, value: Data([7])),
+    ]
+
+    let assembled = manager.assembleWriteBatch(
+      fragments,
+      current: [long: Data([1, 2, 3, 4, 5, 6]), other: Data([1, 2, 3])]
+    )
+
+    XCTAssertEqual(assembled?[long], Data([10, 11, 12, 13, 5, 6]))
+    XCTAssertEqual(assembled?[other], Data([7]))
   }
 }

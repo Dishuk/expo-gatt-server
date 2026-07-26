@@ -1105,6 +1105,54 @@ class GattServerManager: NSObject {
 
   /// The current link budget for `deviceId`, or `nil` when no such central is known. Read live from the
   /// retained `CBCentral` rather than from the change-detection cache.
+  /// One `CBATTRequest`'s worth of a write, reduced to what the assembly actually depends on.
+  ///
+  /// `CBATTRequest` has no public initialiser, so a test cannot build one. Folding over this instead is
+  /// what lets `WriteAssemblyTests` exercise the real assembly rather than a copy of it kept in step by
+  /// hand — and the copy had already drifted: it neither split delegated from automatic addresses nor
+  /// decided the queued-write heuristic per attribute.
+  struct WriteFragment {
+    let address: CharacteristicAddress
+    let offset: Int
+    let value: Data
+  }
+
+  /// Folds one callback's fragments onto the values the attributes hold, returning `nil` if any part
+  /// starts past the end of what it is written onto — in which case the whole batch fails, because the
+  /// queued-write procedure is atomic.
+  ///
+  /// The queued-write decision is made per attribute, not across the batch: the heuristic reads a run of
+  /// offsets as the procedure, and mixing offsets belonging to different characteristics let one
+  /// attribute's fragmentation decide another's. Two independent Write Without Response commands
+  /// coalesced into one callback — which need no response, so the "one respond per callback" rule that
+  /// marks an execute does not apply — were both read as queued, and each preserved a tail it should
+  /// have truncated.
+  func assembleWriteBatch(
+    _ fragments: [WriteFragment],
+    current: [CharacteristicAddress: Data]
+  ) -> [CharacteristicAddress: Data]? {
+    var offsetsByAddress: [CharacteristicAddress: [Int]] = [:]
+    for fragment in fragments {
+      offsetsByAddress[fragment.address, default: []].append(fragment.offset)
+    }
+    let queuedByAddress = offsetsByAddress.mapValues { isQueuedWriteBatch(offsets: $0) }
+
+    var assembled: [CharacteristicAddress: Data] = [:]
+    for fragment in fragments {
+      let base = assembled[fragment.address] ?? current[fragment.address] ?? Data()
+      guard let merged = spliced(
+        base,
+        offset: fragment.offset,
+        part: fragment.value,
+        queued: queuedByAddress[fragment.address] ?? false
+      ) else {
+        return nil
+      }
+      assembled[fragment.address] = merged
+    }
+    return assembled
+  }
+
   func mtu(for deviceId: String) -> DeviceMtu? {
     guard let central = connectedCentrals[deviceId] else { return nil }
     return DeviceMtu(maxNotificationPayload: central.maximumUpdateValueLength)
@@ -1455,17 +1503,12 @@ extension GattServerManager: CBPeripheralManagerDelegate {
 
     // Everything is assembled before anything is applied or answered, so a fragment the attribute
     // cannot take fails the whole batch rather than half of it.
-    let queued = isQueuedWriteBatch(offsets: requests.map { $0.offset })
-    var assembled: [CharacteristicAddress: Data] = [:]
-    for (request, address) in zip(requests, addresses) {
-      let current = assembled[address] ?? characteristicValues[address] ?? Data()
-      guard let merged = spliced(
-        current, offset: request.offset, part: request.value ?? Data(), queued: queued
-      ) else {
-        peripheral.respond(to: first, withResult: .invalidOffset)
-        return
-      }
-      assembled[address] = merged
+    let fragments = zip(requests, addresses).map {
+      WriteFragment(address: $1, offset: $0.offset, value: $0.value ?? Data())
+    }
+    guard let assembled = assembleWriteBatch(fragments, current: characteristicValues) else {
+      peripheral.respond(to: first, withResult: .invalidOffset)
+      return
     }
 
     // A delegated characteristic's value is JavaScript's to commit with `updateCharacteristicValue` once
