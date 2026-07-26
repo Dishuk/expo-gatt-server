@@ -23,6 +23,7 @@ final class ErrorContractTests: XCTestCase {
     ("ERR_NO_SERVER", .databaseNotPublished),
     ("ERR_CHARACTERISTIC_NOT_FOUND", .characteristicNotFound(service: "180d", characteristic: "2a37")),
     ("ERR_NOTIFY_QUEUE_FULL", .notifyQueueFull(limit: 64)),
+    ("ERR_NOTIFY", .notificationTimedOut(timeoutMs: 35_000)),
     ("ERR_DEVICE_DISCONNECTED", .deviceDisconnected(deviceId: "A")),
     ("ERR_NO_SUBSCRIBER", .noSubscriber(deviceId: "A", characteristic: "2a37")),
     ("ERR_CONFIRM_UNSUPPORTED", .confirmUnsupported(characteristic: "2a37", confirm: true)),
@@ -48,6 +49,7 @@ final class ErrorContractTests: XCTestCase {
     case .serverStopped, .databaseNotPublished: return "ERR_NO_SERVER"
     case .characteristicNotFound: return "ERR_CHARACTERISTIC_NOT_FOUND"
     case .notifyQueueFull: return "ERR_NOTIFY_QUEUE_FULL"
+    case .notificationTimedOut: return "ERR_NOTIFY"
     case .deviceDisconnected: return "ERR_DEVICE_DISCONNECTED"
     case .noSubscriber: return "ERR_NO_SUBSCRIBER"
     case .confirmUnsupported: return "ERR_CONFIRM_UNSUPPORTED"

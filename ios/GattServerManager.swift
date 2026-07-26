@@ -9,10 +9,25 @@ let attNotificationHeaderSize = 3
 
 private let defaultAttMtuPayload = defaultAttMtu - attNotificationHeaderSize
 
-/// Upper bound on notifications parked while the CoreBluetooth transmit queue is full. That queue
-/// belongs to the peripheral manager rather than to any one central, so the bound is shared too.
+/// Upper bound on notifications parked *per central* while the CoreBluetooth transmit queue is full.
 /// Without it a producer that outruns the link would grow the queue forever.
+///
+/// Counted per central rather than across the queue as a whole, which is what Android does and what a
+/// caller can reason about. A shared bound meant one central that stopped draining — a link gone quiet
+/// without CoreBluetooth reporting it — filled the queue and then refused `sendNotification` for every
+/// *other* central with `ERR_NOTIFY_QUEUE_FULL`, which no amount of waiting recovered from.
 private let maxQueuedNotifications = 64
+
+/// How long one parked notification may wait for the transmit queue before it is abandoned.
+///
+/// `peripheralManagerIsReady(toUpdateSubscribers:)` is the only thing that drains the queue, and
+/// CoreBluetooth does not guarantee it — an abrupt link loss that produces no `didUnsubscribeFrom`
+/// leaves the callback owed and never delivered. Without a bound the `sendNotification` promise behind
+/// it never settles, so an `await` hangs for the life of the process and the entries behind it never
+/// move. Set above `attTransactionTimeoutMs` so a transmission the link is merely slow to carry is not
+/// abandoned while the peer is still willing to receive it; Android bounds its own wait at the same 35 s
+/// and for the same reason.
+private let notificationTimeoutMs = 35_000
 
 /// The ATT transaction timeout. A transaction not completed within 30 s fails, and no further request,
 /// command, indication or notification may then be sent on that ATT bearer — recovering costs a whole
@@ -47,6 +62,7 @@ enum GattServerError: Error {
   case databaseNotPublished
   case characteristicNotFound(service: String, characteristic: String)
   case notifyQueueFull(limit: Int)
+  case notificationTimedOut(timeoutMs: Int)
   case deviceDisconnected(deviceId: String)
   case noSubscriber(deviceId: String, characteristic: String)
   case confirmUnsupported(characteristic: String, confirm: Bool)
@@ -65,6 +81,7 @@ enum GattServerError: Error {
     case .serverStopped, .databaseNotPublished: return "ERR_NO_SERVER"
     case .characteristicNotFound: return "ERR_CHARACTERISTIC_NOT_FOUND"
     case .notifyQueueFull: return "ERR_NOTIFY_QUEUE_FULL"
+    case .notificationTimedOut: return "ERR_NOTIFY"
     case .deviceDisconnected: return "ERR_DEVICE_DISCONNECTED"
     case .noSubscriber: return "ERR_NO_SUBSCRIBER"
     case .confirmUnsupported: return "ERR_CONFIRM_UNSUPPORTED"
@@ -115,8 +132,12 @@ enum GattServerError: Error {
     case .characteristicNotFound(let service, let characteristic):
       return "Characteristic \(characteristic) was not found in service \(service)"
     case .notifyQueueFull(let limit):
-      return "\(limit) notifications are already waiting for the transmit queue to drain. " +
-        "Wait for earlier sends to resolve before queueing more."
+      return "\(limit) notifications are already waiting for the transmit queue to drain for this " +
+        "central. Wait for earlier sends to resolve before queueing more."
+    case .notificationTimedOut(let timeoutMs):
+      return "CoreBluetooth did not report the transmit queue ready within \(timeoutMs) ms, so the " +
+        "notification was abandoned and the ones behind it were retried. The central may have gone " +
+        "away without CoreBluetooth reporting it."
     case .deviceDisconnected(let deviceId):
       return "Device \(deviceId) disconnected"
     case .noSubscriber(let deviceId, let characteristic):
@@ -375,13 +396,21 @@ class GattServerManager: NSObject {
   /// exactly these payloads, in this order, are what has to go out then.
   private var pendingNotifications: [QueuedNotification] = []
 
+  /// Names one parked entry for its own expiry, so a timer can never abandon the entry that replaced
+  /// the one it was armed for.
+  private var nextNotificationId = 0
+
   private struct QueuedNotification {
+    let id: Int
     let deviceId: String
     let address: CharacteristicAddress
     let characteristic: CBMutableCharacteristic
     let central: CBCentral
     let value: Data
     let completion: (Error?) -> Void
+    /// Armed only while the entry is parked, and cancelled by whatever takes it off the queue. Held on
+    /// the entry rather than in a map so the two cannot be separated.
+    var timeout: DispatchWorkItem?
   }
 
   /// One value a partially delegated write batch withheld, kept with what the attribute held when the
@@ -731,7 +760,9 @@ class GattServerManager: NSObject {
       throw GattServerError.payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count)
     }
 
+    nextNotificationId += 1
     let entry = QueuedNotification(
+      id: nextNotificationId,
       deviceId: deviceId,
       address: address,
       characteristic: characteristic,
@@ -743,16 +774,40 @@ class GattServerManager: NSObject {
     // Anything already waiting has to go out first, or a later payload would overtake an earlier
     // one on the same characteristic.
     guard pendingNotifications.isEmpty else {
-      guard pendingNotifications.count < maxQueuedNotifications else {
+      let queuedForCentral = pendingNotifications.reduce(0) {
+        $0 + ($1.deviceId == deviceId ? 1 : 0)
+      }
+      guard queuedForCentral < maxQueuedNotifications else {
         throw GattServerError.notifyQueueFull(limit: maxQueuedNotifications)
       }
-      pendingNotifications.append(entry)
+      park(entry)
       return
     }
 
     if !deliver(entry) {
-      pendingNotifications.append(entry)
+      park(entry)
     }
+  }
+
+  /// Puts an entry the transmit queue could not take onto the queue, under a bound on how long it may
+  /// wait there. See `notificationTimeoutMs`.
+  private func park(_ entry: QueuedNotification) {
+    var parked = entry
+    let id = entry.id
+    let work = DispatchWorkItem { [weak self] in
+      guard let self = self else { return }
+      guard let index = self.pendingNotifications.firstIndex(where: { $0.id == id }) else { return }
+      let abandoned = self.pendingNotifications.remove(at: index)
+      abandoned.completion(GattServerError.notificationTimedOut(timeoutMs: notificationTimeoutMs))
+      // The readiness callback this entry was waiting on may never come, and everything behind it was
+      // waiting on the same one — so the rest are retried rather than left to expire one by one.
+      self.drainPendingNotifications()
+    }
+    parked.timeout = work
+    pendingNotifications.append(parked)
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + .milliseconds(notificationTimeoutMs), execute: work
+    )
   }
 
   /// Hands queued notifications to CoreBluetooth until one is refused, taking each off the queue before
@@ -766,9 +821,13 @@ class GattServerManager: NSObject {
     while let next = pendingNotifications.first {
       pendingNotifications.removeFirst()
       guard deliver(next) else {
+        // Back at the head with its original expiry still running: the wait it is bounding is the same
+        // one, and re-arming here would let an entry the queue keeps refusing never expire at all.
         pendingNotifications.insert(next, at: 0)
         return
       }
+      // Settled one way or the other by `deliver`, so nothing is left for the expiry to abandon.
+      next.timeout?.cancel()
     }
   }
 
@@ -813,6 +872,7 @@ class GattServerManager: NSObject {
     guard !abandoned.isEmpty else { return }
     pendingNotifications.removeAll(where: predicate)
     for entry in abandoned {
+      entry.timeout?.cancel()
       entry.completion(error)
     }
     // The refusal that owes us a `peripheralManagerIsReady` may have belonged to an entry just abandoned,
