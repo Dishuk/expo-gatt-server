@@ -23,6 +23,24 @@ import java.util.concurrent.atomic.AtomicReference
 
 private const val TAG = "ExpoGattServer"
 
+/**
+ * Emits a debug line only when the tag is turned up, and builds the message only then.
+ *
+ * `Log.d` is not stripped from a release build, so tracing every ATT request unconditionally put a
+ * connected central's Bluetooth address into the logcat of every app shipping this module — readable by
+ * anything else running in that process, and captured verbatim by `adb bugreport`. The argument is a
+ * lambda so the interpolation cost goes with it: these sit on the read, write and notify paths, which run
+ * per PDU.
+ *
+ * Turn it on with `adb shell setprop log.tag.ExpoGattServer DEBUG`. Warnings and errors are not gated —
+ * they report faults, and are rare by construction.
+ */
+private inline fun logDebug(message: () -> String) {
+  if (Log.isLoggable(TAG, Log.DEBUG)) {
+    Log.d(TAG, message())
+  }
+}
+
 /** Default ATT_MTU, in octets — Core Spec Vol 3, Part G, §5.2.1. */
 const val DEFAULT_ATT_MTU = 23
 
@@ -525,7 +543,7 @@ class GattServerManager(
     override fun onReceive(receiverContext: Context?, intent: Intent?) {
       if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
       val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
-      Log.d(TAG, "Adapter state changed to $state")
+      logDebug { "Adapter state changed to $state" }
       onStateChange?.invoke(normalizedBluetoothState(state))
 
       when (state) {
@@ -542,7 +560,7 @@ class GattServerManager(
    */
   @SuppressLint("MissingPermission")
   private fun handleAdapterOff(): Unit = synchronized(serverLifecycleLock) {
-    Log.d(TAG, "Adapter off — closing GATT server")
+    logDebug { "Adapter off — closing GATT server" }
     pendingServices.clear()
     // IDLE rather than FAILED: the next power-on re-registers the services, so a caller arriving in the
     // window between the STATE_ON broadcast and that round has to park rather than be turned away.
@@ -580,7 +598,7 @@ class GattServerManager(
     // `android.setAdapterName` made would otherwise survive the power cycle that prevented its undo.
     restoreAdapterName()
     if (serviceFactory.get() == null) return
-    Log.d(TAG, "Adapter on — reopening GATT server and re-registering services")
+    logDebug { "Adapter on — reopening GATT server and re-registering services" }
     if (!openServer()) {
       Log.e(TAG, "Failed to reopen GATT server after the adapter was re-enabled")
       // Nothing retries until the adapter cycles again, so anyone parked is told rather than left there.
@@ -619,7 +637,7 @@ class GattServerManager(
     @SuppressLint("MissingPermission")
     override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
       val id = device.address
-      Log.d(TAG, "onConnectionStateChange: device=$id status=$status newState=$newState")
+      logDebug { "onConnectionStateChange: device=$id status=$status newState=$newState" }
       when (newState) {
         BluetoothGattServer.STATE_CONNECTED -> {
           connectedDevices[id] = device
@@ -663,12 +681,12 @@ class GattServerManager(
           gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null)
           return
         }
-        Log.d(TAG, "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset auto-respond valueLen=${responseValue.size}")
+        logDebug { "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset auto-respond valueLen=${responseValue.size}" }
         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, responseValue)
         return
       }
 
-      Log.d(TAG, "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset delegating to JS")
+      logDebug { "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset delegating to JS" }
       registerPendingRequest(requestId, device.address, offset, isRead = true)
 
       val serviceUuid = characteristic.service?.uuid?.toString() ?: ""
@@ -699,7 +717,7 @@ class GattServerManager(
       // characteristic opted in — there is nothing for JavaScript to reply to.
       val delegatesWrite = delegationFor(characteristic).write
       val delegated = delegatesWrite && responseNeeded
-      Log.d(TAG, "onCharacteristicWriteRequest: device=${device.address} char=${characteristic.uuid} offset=$offset responseNeeded=$responseNeeded delegated=$delegated")
+      logDebug { "onCharacteristicWriteRequest: device=${device.address} char=${characteristic.uuid} offset=$offset responseNeeded=$responseNeeded delegated=$delegated" }
 
       if (delegated) {
         registerPendingRequest(requestId, device.address, offset, isRead = false)
@@ -729,7 +747,9 @@ class GattServerManager(
       device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor,
       preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?
     ) {
-      Log.d(TAG, "onDescriptorWriteRequest: device=${device.address} desc=${descriptor.uuid} responseNeeded=$responseNeeded value=${value?.joinToString(",") { String.format("%02x", it) }}")
+      // The value's length rather than its bytes: a descriptor write carries whatever the central chose to
+      // send, and a trace is not the place to put it.
+      logDebug { "onDescriptorWriteRequest: device=${device.address} desc=${descriptor.uuid} responseNeeded=$responseNeeded valueLen=${value?.size ?: 0}" }
 
       if (preparedWrite) {
         queuePreparedWrite(
@@ -798,7 +818,7 @@ class GattServerManager(
         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null)
         return
       }
-      Log.d(TAG, "onDescriptorReadRequest: device=${device.address} desc=${descriptor.uuid} offset=$offset value=${responseValue.joinToString(",") { String.format("%02x", it) }}")
+      logDebug { "onDescriptorReadRequest: device=${device.address} desc=${descriptor.uuid} offset=$offset valueLen=${responseValue.size}" }
       gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, responseValue)
     }
 
@@ -845,7 +865,7 @@ class GattServerManager(
     @SuppressLint("MissingPermission")
     override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
       val queued = preparedWrites.remove(device.address) ?: emptyList<PreparedWrite>()
-      Log.d(TAG, "onExecuteWrite: device=${device.address} execute=$execute queued=${queued.size}")
+      logDebug { "onExecuteWrite: device=${device.address} execute=$execute queued=${queued.size}" }
 
       if (!execute) {
         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
@@ -858,7 +878,7 @@ class GattServerManager(
       // A registration belonging to a round that has since been discarded says nothing about the one
       // running now, and must not advance or fail it.
       if (publicationRound.get() != round) {
-        Log.d(TAG, "onServiceAdded: ignoring service=${service.uuid} from discarded round $round")
+        logDebug { "onServiceAdded: ignoring service=${service.uuid} from discarded round $round" }
         return
       }
       if (status != BluetoothGatt.GATT_SUCCESS) {
@@ -869,13 +889,13 @@ class GattServerManager(
         ))
         return
       }
-      Log.d(TAG, "onServiceAdded: service=${service.uuid} registered")
+      logDebug { "onServiceAdded: service=${service.uuid} registered" }
       addNextService()
     }
 
     override fun onMtuChanged(device: BluetoothDevice?, mtu: Int) {
       device?.let {
-        Log.d(TAG, "onMtuChanged: device=${it.address} mtu=$mtu")
+        logDebug { "onMtuChanged: device=${it.address} mtu=$mtu" }
         deviceMtu[it.address] = mtu
         listener?.onMtuChanged(it.address, DeviceMtu(mtu))
       }
@@ -949,7 +969,7 @@ class GattServerManager(
     publishedServices.set(services)
     pendingServices.clear()
     pendingServices.addAll(services)
-    Log.d(TAG, "Server opened, registering ${services.size} service(s)")
+    logDebug { "Server opened, registering ${services.size} service(s)" }
     armPublicationTimeout(round)
     addNextService()
     return true
@@ -1036,7 +1056,7 @@ class GattServerManager(
   private fun addNextService() {
     val next = pendingServices.poll()
     if (next == null) {
-      Log.d(TAG, "All services registered")
+      logDebug { "All services registered" }
       finishOpen(DatabasePublication.PUBLISHED, null)
       return
     }
@@ -1260,7 +1280,7 @@ class GattServerManager(
       private fun current(): Boolean = advertiseCallback.get() === this
 
       override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-        Log.d(TAG, "Advertising started successfully")
+        logDebug { "Advertising started successfully" }
         if (!current()) return
         advertising.set(true)
         scheduleAdvertisingTimeout(options.timeoutMs)
@@ -1324,7 +1344,7 @@ class GattServerManager(
     // The generation is tested too, because a stop that landed before the callback was installed left
     // nothing for the identity test to find.
     if (advertiseCallback.get() !== callback || advertisingGeneration.get() != generation) {
-      Log.d(TAG, "Advertising was stopped while starting — stopping the new advertisement")
+      logDebug { "Advertising was stopped while starting — stopping the new advertisement" }
       leAdvertiser.stopAdvertising(callback)
       // Taking the callback back is what stops a late onStartSuccess reporting this advertisement as
       // running; a stop that took it first has already cleared the flag.
@@ -1536,7 +1556,7 @@ class GattServerManager(
     val server = gattServer ?: throw serverUnavailable()
     val device = connectedDevices[deviceId]
       ?: throw GattServerException("ERR_DEVICE_DISCONNECTED", "Device $deviceId is not connected")
-    Log.d(TAG, "Cancelling connection to $deviceId")
+    logDebug { "Cancelling connection to $deviceId" }
     server.cancelConnection(device)
   }
 
@@ -1619,7 +1639,7 @@ class GattServerManager(
     }
 
     val serviceUuid = address.service.toString()
-    Log.d(TAG, "CCCD: device=$deviceId service=$serviceUuid char=$characteristicUuid bits=$bits subscribed=$enabled")
+    logDebug { "CCCD: device=$deviceId service=$serviceUuid char=$characteristicUuid bits=$bits subscribed=$enabled" }
     if (enabled && !wasEnabled) {
       listener?.onCharacteristicSubscribed(deviceId, serviceUuid, characteristicUuid.toString())
     } else if (!enabled && wasEnabled) {
@@ -2169,7 +2189,7 @@ class GattServerManager(
       for ((characteristic, write) in deferred) {
         @Suppress("DEPRECATION")
         if (!characteristic.value.contentEquals(write.baseline)) {
-          Log.d(TAG, "Deferred write to ${characteristic.uuid} was superseded, keeping the newer value")
+          logDebug { "Deferred write to ${characteristic.uuid} was superseded, keeping the newer value" }
           continue
         }
         @Suppress("DEPRECATION")
