@@ -125,16 +125,21 @@ class ExpoGattServerModule : Module() {
 
       try {
         val requestTimeoutMs = parseRequestTimeout(options["requestTimeoutMs"])
+        // Parsed before the running server is touched, so a malformed configuration rejects without
+        // having torn down a working one. Stopping first also left `manager` referencing the stopped
+        // instance — non-null, so no later call reported ERR_NO_SERVER, and every one of them addressed
+        // a server that no longer existed. The same parse is handed over as a factory below, for the
+        // rebuild that follows a power cycle.
+        parseServices(services)
+        val delegations = parseDelegations(services)
+
         manager?.stop()
         val mgr = GattServerManager(context, requestTimeoutMs)
         mgr.listener = createListener()
         mgr.onStateChange = { state ->
           sendEvent("onBluetoothStateChanged", bundleOf("state" to state))
         }
-        // Parse once up front so malformed configuration rejects synchronously, then hand the
-        // manager a factory it can call again to rebuild the services after a power cycle.
-        parseServices(services)
-        mgr.setDelegations(parseDelegations(services))
+        mgr.setDelegations(delegations)
         manager = mgr
         // Resolves only once every service is confirmed registered — until then the server has no
         // attributes to expose and advertising it would be meaningless.
