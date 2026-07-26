@@ -228,8 +228,19 @@ public class ExpoGattServerModule: Module {
         promise.reject("ERR_ADVERTISE", error.localizedDescription)
         return
       }
-      // Already range-checked in JavaScript against the same bound Android enforces.
-      let timeoutMs = (config["timeoutMs"] as? NSNumber)?.intValue ?? 0
+      let timeoutMs: Int
+      do {
+        timeoutMs = try parseTimeoutMs(
+          config["timeoutMs"],
+          field: "advertising timeout",
+          bound: maxAdvertisingTimeoutMs,
+          default: 0,
+          boundDescription: "\(maxAdvertisingTimeoutMs) milliseconds, where 0 means no time limit"
+        )
+      } catch {
+        promise.reject("ERR_ADVERTISE", error.localizedDescription)
+        return
+      }
 
       DispatchQueue.main.async {
         guard let mgr = self.manager else {
@@ -485,18 +496,15 @@ public class ExpoGattServerModule: Module {
 
   /// Anything outside 0...255 would be silently corrupted by a clamping or truncating conversion.
   private func parseRequestTimeout(_ value: Any?) throws -> Int {
-    guard let value = value else { return defaultRequestTimeoutMs }
-    guard let millis = (value as? NSNumber)?.intValue,
-          (value as? NSNumber)?.doubleValue == Double(millis),
-          millis >= 0, millis < attTransactionTimeoutMs else {
-      throw GattArgumentError(
-        message: "Invalid request timeout \(value). Expected an integer between 0 and " +
-          "\(attTransactionTimeoutMs - 1) milliseconds — below the ATT transaction timeout of " +
-          "\(attTransactionTimeoutMs) ms, past which the central has already given up — where 0 " +
-          "disables the timeout."
-      )
-    }
-    return millis
+    try parseTimeoutMs(
+      value,
+      field: "request timeout",
+      bound: attTransactionTimeoutMs - 1,
+      default: defaultRequestTimeoutMs,
+      boundDescription: "\(attTransactionTimeoutMs - 1) milliseconds — below the ATT transaction " +
+        "timeout of \(attTransactionTimeoutMs) ms, past which the central has already given up — " +
+        "where 0 disables the timeout"
+    )
   }
 
   /// Absent or empty `delegate` configuration produces no entry, so the default stays fully automatic.

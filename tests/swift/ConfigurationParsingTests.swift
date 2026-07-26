@@ -93,3 +93,69 @@ final class ConfigurationParsingTests: XCTestCase {
     XCTAssertThrowsError(try parseBytes([-1], field: "notification"))
   }
 }
+
+/// The millisecond durations a configuration carries.
+///
+/// Re-checked natively rather than trusted from the TypeScript layer, because the native module is
+/// reachable directly — the same rule the byte and UUID checks follow. Android has always re-checked
+/// these; iOS took the advertising timeout on trust, and the two platforms disagreed on exactly the
+/// input Swift bridges and Kotlin does not.
+final class TimeoutParsingTests: XCTestCase {
+  private func advertisingTimeout(_ value: Any?) throws -> Int {
+    try parseTimeoutMs(
+      value, field: "advertising timeout", bound: maxAdvertisingTimeoutMs,
+      default: 0, boundDescription: "\(maxAdvertisingTimeoutMs) milliseconds"
+    )
+  }
+
+  func testAnAbsentTimeoutTakesTheDefault() throws {
+    XCTAssertEqual(try advertisingTimeout(nil), 0)
+    XCTAssertEqual(try advertisingTimeout(NSNull()), 0)
+  }
+
+  func testTheBoundsAreInclusiveAtBothEnds() throws {
+    XCTAssertEqual(try advertisingTimeout(0.0), 0)
+    XCTAssertEqual(try advertisingTimeout(Double(maxAdvertisingTimeoutMs)), maxAdvertisingTimeoutMs)
+  }
+
+  func testAValueOutsideTheBoundsIsRejected() {
+    XCTAssertThrowsError(try advertisingTimeout(-1.0))
+    XCTAssertThrowsError(try advertisingTimeout(Double(maxAdvertisingTimeoutMs) + 1))
+  }
+
+  func testAFractionalValueIsRejected() {
+    XCTAssertThrowsError(try advertisingTimeout(1.5))
+  }
+
+  /// The case the platforms disagreed on. Swift bridges `Bool` to `NSNumber`, so `true` decoded as `1`
+  /// and silently stopped the advertisement a millisecond later; Kotlin's `Boolean` is not a `Number`,
+  /// so Android threw. `parseByteArray` guards the same hazard for byte values.
+  func testABooleanIsRejectedRatherThanBridgedToOne() {
+    XCTAssertThrowsError(try advertisingTimeout(true)) { error in
+      XCTAssertTrue(
+        (error as? GattArgumentError)?.message.contains("advertising timeout") == true,
+        "\(error)"
+      )
+    }
+    XCTAssertThrowsError(try advertisingTimeout(false))
+  }
+
+  func testANonNumberIsRejected() {
+    XCTAssertThrowsError(try advertisingTimeout("2000"))
+    XCTAssertThrowsError(try advertisingTimeout(["2000"]))
+  }
+
+  /// The two callers differ only in their bound, so the request timeout's own limit has to hold.
+  func testTheRequestTimeoutStaysBelowTheAttTransactionTimeout() throws {
+    let parse = { (value: Any?) in
+      try parseTimeoutMs(
+        value, field: "request timeout", bound: attTransactionTimeoutMs - 1,
+        default: defaultRequestTimeoutMs, boundDescription: "\(attTransactionTimeoutMs - 1) ms"
+      )
+    }
+
+    XCTAssertEqual(try parse(nil), defaultRequestTimeoutMs)
+    XCTAssertEqual(try parse(Double(attTransactionTimeoutMs - 1)), attTransactionTimeoutMs - 1)
+    XCTAssertThrowsError(try parse(Double(attTransactionTimeoutMs)))
+  }
+}

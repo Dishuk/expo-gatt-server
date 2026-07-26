@@ -13,6 +13,33 @@ struct GattArgumentError: LocalizedError {
   var errorDescription: String? { message }
 }
 
+/// The longest advertising duration `AdvertiseSettings.Builder.setTimeout` accepts, applied here too so
+/// one configuration behaves the same either side. iOS emulates the limit with a timer of its own.
+let maxAdvertisingTimeoutMs = 180_000
+
+/// Decodes a millisecond duration out of an untyped configuration map, refusing anything that is not a
+/// whole number in `0...bound`.
+///
+/// Re-checked natively rather than trusted from the TypeScript layer, on the same grounds as the
+/// duplicate-UUID and byte-range checks: the native module is reachable directly. Android has always
+/// re-checked these; iOS took the advertising timeout on trust, and Swift bridges `Bool` to `NSNumber`
+/// where Kotlin's `Boolean` is not a `Number` — so `timeoutMs: true` threw on Android and, on iOS,
+/// resolved and then silently stopped the advertisement one millisecond later.
+internal func parseTimeoutMs(
+  _ value: Any?, field: String, bound: Int, default fallback: Int, boundDescription: String
+) throws -> Int {
+  guard let value = value, !(value is NSNull) else { return fallback }
+  guard !(value is Bool),
+        let number = value as? NSNumber,
+        let millis = Int(exactly: number.doubleValue),
+        millis >= 0, millis <= bound else {
+    throw GattArgumentError(
+      message: "Invalid \(field) \(value). Expected an integer between 0 and \(boundDescription)."
+    )
+  }
+  return millis
+}
+
 /// Converts an already-typed array of byte values.
 ///
 /// Used for the arguments expo-modules-core decodes for us — a declared `[Int]` parameter goes through
