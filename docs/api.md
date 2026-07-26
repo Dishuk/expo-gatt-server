@@ -944,8 +944,11 @@ plain characteristic written beside it.
 
 > **iOS shares one `requestId` across a batch.** CoreBluetooth delivers writes as an array and
 > requires exactly one `respond(to:withResult:)` per callback, passing the first request. So one batch
-> emits one event per attribute written, all carrying the **same** `requestId`, and the first
-> `sendResponse` for that id answers the whole batch. Later calls for it reject with
+> emits one event per attribute written, all carrying the **same** `requestId`, and that id is answered
+> once for the whole batch. Exactly one of those events carries `responseNeeded: true` — the batch is
+> answered as a unit, and answering it covers every attribute in it. Any other delegated attribute in
+> the same batch still receives its event and can commit its value with `updateCharacteristicValue`; it
+> must not call `sendResponse` again, and a second call for the same id rejects with
 > `REQUEST_NOT_FOUND`. On Android each direct write request has its own id, but an execute is a single
 > request, so a reliable write behaves the same way there.
 
@@ -965,6 +968,10 @@ execute:
   were received, then applied atomically. One event per attribute is emitted with the **reassembled**
   value and `offset: 0`, rather than one per fragment.
 - **Flag `0x00`** -- everything queued is discarded and nothing is applied or emitted.
+>
+> Fragments are **not** replayed. A long write split into several `ATT_PREPARE_WRITE_REQ` PDUs raises
+> one event per attribute, carrying the assembled value at `offset: 0` — the same shape Android
+> reports.
 - A fragment starting past the end of its attribute fails the whole execute with
   `ATT_ERROR_INVALID_OFFSET` and discards the queue.
 - More than 64 queued fragments are refused with `ATT_ERROR_PREPARE_QUEUE_FULL`; the already-queued
