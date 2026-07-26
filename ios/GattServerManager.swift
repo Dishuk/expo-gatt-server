@@ -617,7 +617,17 @@ class GattServerManager: NSObject {
       completion(GattServerError.databaseNotPublished)
       return
     }
-    claimAdvertisingCompletion()?(advertisingError("Advertising restarted"))
+    let displaced = claimAdvertisingCompletion()
+    displaced?(advertisingError("Advertising restarted"))
+    // Taken off the air before the replacement goes on it. `peripheralManagerDidStartAdvertising` names
+    // no particular call, so two starts issued without a stop between them leave one callback to settle
+    // whichever completion is installed when it arrives — reporting the outcome of one advertisement
+    // against the promise of the other. Two *can* be issued back to back: `flushReadinessWaiters`
+    // releases everyone parked in one turn, and the documented pattern of calling `startAdvertising`
+    // before `createServer` resolves is exactly how more than one comes to be parked.
+    if displaced != nil {
+      peripheralManager?.stopAdvertising()
+    }
     advertisingCompletion = completion
     var advertisementData: [String: Any] = [:]
     if let name = localName {
