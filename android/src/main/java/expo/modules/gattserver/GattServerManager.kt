@@ -1426,14 +1426,21 @@ class GattServerManager(
     }
 
     val wasEnabled = isSubscribed(deviceId, address)
-    if (bits == 0) {
-      val forDevice = subscriptions[deviceId]
-      forDevice?.remove(address)
-      if (forDevice != null && forDevice.isEmpty()) {
-        subscriptions.remove(deviceId, forDevice)
+    // Both branches go through `compute`, which holds the bin lock for the key, so the whole
+    // read-modify-write is one step on the outer map. Android 13+ gives one connection several concurrent
+    // ATT bearers, so two CCCD writes from the same central really do arrive on two binder threads.
+    //
+    // `getOrPut` is `get() ?: put()`: both threads saw no inner map, both built one, and the second
+    // replaced the first — stranding whatever the loser had recorded, so the central looked unsubscribed
+    // to every later send. The removal had the matching hazard: `remove(deviceId, forDevice)` matches on
+    // the instance, so a subscription added between the emptiness check and the removal went with it.
+    subscriptions.compute(deviceId) { _, forDevice ->
+      if (bits == 0) {
+        forDevice?.remove(address)
+        if (forDevice.isNullOrEmpty()) null else forDevice
+      } else {
+        (forDevice ?: ConcurrentHashMap()).also { it[address] = bits }
       }
-    } else {
-      subscriptions.getOrPut(deviceId) { ConcurrentHashMap() }[address] = bits
     }
 
     val serviceUuid = address.service.toString()
