@@ -276,8 +276,15 @@ class ExpoGattServerModule : Module() {
       offset: Int,
       value: List<Int>,
       promise: Promise ->
+      // `REQUEST_NOT_FOUND` rather than `ERR_NO_SERVER`, matching iOS and what `docs/api.md` documents
+      // for both. Answering a request the module no longer holds is a missing request either way: with no
+      // server there are no pending requests at all — `stop` answered and discarded them — so the lookup
+      // below could only have failed anyway. A handler that resolves after the server was stopped, which
+      // is the ordinary unmount race, therefore gets one code to branch on rather than one per platform.
       val mgr = manager ?: run {
-        promise.reject("ERR_NO_SERVER", "Server not created", null)
+        promise.reject(
+          "REQUEST_NOT_FOUND", "Request $requestId not found or already responded", null
+        )
         return@AsyncFunction
       }
       try {

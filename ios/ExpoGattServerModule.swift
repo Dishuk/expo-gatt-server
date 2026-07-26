@@ -333,12 +333,12 @@ public class ExpoGattServerModule: Module {
         return
       }
       DispatchQueue.main.async {
-        // `REQUEST_NOT_FOUND` rather than `ERR_NO_SERVER`, because that is what the situation is and
-        // what Android reports: its `sendResponse` looks the request up before it checks the server, so
-        // answering one the module no longer holds is a missing request on both platforms. With no
-        // manager there are no pending requests at all — `stop` answered and discarded them — so the
-        // lookup could only have failed anyway. `docs/api.md` invites branching on `code` without
-        // branching on `Platform.OS`, and this was one of the places that did not hold.
+        // `REQUEST_NOT_FOUND` rather than `ERR_NO_SERVER`, because that is what the situation is:
+        // answering a request the module no longer holds is a missing request. With no manager there are
+        // no pending requests at all — `stop` answered and discarded them — so the lookup could only have
+        // failed anyway. Android's binding reports the same code here, for the same reason;
+        // `docs/api.md` invites branching on `code` without branching on `Platform.OS`, and this is one
+        // of the places that has to hold for that to be true.
         guard let mgr = self.manager else {
           promise.reject(
             "REQUEST_NOT_FOUND", "Request \(requestId) not found or already responded"
