@@ -229,6 +229,9 @@ class GattServerManager(
     fun onCharacteristicUnsubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
   }
 
+  // Set from the binding and cleared by `stop` on the JavaScript thread, then read from binder and main
+  // threads, so the write has to be visible to them.
+  @Volatile
   var listener: Listener? = null
 
   // `as?` rather than a cast: a device with no Bluetooth returns null from `getSystemService`, and a
@@ -504,6 +507,9 @@ class GattServerManager(
   }
 
   /** Invoked for every adapter state change while the server is open. */
+  // As with `listener`: written from the JavaScript thread, read from the main thread's broadcast
+  // receiver.
+  @Volatile
   var onStateChange: ((String) -> Unit)? = null
 
   private val stateReceiverRegistered = AtomicBoolean(false)

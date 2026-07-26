@@ -10,6 +10,14 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import java.util.UUID
 
 class ExpoGattServerModule : Module() {
+  /**
+   * Written by `createServer` on Expo's `AsyncFunctionQueue` and read by the synchronous `stopServer`
+   * and `stopAdvertising` on the JavaScript thread, so the write has to be published across them.
+   * Without `@Volatile` a `stopServer()` issued shortly after `createServer` could read a stale `null`
+   * and silently do nothing, leaking the `BluetoothGattServer`, its broadcast receiver and any live
+   * advertisement.
+   */
+  @Volatile
   private var manager: GattServerManager? = null
 
   /**
