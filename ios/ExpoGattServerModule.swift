@@ -6,6 +6,40 @@ public class ExpoGattServerModule: Module {
   /// note on `GattServerManager`.
   private var manager: GattServerManager?
 
+  /// Counts `stopServer` calls, so a `createServer` still in flight can tell that the application asked
+  /// to tear down after it started.
+  ///
+  /// `createServer` is an `AsyncFunction`, so its body runs on Expo's worker queue and only then hops to
+  /// the main queue; `stopServer` is a synchronous `Function` whose body runs on the JS thread and hops
+  /// directly. A `createServer(); stopServer();` pair — an effect that sets up and returns its teardown,
+  /// unmounted before the promise settles — can therefore reach the main queue in the opposite order:
+  /// the stop finds no manager and does nothing, then the create publishes the whole database. The
+  /// application believes it has no server while the services stay in the process-wide GATT database
+  /// with no handle left to remove them.
+  ///
+  /// This is the same hazard `advertisingStopEpoch` covers for advertising in `src/index.ts`, which
+  /// `createServer` was simply never given.
+  ///
+  /// Guarded by a lock rather than confined to the main queue, because the whole point is to be read
+  /// from the worker queue before the hop and written from the JS thread without one — the two threads
+  /// whose ordering is the thing being recovered.
+  private let serverStopEpochLock = NSLock()
+  private var serverStopEpochValue = 0
+
+  private var serverStopEpoch: Int {
+    serverStopEpochLock.lock()
+    defer { serverStopEpochLock.unlock() }
+    return serverStopEpochValue
+  }
+
+  /// Called synchronously on the JS thread, so the recorded order is the order the application issued
+  /// the calls in — not the order their main-queue blocks happen to run.
+  private func recordServerStop() {
+    serverStopEpochLock.lock()
+    defer { serverStopEpochLock.unlock() }
+    serverStopEpochValue += 1
+  }
+
   private func checkBluetoothAuthorization() -> String? {
     switch CBManager.authorization {
     case .denied:
@@ -113,6 +147,9 @@ public class ExpoGattServerModule: Module {
         return
       }
 
+      // Read before any parsing, so a `stopServer` issued at any point from here on is seen below.
+      let epoch = self.serverStopEpoch
+
       do {
         let requestTimeoutMs = try self.parseRequestTimeout(options["requestTimeoutMs"])
         var initialValues: [CharacteristicAddress: Data] = [:]
@@ -135,6 +172,12 @@ public class ExpoGattServerModule: Module {
         // Only the parsing above is queue-agnostic; the manager is built and opened on the main queue.
         let parsedValues = initialValues
         DispatchQueue.main.async {
+          // The application asked to stop while this create was still parsing. Publishing now would
+          // leave a database nothing holds a handle to, so nothing is opened at all.
+          guard self.serverStopEpoch == epoch else {
+            promise.reject("ERR_NO_SERVER", "Server was stopped before it finished opening")
+            return
+          }
           self.manager?.stop()
           let mgr = GattServerManager(requestTimeoutMs: requestTimeoutMs)
           mgr.setDelegations(delegations)
@@ -356,6 +399,10 @@ public class ExpoGattServerModule: Module {
 
     OnDestroy {
       // The block captures the module strongly, so deferring the teardown cannot skip it.
+      // Recorded here, on the JS thread, rather than inside the block: a `createServer` still parsing
+      // on the worker queue reaches the main queue after this block does, and would otherwise publish
+      // a database this call was meant to prevent.
+      self.recordServerStop()
       DispatchQueue.main.async {
         self.manager?.stop()
         self.manager = nil
@@ -364,6 +411,7 @@ public class ExpoGattServerModule: Module {
   }
 
   /// `CBPeripheralManager.startAdvertising` silently ignores every key but the local name and service
+      self.recordServerStop()
   /// UUIDs. Only the options that change what a scanner *observes* are rejected here, since dropping
   /// those yields a peripheral that appears to advertise yet can never be found by a central filtering
   /// on them. `mode`, `txPowerLevel` and `includeTxPowerLevel` are merely radio hints, warned about in
