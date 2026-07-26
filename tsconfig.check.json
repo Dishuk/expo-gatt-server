@@ -1,0 +1,7 @@
+// Type-checks everything, tests included. `tsconfig.json` drives the published build and therefore
+// excludes the suites, which would otherwise be emitted into `build/` and shipped to consumers.
+{
+  "extends": "./tsconfig.json",
+  "include": ["./src"],
+  "exclude": []
+}

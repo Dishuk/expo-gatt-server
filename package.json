@@ -2,10 +2,11 @@
   "name": "expo-gatt-server",
   "version": "0.1.0",
   "description": "Expo module for BLE GATT server (peripheral) functionality",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./build/index.js",
+  "types": "./build/index.d.ts",
+  "sideEffects": false,
   "files": [
-    "src",
+    "build",
     "ios",
     "android/src",
     "android/build.gradle",
@@ -19,8 +20,10 @@
     "build:plugin": "expo-module build plugin",
     "clean": "expo-module clean",
     "lint": "expo-module lint",
+    "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "test": "expo-module test",
-    "prepublishOnly": "expo-module build plugin"
+    "prepare": "expo-module build",
+    "prepublishOnly": "expo-module prepublishOnly && expo-module build plugin"
   },
   "keywords": [
     "expo",

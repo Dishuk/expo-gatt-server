@@ -128,6 +128,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The package now publishes compiled JavaScript.** `main` and `types` pointed at `src/index.ts`, so
+  every consumer received raw TypeScript and type-checked this package's source under their own
+  compiler settings; the `build` script's output was never shipped at all, and the test suites were.
+  `main` is now `build/index.js` with declarations and source maps alongside it, `prepublishOnly`
+  builds both `build/` and `plugin/build/`, and the suites stay out of the tarball. No API change —
+  but anything importing a deep path into `src/` will no longer resolve.
+
 - `sendNotification`'s documented promise contract said the resolution meant the notification had been
   delivered. That is true on Android, which resolves from `onNotificationSent`, but **not on iOS**,
   where the peripheral role has no delivery callback at all and the promise resolves once CoreBluetooth
