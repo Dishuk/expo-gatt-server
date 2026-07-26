@@ -168,10 +168,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write to a delegated characteristic raised three events all claiming `responseNeeded`, and the second
   and third `sendResponse` rejected with `REQUEST_NOT_FOUND`. Exactly one event per batch now carries
   `responseNeeded: true`, since Apple answers a write callback once for the whole batch.
-- **Breaking (iOS): `sendResponse` after `stopServer` rejects with `REQUEST_NOT_FOUND`, not
-  `ERR_NO_SERVER`.** Android looks the request up before it checks the server, and `docs/api.md` invites
-  branching on `code` without also branching on `Platform.OS`. With no server there are no pending
-  requests — `stopServer` answers and discards them — so the lookup could only have failed anyway.
+- **Breaking: `sendResponse` after `stopServer` rejects with `REQUEST_NOT_FOUND`, not `ERR_NO_SERVER`,
+  on both platforms.** `docs/api.md` invites branching on `code` without also branching on
+  `Platform.OS`. With no server there are no pending requests — `stopServer` answers and discards them —
+  so the lookup could only have failed anyway, which makes a missing request the accurate description on
+  either side.
+- **Android's per-request tracing is off unless the log tag is turned up.** `Log.d` is not stripped from
+  a release build, so tracing every ATT request unconditionally put a connected central's Bluetooth
+  address — and, for descriptor traffic, the payload — into the logcat of every app shipping this
+  module. The messages are now built only when `adb shell setprop log.tag.ExpoGattServer DEBUG` has been
+  set, descriptor payloads are reported by length rather than by value, and warnings and errors are
+  unchanged.
+- **The published package no longer ships sourcemaps.** `files` ships only `build`, so every emitted map
+  pointed at `../src/index.ts`, a path no consumer's install contains — which sends a debugger to a
+  missing file rather than to the shipped output. `plugin/build` already emitted none.
+- **`npm run lint` fails on warnings.** `eslint` exits 0 on warnings and the Prettier rules are
+  registered as warnings, so the formatting configuration was enforced by nothing and CI stayed green
+  regardless of it.
 - **Breaking: an unrecognised or non-boolean `delegate` flag is now rejected.** Both native layers read
   the flags with a `?: false` fallback, so `delegate: { reed: true }` published a fully automatic
   characteristic: the listener never fired, reads were answered from the cached value, and nothing
@@ -319,6 +332,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `stopServer` issued while `createServer` was still in flight was ignored, on both platforms.**
+  `stopServer` is a synchronous `Function`, so it runs on the JavaScript thread the moment it is called,
+  while `createServer` runs later on Expo's worker queue — so the stop reached the native side first,
+  found no server to stop, and the create behind it published the whole database anyway. This is the
+  ordinary React case: an effect that sets a server up and returns a teardown, unmounted before the
+  create settles. The ordering is now recorded on the JavaScript thread, the way `stopAdvertising`
+  already was, and a create the application abandoned rejects with `ERR_NO_SERVER` and stops the server
+  it published. On Android a stop landing between the manager being installed and its `open` also used
+  to leave a `BluetoothGattServer` and a registered broadcast receiver behind with nothing holding a
+  reference to either; `open` now refuses a manager that has already been stopped.
+- **Android marked every delegated attribute of a reliable write as needing a response.** An execute is
+  a single ATT request, and one pending request stands for the whole batch — so a batch touching two
+  `delegate.write` characteristics raised two events both carrying `responseNeeded: true` and the same
+  `requestId`, and the second `sendResponse` rejected with `REQUEST_NOT_FOUND` after the first had
+  already answered the execute. Exactly one attribute is now marked, which is what iOS did and what the
+  documentation described.
+- **Answering a request after the server stopped reported a different code on each platform.** iOS
+  reported `REQUEST_NOT_FOUND` and Android `ERR_NO_SERVER`, for the same situation, on the path a
+  delegated handler resolving after unmount takes. Both now report `REQUEST_NOT_FOUND`, which is what
+  the API reference already documented for both.
+- **The bound on an in-flight notification raced the Bluetooth stack instead of outliving it.** It was
+  set to exactly the ATT transaction timeout and armed before the send rather than after, so an
+  unconfirmed indication expired here first: the real `onNotificationSent`, carrying the genuine failure
+  status, arrived to an entry already settled and was discarded, and the recovery pumped the next entry
+  while the stack still considered the previous one in flight — which it refuses, rejecting the whole
+  queued backlog in one sweep.
+- **Android left the open completion armed when opening the server threw.** `registerReceiver` and
+  `openGattServer` are binder calls that can fail; an escaping exception rejected the caller's promise
+  at the binding while leaving the publication `IN_PROGRESS` with no bound, so every later
+  `startAdvertising` parked forever and the next `stopServer` settled the already-rejected promise a
+  second time.
+- **`android.setAdapterName` could leave the phone's system-wide Bluetooth name changed for good.** The
+  restore ran only from `stopAdvertising` and the adapter coming back on, so an `AdvertiseConfig.timeoutMs`
+  elapsing, and a start that failed after the rename had been applied, both ended with nothing on the air
+  and the device still renamed. Both now restore it. A `stopServer` issued while the adapter is off still
+  cannot, which is now stated plainly rather than described as a retry that will eventually happen.
+- **iOS sized and addressed notifications with the `CBCentral` captured when the central subscribed.**
+  CoreBluetooth may vend a distinct instance per callback and reads `maximumUpdateValueLength` from
+  whichever is current, which is why every other read of it refreshes first — so a central that
+  negotiated a larger MTU after subscribing had `getMtu` report the new budget while `sendNotification`
+  rejected the very payload it had just been told would fit.
 - **iOS never resolved `startAdvertising`, and never drained a backed-up notification queue.** Two
   `CBPeripheralManagerDelegate` methods were spelled as ordinary delegate callbacks rather than as the
   selectors CoreBluetooth dispatches — `peripheralManager(_:didStartAdvertising:)` for
