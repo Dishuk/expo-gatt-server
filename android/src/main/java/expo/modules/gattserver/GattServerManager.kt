@@ -752,14 +752,22 @@ class GattServerManager(
     onReady: (error: GattServerException?) -> Unit,
     buildServices: () -> List<BluetoothGattService>,
   ) {
-    bluetoothUnavailable()?.let {
-      onReady(it)
-      return
-    }
-
     openCompletion.set(onReady)
+    // Both installed before the adapter is checked, so a server created while Bluetooth happens to be
+    // off still publishes itself when Bluetooth returns — which is what the module documents, and what
+    // iOS does by instantiating CBPeripheralManager regardless and publishing on the next `poweredOn`.
+    // Registering first also means the caller receives the state changes that tell it when to retry.
     serviceFactory.set(buildServices)
     registerStateReceiver()
+
+    bluetoothUnavailable()?.let {
+      // IDLE rather than FAILED, as the adapter going down uses: a registration round is still expected,
+      // so a caller arriving between the STATE_ON broadcast and that round parks rather than being
+      // turned away. Nobody parks while the adapter is unusable — `whenDatabasePublished` checks that
+      // first — so a device with no adapter at all cannot be left waiting on a round that never comes.
+      finishOpen(DatabasePublication.IDLE, it)
+      return
+    }
 
     if (!openServer()) {
       finishOpen(

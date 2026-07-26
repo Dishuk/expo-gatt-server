@@ -398,6 +398,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assembled, and dropped otherwise; the batch is still answered with the status JavaScript passed. On
   Android a response the stack refuses also puts the held values back, rather than leaving them applied
   for a write the central was never told about
+- A server created while Bluetooth was off stayed inert for good on Android. `createServer` rejected
+  with `ERR_BLUETOOTH` before registering the adapter-state receiver or retaining the service
+  configuration, so the re-publication the module documents on the next `poweredOn` never happened, no
+  `onBluetoothStateChanged` event ever arrived to say Bluetooth had returned, and a `startAdvertising`
+  issued once it had came back parked on a registration round that nothing would ever start — a promise
+  that never settled either way. Both are now installed before the adapter is checked, so the rejection
+  leaves behind exactly what iOS leaves behind: a server that publishes itself when Bluetooth returns
 
 ### Removed
 
