@@ -121,40 +121,42 @@ jobs:
 
   ios-integration:
     name: iOS module builds against Expo
-    runs-on: macos-15
+    # `macos-15` tops out at Xcode 26.3, and every Xcode on that image compiles Expo's packages either
+    # not at all or wrongly — see the toolchain note below. The Swift that does build them only ships
+    # with a `macos-26` image, so the runner is part of the pin, not an incidental choice.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
-      # Expo's toolchain window is bounded at both ends, so neither the runner default nor the newest
+      # Expo's toolchain window is bounded at both ends, so neither the runner default nor the oldest
       # installed Xcode works.
       #
-      # Too old: the default is Xcode 16.4, whose Swift tools are 6.1, and one of the packages Expo's
-      # prebuilt React Native artefacts resolve declares `swift-tools-version: 6.2` — SwiftPM refuses
-      # the whole dependency graph and the build dies in `ExpoModulesJSI` before it reaches this
-      # module's sources.
+      # Too old: Xcode 16.x, whose Swift tools are 6.1, and one of the packages Expo's prebuilt React
+      # Native artefacts resolve declares `swift-tools-version: 6.2` — SwiftPM refuses the whole
+      # dependency graph and the build dies in `ExpoModulesJSI` before it reaches this module's sources.
       #
-      # Too new: Xcode 26.3 (Swift 6.2.4) fails to type-check `JavaScriptCodable+Date.swift` inside
-      # that same package — `abs(milliseconds) <= maxJavaScriptDateMilliseconds` is reported as
-      # ambiguous, though it compiles standalone. That is an upstream defect against a compiler Expo
-      # 57.0.4 predates, and nothing in this repository can work around it.
+      # Also too old: Xcode 26.2 (Swift 6.2.3) and 26.3 (Swift 6.2.4) both fail to type-check
+      # `JavaScriptCodable+Date.swift` inside that same package — `abs(milliseconds) <=
+      # maxJavaScriptDateMilliseconds` is reported as ambiguous. Swift 6.3.2 (Xcode 26.5) compiles the
+      # identical sources and headers, so this is a 6.2.x type-checker defect that got fixed upstream,
+      # not something the package or this repository can be changed to work around.
       #
-      # So the version is pinned rather than discovered. Selecting the newest was what let a runner
-      # image update change the compiler under this job and turn it red on something this repository
-      # does not own; a list keeps the toolchain the same on every run while still tolerating an
-      # image that drops one entry. Revisit when Expo ships a release that builds under a newer one.
+      # So the version is pinned rather than discovered. Taking whatever the image defaults to was what
+      # let a runner image update change the compiler under this job and turn it red on something this
+      # repository does not own. 26.5 is the only version this build has been observed to pass under;
+      # newer ones are deliberately not listed as fallbacks, because an unverified fallback is how the
+      # previous pin went green in the workflow file and red on the runner. If the image drops 26.5,
+      # this fails loudly with the installed list rather than quietly building under something else.
       - name: Select an Xcode within Expo's supported Swift range
         run: |
-          for version in 26.2 26.1.1 26.0.1; do
-            candidate="/Applications/Xcode_${version}.app"
-            if [ -d "$candidate" ]; then
-              sudo xcode-select -s "$candidate"
-              echo "Selected $candidate"
-              swift --version
-              exit 0
-            fi
-          done
-          echo "None of the known-good Xcode versions (26.2, 26.1.1, 26.0.1) is installed." >&2
-          echo "Installed: $(ls -d /Applications/Xcode_*.app 2>/dev/null | tr '\n' ' ')" >&2
-          exit 1
+          candidate="/Applications/Xcode_26.5.app"
+          if [ ! -d "$candidate" ]; then
+            echo "The known-good Xcode (26.5) is not installed on this runner image." >&2
+            echo "Installed: $(ls -d /Applications/Xcode_*.app 2>/dev/null | tr '\n' ' ')" >&2
+            exit 1
+          fi
+          sudo xcode-select -s "$candidate"
+          echo "Selected $candidate"
+          swift --version
       - uses: actions/setup-node@v4
         with:
           node-version: 20
