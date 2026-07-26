@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
@@ -306,6 +307,20 @@ class GattServerManager(
   // Expiry tasks are posted here from the binder threads that register the requests, and run on the main
   // looper, which always exists for the lifetime of the process.
   private val timeoutHandler = Handler(Looper.getMainLooper())
+
+  /**
+   * The looper the server's own lifecycle work runs on: the adapter-state broadcasts, and the release of
+   * everyone parked in [whenDatabasePublished].
+   *
+   * Both do binder work — `openGattServer`, `addService`, `close`, `setName`, `startAdvertising` — and
+   * both first block on [serverLifecycleLock], which `open` and `stop` hold across binder calls of their
+   * own. Run on the main thread, as they were, a slow Bluetooth process turned an adapter toggle into an
+   * ANR: a `BroadcastReceiver` has around ten seconds before one, and the parked advertising callers
+   * released behind it are doing the same kind of work. Created with the receiver and quit with it, so
+   * its lifetime cannot outlast the server it serves.
+   */
+  @Volatile
+  private var lifecycleThread: HandlerThread? = null
   // Android delivers one notification at a time: an application "must wait for this callback to be
   // received before sending additional notifications" (onNotificationSent). Sends are therefore queued
   // per device and handed to the stack one at a time. The map is touched from the caller's thread and
@@ -633,14 +648,33 @@ class GattServerManager(
 
   private fun registerStateReceiver() {
     if (!stateReceiverRegistered.compareAndSet(false, true)) return
-    context.registerReceiver(stateReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
+    val thread = HandlerThread("ExpoGattServerLifecycle").apply { start() }
+    lifecycleThread = thread
+    // The four-argument overload is what keeps `onReceive` off the main thread. See [lifecycleThread].
+    context.registerReceiver(
+      stateReceiver,
+      IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+      null,
+      Handler(thread.looper),
+    )
   }
 
   private fun unregisterStateReceiver() {
     if (!stateReceiverRegistered.compareAndSet(true, false)) return
     runCatching { context.unregisterReceiver(stateReceiver) }
       .onFailure { Log.w(TAG, "Failed to unregister adapter state receiver", it) }
+    // `quitSafely` rather than `quit`, so a broadcast already being handled finishes rather than being
+    // abandoned holding [serverLifecycleLock].
+    lifecycleThread?.quitSafely()
+    lifecycleThread = null
   }
+
+  /**
+   * Where deferred lifecycle work runs, falling back to the main looper once the lifecycle thread has
+   * been quit — which is only after `stop`, when the work is a teardown that must still be delivered.
+   */
+  private fun lifecycleHandler(): Handler =
+    lifecycleThread?.looper?.let { Handler(it) } ?: timeoutHandler
 
   /**
    * Builds the callback for one publication round.
@@ -994,6 +1028,17 @@ class GattServerManager(
     // would silently revert whenever the adapter was power-cycled — while iOS, which re-adds the very
     // instances it built, keeps them. Nothing in the API says a power cycle empties the database.
     val retained = currentCharacteristicValues()
+    // A server this manager already holds is closed before another is opened over it. The lock
+    // serialises the callers of this function but does not stop two of them arriving: `open` registers
+    // the state receiver before it checks whether the adapter is usable, so an adapter that finishes
+    // turning on in that window has `handleAdapterOn` block here, then open a second server once `open`
+    // released the lock. The first was left unreferenced and never closed — a GATT interface
+    // registration leaked for the life of the process, still serving a live copy of the database.
+    gattServer?.let {
+      logDebug { "Closing the GATT server already open before opening another" }
+      it.close()
+      gattServer = null
+    }
     synchronized(publicationLock) { publication = DatabasePublication.IN_PROGRESS }
     // Claimed before the server exists, so the callback it is handed can name the round it serves.
     val round = publicationRound.incrementAndGet()
@@ -1161,11 +1206,13 @@ class GattServerManager(
     if (!applied) return
     openCompletion.getAndSet(null)?.invoke(error)
     if (parked.isEmpty()) return
-    // Released on the main looper rather than on the binder thread that delivered the last
+    // Released on the manager's own looper rather than on the binder thread that delivered the last
     // `onServiceAdded`: a released caller goes straight on to make binder calls of its own — the
     // advertising start, and possibly `setName` — and the GATT callback thread must not be held for
-    // those, since every later request on every connection queues behind it.
-    timeoutHandler.post { parked.forEach { it(error) } }
+    // those, since every later request on every connection queues behind it. Not the main thread
+    // either, for the same reason the adapter broadcasts are not: this is the same binder work, and
+    // enough of it to matter. See [lifecycleThread].
+    lifecycleHandler().post { parked.forEach { it(error) } }
   }
 
   /**
