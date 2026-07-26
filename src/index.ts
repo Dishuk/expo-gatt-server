@@ -258,10 +258,60 @@ function assertValidDelegate(delegate: unknown, characteristicUuid: string): voi
   }
 }
 
+/**
+ * Rejects a key no layer below will read.
+ *
+ * The same silent-drop failure `assertValidDelegate` exists for, generalised: every native parser reads
+ * the keys it knows and ignores the rest, so a misspelling is not an error anywhere — it is simply
+ * absent. `delegat` publishes a characteristic as fully automatic, `descriptor` publishes none,
+ * `serviceUUIDs` advertises no service UUIDs and leaves a central filtering on one unable to find the
+ * peripheral, and `requestTimeoutMS` silently keeps the default. None of them reports a problem, and
+ * `delegate` was the only object guarded against it.
+ */
+function assertNoUnknownKeys(value: object, allowed: readonly string[], what: string): void {
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) {
+      throw new Error(
+        `Unknown ${what} option ${JSON.stringify(key)}. Recognised options are ` +
+          `${allowed.map((option) => JSON.stringify(option)).join(', ')}. An unrecognised one is ` +
+          'read by nothing, so it would be silently ignored rather than applied.',
+      );
+    }
+  }
+}
+
+const SERVICE_KEYS = ['uuid', 'type', 'characteristics'] as const;
+const CHARACTERISTIC_KEYS = [
+  'uuid',
+  'properties',
+  'permissions',
+  'value',
+  'descriptors',
+  'delegate',
+] as const;
+const DESCRIPTOR_KEYS = ['uuid', 'value', 'permissions'] as const;
+const CREATE_SERVER_KEYS = ['requestTimeoutMs'] as const;
+const ADVERTISE_KEYS = [
+  'localName',
+  'serviceUuids',
+  'includeTxPowerLevel',
+  'connectable',
+  'mode',
+  'txPowerLevel',
+  'timeoutMs',
+  'manufacturerData',
+  'serviceData',
+  'android',
+] as const;
+const ANDROID_ADVERTISE_KEYS = ['includeDeviceName', 'setAdapterName'] as const;
+const MANUFACTURER_DATA_KEYS = ['companyId', 'data'] as const;
+const SERVICE_DATA_KEYS = ['uuid', 'data'] as const;
+
 function normalizeCharacteristic(
   characteristic: GattCharacteristicConfig,
 ): GattCharacteristicConfig {
   const uuid = normalizeUuid(characteristic?.uuid, 'characteristic');
+  assertNoUnknownKeys(characteristic, CHARACTERISTIC_KEYS, 'characteristic');
   assertEachOneOf(characteristic?.properties, CHARACTERISTIC_PROPERTIES, 'characteristic property');
   assertEachOneOf(
     characteristic?.permissions,
@@ -283,6 +333,7 @@ function normalizeCharacteristic(
           'readable and writeable.',
       );
     }
+    assertNoUnknownKeys(descriptor, DESCRIPTOR_KEYS, 'descriptor');
     assertValidBytes(descriptor?.value, 'descriptor');
     if (descriptor.permissions !== undefined) {
       assertEachOneOf(descriptor.permissions, CHARACTERISTIC_PERMISSIONS, 'descriptor permission');
@@ -374,8 +425,10 @@ export async function createServer(
   // Read before anything else, so every stop issued from here on counts as having come after this call.
   const epoch = serverStopEpoch;
   // Rebuilt rather than mutated, so the caller's own configuration object is left as they wrote it.
+  assertNoUnknownKeys(options, CREATE_SERVER_KEYS, 'createServer');
   const normalizedServices = (services ?? []).map((service) => {
     const uuid = normalizeUuid(service?.uuid, 'service');
+    assertNoUnknownKeys(service, SERVICE_KEYS, 'service');
     if (service.type !== undefined) {
       assertOneOf(service.type, SERVICE_TYPES, 'service type');
     }
@@ -515,6 +568,10 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
   // Android encodes an advertised UUID as "the shortest representation" and sizes the 31-byte budget
   // the same way, and iOS — where `CBUUID` would otherwise advertise the full sixteen octets it was
   // built from — contracts it back in `beginAdvertising`. See `CBUUID.advertisedForm`.
+  assertNoUnknownKeys(config, ADVERTISE_KEYS, 'advertising');
+  if (config.android !== undefined) {
+    assertNoUnknownKeys(config.android, ANDROID_ADVERTISE_KEYS, 'advertising android');
+  }
   const serviceUuids = config.serviceUuids?.map((uuid) => normalizeUuid(uuid, 'service'));
   if (config.mode !== undefined) {
     assertOneOf(config.mode, ADVERTISING_MODES, 'advertising mode');
@@ -542,10 +599,12 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
           'Company Identifier is a 16-bit value, so it must be an integer between 0 and 65535.',
       );
     }
+    assertNoUnknownKeys(entry, MANUFACTURER_DATA_KEYS, 'manufacturer data');
     assertValidBytes(entry.data, 'manufacturer');
   }
   const serviceData = config.serviceData?.map((entry) => {
     const uuid = normalizeUuid(entry?.uuid, 'service data');
+    assertNoUnknownKeys(entry, SERVICE_DATA_KEYS, 'service data');
     assertValidBytes(entry.data, 'service data');
     return { ...entry, uuid };
   });

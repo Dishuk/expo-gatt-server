@@ -1,6 +1,7 @@
 import {
   CLIENT_CHARACTERISTIC_CONFIGURATION_UUID,
   createServer,
+  startAdvertising,
   type CharacteristicPermission,
   type CharacteristicProperty,
   type GattCharacteristicConfig,
@@ -341,5 +342,90 @@ describe('delegate validation', () => {
   it('rejects a delegate that is not an object', async () => {
     await expect(withDelegate(true)).rejects.toThrow(/Invalid delegate/);
     await expect(withDelegate([])).rejects.toThrow(/Invalid delegate/);
+  });
+});
+
+/**
+ * A key no layer below reads is not an error anywhere: every native parser takes the keys it knows and
+ * ignores the rest, so a misspelling is simply absent. `delegate` was guarded against this and nothing
+ * else was — while the failures the others produce are the same kind, and just as silent.
+ */
+describe('an unrecognised configuration key', () => {
+  it('is rejected on a characteristic, where it would publish one fully automatic', async () => {
+    await expect(
+      createServer([
+        {
+          uuid: '180d',
+          characteristics: [
+            {
+              uuid: '2a37',
+              properties: ['read'],
+              permissions: ['readable'],
+              delegat: { read: true },
+            } as never,
+          ],
+        },
+      ]),
+    ).rejects.toThrow(/Unknown characteristic option "delegat"/);
+  });
+
+  it('is rejected on a service', async () => {
+    await expect(createServer([{ uuid: '180d', characteristic: [] } as never])).rejects.toThrow(
+      /Unknown service option "characteristic"/,
+    );
+  });
+
+  it('is rejected on a descriptor', async () => {
+    await expect(
+      createServer([
+        {
+          uuid: '180d',
+          characteristics: [
+            {
+              uuid: '2a37',
+              properties: ['read'],
+              permissions: ['readable'],
+              descriptors: [{ uuid: '2901', value: [1], permission: ['readable'] } as never],
+            },
+          ],
+        },
+      ]),
+    ).rejects.toThrow(/Unknown descriptor option "permission"/);
+  });
+
+  it('is rejected in createServer options, where it would keep the default timeout', async () => {
+    await expect(createServer([], { requestTimeoutMS: 2000 } as never)).rejects.toThrow(
+      /Unknown createServer option "requestTimeoutMS"/,
+    );
+  });
+
+  /**
+   * The advertising one is the most consequential: a peripheral that appears to advertise but that no
+   * central filtering on the UUID can find.
+   */
+  it('is rejected in an advertising config', async () => {
+    await expect(startAdvertising({ serviceUUIDs: ['180d'] } as never)).rejects.toThrow(
+      /Unknown advertising option "serviceUUIDs"/,
+    );
+  });
+
+  it('is rejected in the android advertising options', async () => {
+    await expect(startAdvertising({ android: { setAdapterNam: true } } as never)).rejects.toThrow(
+      /Unknown advertising android option "setAdapterNam"/,
+    );
+  });
+
+  it('leaves every recognised key accepted', async () => {
+    await expect(
+      startAdvertising({
+        localName: 'Harness',
+        serviceUuids: ['180d'],
+        connectable: true,
+        timeoutMs: 1000,
+        manufacturerData: [{ companyId: 1, data: [1] }],
+        serviceData: [{ uuid: '180d', data: [1] }],
+        android: { includeDeviceName: false, setAdapterName: false },
+      }),
+    ).resolves.toBeUndefined();
   });
 });
