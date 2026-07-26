@@ -28,6 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`addServerPublicationFailedListener`.** The module re-publishes the services on every transition to
+  `poweredOn` / `STATE_ON`, and until now a re-publication that *failed* reported to nobody: by then
+  `createServer` had resolved, so no promise was left to reject, and only a `startAdvertising` parked at
+  that exact moment would have heard about it. The database really is gone afterwards — `isServerRunning`
+  reports `false` and nothing retries — so an application that does not re-advertise from
+  `onBluetoothStateChanged` had no way to learn it had stopped being a peripheral. The new event carries
+  the code and message the equivalent `createServer` rejection would have carried, and is the signal to
+  call `createServer` again. It is deliberately not emitted when Bluetooth is merely turned off, which
+  `onBluetoothStateChanged` already reports and the next power-on re-publishes from, nor when a promise
+  carried the same failure.
+
+
 - **Test suites for the native peripherals, and CI that runs everything.** `npm run test:ios` (XCTest,
   via the root `Package.swift`) and `npm run test:android` (JUnit and Robolectric, via `tests/android`)
   cover the logic that is invisible until a peer connects: write assembly, response rebasing, the ATT
@@ -38,6 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   device or native app build. The concurrency is deliberately **not** covered; see
   [Development](docs/development.md#testing) for why.
 
+  A further suite reads the three sources that have to agree on a name — `ExpoGattServerModule.ts`,
+  `ExpoGattServerModule.swift` and `ExpoGattServerModule.kt` — and compares the method and event names
+  directly. Expo resolves those by string at call time, so nothing in a type system saw them, and the
+  two integration jobs compile native code against Expo without ever reading the TypeScript
+  declaration: a method renamed on both platforms passed every check and broke in a consumer's app.
+
+  The `ios-integration` job pins its Xcode rather than selecting the newest installed. Expo's toolchain
+  window is bounded at both ends — SDK 57's prebuilt artefacts need Swift 6.2, and Xcode 26.3's compiler
+  fails to type-check `ExpoModulesJSI` — so "newest" let a runner image update change the compiler under
+  the job and turn it red on something this repository does not own.
+
   `.github/workflows/ci.yml` runs all three suites, the linter, the type-checker, both builds and a
   tarball-contents check, plus two jobs that compile each native binding against the real Expo
   toolchain — `android-integration` builds `:expo-gatt-server` after an `expo prebuild`, and
@@ -46,6 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot compile, both importing Expo, and between them they are a third of the native code. The Gradle
   wrapper the Android harness commits is checked against Gradle's published checksums by
   `gradle/actions/wrapper-validation`.
+
+  The example app is linted as well as type-checked. `expo-module lint` hardcodes its target to `src`,
+  so `npm run lint` had never reached it — the rules the package fails its own build over were
+  unenforced in the one place the guides point a reader at, and it had accumulated real errors while CI
+  stayed green.
 
   The config plugin has a suite of its own, covering the two decisions that only surface in a build:
   that it raises an existing `android.hardware.bluetooth_le` requirement but never relaxes one, and the
@@ -183,6 +211,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The published package no longer ships sourcemaps.** `files` ships only `build`, so every emitted map
   pointed at `../src/index.ts`, a path no consumer's install contains — which sends a debugger to a
   missing file rather than to the shipped output. `plugin/build` already emitted none.
+- **The `expo` peer range names the SDK this is built against, and `expo-modules-core` is declared.**
+  `expo: "*"` claimed support for every SDK ever published, none of which is exercised by anything;
+  it is now `>=57.0.0`, which is what the development dependency, the guides and CI all agree on. And
+  `src/index.ts` imports `Platform` and `EventSubscription` from `expo-modules-core`, which ships in
+  `build/index.js` and `build/index.d.ts` while being declared only as a development dependency — it
+  resolved by npm's hoisting rather than by declaration, so under pnpm's isolated layout or Yarn PnP a
+  consumer's build failed on an import they never wrote.
 - **`npm run lint` fails on warnings.** `eslint` exits 0 on warnings and the Prettier rules are
   registered as warnings, so the formatting configuration was enforced by nothing and CI stayed green
   regardless of it.
@@ -332,6 +367,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subscribed central
 
 ### Fixed
+
+- **Android crashed the process on a notification longer than 512 octets.** The payload was bounded by
+  `ATT_MTU - 3` alone, which reaches 514 on a link that negotiated the maximum ATT_MTU of 517 — while an
+  attribute value may hold only 512 (Core Spec Vol 3, Part F, §3.2.9), and
+  `notifyCharacteristicChanged` answers a longer one by *throwing* rather than by reporting a status.
+  Two of the three paths that hand a queued notification to the stack are the Bluetooth binder thread
+  and the main looper, where nothing catches, so the throw took the application down. The bound is now
+  the smaller of the two, `getMtu` reports the same figure so a payload sized against it is accepted,
+  and the dispatch reports a refusal rather than letting anything escape a callback thread.
+- **A stop racing a successful advertising start left Android advertising nothing and reporting
+  otherwise.** `stopAdvertising` cleared its state before claiming the `AdvertiseCallback`, which is the
+  only thing an in-flight callback tests to recognise itself — so an `onStartSuccess` delivered midway
+  through set the flag back to `true`, re-armed the timeout and resolved the start as a *success*, after
+  which the stop took the callback and really did stop the advertisement. `isAdvertising` then reported
+  an advertisement that was not running for the rest of the process, and the caller had been told the
+  opposite of what it asked for. The callback is now claimed first. The trigger is an ordinary React
+  unmount: `startAdvertising()` followed by `stopAdvertising()`.
+- **Two Android advertising failures left the phone's Bluetooth name changed for good.** `setAdapterName`
+  renames the device system-wide, and the rename was undone on three exits but not on the two that
+  matter most: a `startAdvertising` that threw because the adapter went off between the check and the
+  call, and a start that a stop had already cancelled before the rename was applied. Both now restore it.
+- **A teardown that emptied the registration queue was read as a completed publication on Android.**
+  "No services left to register" is how the module recognises success, and it is also what an adapter
+  power-off or a `stopServer` leaves behind — while the round guard could not tell them apart, because
+  the round was only ever advanced when a *new* one started. An `onServiceAdded` delivered in that
+  window resolved `createServer` successfully for a database about to be closed, dropped the
+  `ERR_BLUETOOTH` the teardown meant to report, and left a stopped manager reporting `isServerRunning`.
+  Every teardown now discards its round.
+- **A cancelled `createServer` or `startAdvertising` could be disarmed by a call that never reached the
+  native side.** The generation that decides which call owns the compensating stop was claimed on entry,
+  before the arguments were validated — so a second call rejected by its own validation still counted as
+  the most recent one and silently took ownership from the call genuinely in flight. That call then
+  rejected saying no database was published, or nothing was on the air, while the opposite was true —
+  and on Android for good, since it carries no native epoch of its own. The generation is now claimed at
+  the hand-over, and released in a `finally` so a call whose native side rejects does not keep it either.
+- **`createServer` left an in-flight `startAdvertising` reporting success.** Both platforms stop
+  advertising as part of accepting a new server, so a start still in flight had the radio taken from
+  under it and went on to resolve anyway. It is now cancelled, as `stopServer` already did.
+- **iOS trimmed a read response from the front for a negative offset.** The check that a response is not
+  supplied from *after* the offset the central asked for passes for a negative one — `-4` is not greater
+  than `0` — and the positive skip that followed sent the central a value short of its leading octets,
+  labelled as the whole attribute, with nothing reporting it on either side. Android had been hardened
+  against exactly this and iOS had not, and the suite that exists to hold the two together never passed
+  a negative offset. Both now reject it with `ERR_RESPONSE_OFFSET`.
+- **A queued notification could wait forever on iOS, and one stalled central blocked every other.**
+  `peripheralManagerIsReady(toUpdateSubscribers:)` is the only thing that drains the transmit queue and
+  CoreBluetooth does not guarantee it, so a `sendNotification` promise behind a callback that never came
+  never settled — an `await` that hung for the life of the process. The queue bound was also shared
+  across the whole peripheral rather than per central, so one central that stopped draining filled it
+  and then refused `sendNotification` for everybody else with `ERR_NOTIFY_QUEUE_FULL`. Each parked entry
+  now expires after 35 s, the same bound Android already applied, and the bound is counted per central.
+- **Android could strand a notification in a queue nothing would drain.** The queue was looked up with a
+  non-atomic `getOrPut`, so two first sends to one device could each build one and lose whichever landed
+  first; and an entry enqueued while a teardown detached the queue was only recovered if the device was
+  *still* gone — a central that disconnected and reconnected inside that window left the entry behind
+  with no timeout armed and a promise that never settled. The queue is now registered atomically, and an
+  entry left in a detached one is settled rather than abandoned.
+- **The Android manager kept emitting events after it was stopped.** `stop` documented that it cleared
+  the listener and never did, so a manager displaced by a second `createServer` went on reporting late
+  disconnects and notification callbacks indistinguishably from the server that replaced it — and after
+  the module was destroyed the same path reached `sendEvent` on a torn-down `AppContext`, which throws
+  on a binder thread where nothing catches. iOS held its delegate weakly and was unaffected.
+- **Android could leak a `BluetoothGattServer`.** `open` registers the adapter-state receiver before it
+  checks whether the adapter is usable, so an adapter finishing its power-on in that window had the
+  broadcast open a second server over the first — which was then unreferenced, never closed, and still
+  serving a live copy of the database. A server already open is now closed before another is opened.
+- **A Bluetooth toggle could hang the Android UI thread.** The adapter-state receiver was registered
+  without a handler, so the whole server rebuild — `openGattServer`, `addService`, `setName`, and the
+  advertising starts released behind it — ran on the main thread, behind a lock held across binder calls
+  of its own. A `BroadcastReceiver` has about ten seconds before an ANR. All of it now runs on a looper
+  belonging to the manager, created with the receiver and quit with it.
+- **Android's manifest hid every consuming app from devices without Bluetooth hardware.** Google Play
+  implies `android.hardware.bluetooth` as *required* from the `BLUETOOTH` and `BLUETOOTH_ADMIN`
+  permissions, which is exactly the filtering the neighbouring `bluetooth_le` declaration exists to
+  prevent. It is now declared explicitly as not required; an app that needs it still raises it, since
+  `android:required` merges by OR.
+- **The two platforms disagreed about UUIDs and timeouts at the native boundary.** Android had no
+  short-form UUID expansion of its own, so a direct native caller passing `"180D"` succeeded on iOS and
+  threw here — the divergence the shared layer's `normalizeUuid` exists to remove, unrepeated on the
+  platform that needs it — and `java.util.UUID.fromString` silently zero-pads short groups, so
+  `"180d-0-1000-8000-00805f9b34fb"` parsed as a different UUID than it reads as. iOS meanwhile took the
+  advertising timeout on trust; Swift bridges `Bool` to `NSNumber` where Kotlin's `Boolean` is not a
+  `Number`, so `timeoutMs: true` threw on Android and, on iOS, resolved and then stopped the
+  advertisement a millisecond later. Both are now checked natively on both platforms.
+- **Two `startAdvertising` calls parked behind one publication both reached the iOS radio.** Everyone
+  waiting is released in a single turn, and `peripheralManagerDidStartAdvertising` names no particular
+  call — so one callback settled whichever completion happened to be installed, reporting the outcome of
+  one advertisement against the promise of another. The previous advertisement is now taken off the air
+  before the replacement goes on it.
+- **A mistyped configuration key was ignored rather than reported.** Every native parser reads the keys
+  it knows and ignores the rest, so `delegat` published a characteristic as fully automatic, `descriptor`
+  published none, `serviceUUIDs` advertised no service UUIDs — leaving a central filtering on one unable
+  to find the peripheral — and `requestTimeoutMS` silently kept the default. `delegate` was the only
+  object guarded against this. Every configuration object now rejects a key nothing below would read.
+
 
 - **A `stopServer` issued while `createServer` was still in flight was ignored, on both platforms.**
   `stopServer` is a synchronous `Function`, so it runs on the JavaScript thread the moment it is called,
