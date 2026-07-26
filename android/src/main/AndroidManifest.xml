@@ -11,8 +11,15 @@
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
   <!--
-    Not required, so a dependency cannot filter its consumer off Google Play on non-BLE devices.
-    An app that genuinely cannot work without BLE overrides this with required="true".
+    Neither is required, so a dependency cannot filter its consumer off Google Play on a device without
+    the hardware. An app that genuinely cannot work without BLE overrides these with required="true";
+    `android:required` merges by OR, so raising one in the app manifest wins.
+
+    `android.hardware.bluetooth` is declared as well as the BLE one because Google Play *implies* it,
+    with required="true", from the BLUETOOTH and BLUETOOTH_ADMIN permissions above — so leaving it
+    undeclared did exactly what the note about not filtering consumers says it must not: every app
+    depending on this module was hidden from devices with no Bluetooth hardware at all.
   -->
+  <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
   <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 </manifest>
