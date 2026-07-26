@@ -158,7 +158,7 @@ callback".
 | `ERR_UNSUPPORTED` | iOS only: the configuration asks for a property, permission or descriptor CoreBluetooth cannot express -- see the type tables below |
 | `ERR_BLUETOOTH` | Bluetooth is off, or the device has no BLE support. Check [`getBluetoothState`](#getbluetoothstate) to tell which |
 | `ERR_NO_SERVER` | [`stopServer`](#stopserver) ran, or Bluetooth went off, before the database finished publishing |
-| `ERR_CREATE_SERVER` | A service failed to publish, or the configuration was malformed |
+| `ERR_CREATE_SERVER` | A service failed to publish, the configuration was malformed, or the platform never acknowledged a registration within 30 s — a bound that exists only so a round that cannot finish is reported instead of leaving this promise, and every parked `startAdvertising`, pending for the life of the process. Registration is local bookkeeping that takes milliseconds, so nothing healthy approaches it; call `createServer` again to retry |
 
 A failed registration leaves **no** usable database: `isServerRunning` stays `false` and
 [`startAdvertising`](#startadvertising) rejects with `ERR_NO_SERVER`. On iOS the services that did
@@ -261,6 +261,13 @@ A parked call is always settled: a terminal Bluetooth state rejects with `ERR_BL
 rather than leaving it pending; and [`stopAdvertising`](#stopadvertising) cancels it with
 `ERR_ADVERTISE` rather than letting it advertise once the database arrives.
 
+**A `stopAdvertising` or `stopServer` issued while this call is still in flight always wins**, and rejects
+it with `ERR_ADVERTISE`, whether or not the two reached the native side in the order they were called.
+They need not: `stopAdvertising` is synchronous and runs on the JavaScript thread, while this call's native
+body runs on Expo's own worker queue, so an un-awaited start issued first can reach the peripheral *after*
+the stop behind it. The shared layer carries the call order across that gap and stops the advertisement
+again if it has to, so a stop is never silently overtaken.
+
 Bluetooth going off settles a call the platform has already accepted, too: both platforms stop the
 advertisement themselves when the adapter goes down, and neither promises a callback saying so, so the
 module rejects the outstanding call with `ERR_BLUETOOTH` instead of leaving it pending.
@@ -310,7 +317,7 @@ The split is deliberate. `mode`, `txPowerLevel` and `includeTxPowerLevel` are hi
 **Android has no per-advertisement local name.** `AdvertiseData.Builder` exposes only `setIncludeDeviceName(boolean)`, and the name that flag includes is the *adapter's* -- `BluetoothLeAdvertiser` sizes the field from `BluetoothAdapter.getNameLengthForAdvertise()`. No public API writes an arbitrary Local Name into an advertisement. Android therefore has two options, neither of which advertises `localName` as given:
 
 - **`android.includeDeviceName`** (the default whenever `localName` is set) advertises the name the device already has, in the scan response. Nothing is mutated.
-- **`android.setAdapterName`** renames the adapter to `localName` so scanners see the requested string. It defaults to `false`, so **nothing is renamed unless the app asks for it.** This changes the phone's **system-wide** Bluetooth name -- visible in the device's own Bluetooth settings and to every peer, over Classic as well as LE. The module records the previous name and restores it on `stopAdvertising`, `stopServer`, or module destruction, but restoration is best-effort: `BluetoothAdapter.setName` fails while the adapter is off, and a process killed while advertising never runs it. Prefer `includeDeviceName` unless the exact advertised name genuinely matters.
+- **`android.setAdapterName`** renames the adapter to `localName` so scanners see the requested string. It defaults to `false`, so **nothing is renamed unless the app asks for it.** This changes the phone's **system-wide** Bluetooth name -- visible in the device's own Bluetooth settings and to every peer, over Classic as well as LE. The module records the previous name and restores it on `stopAdvertising`, `stopServer`, or module destruction, retrying the next time Bluetooth is turned back on -- `BluetoothAdapter.setName` fails while the adapter is off, which is exactly when a teardown tends to run. Restoration is best-effort even so: a process killed while advertising never runs it, and neither does a teardown that happens while the adapter is off and is never followed by another power-on. Prefer `includeDeviceName` unless the exact advertised name genuinely matters.
 
 ---
 
@@ -732,6 +739,12 @@ connected simply loses the attributes it was talking to.
 For the same reason **no `onDeviceDisconnected` events are emitted** by `stopServer`. The module
 discards its own connection tracking without reporting a disconnection it did not observe, so
 `getConnectedDevices` goes empty while any actual links are still up.
+
+Because those links survive, a delegated read or write still awaiting `sendResponse` is **answered** with
+`ATT_ERROR_UNLIKELY_ERROR` rather than dropped, on both platforms. Dropping it would leave the central's
+ATT transaction unanswered until its own 30 s timeout expired, and that timeout bars every further request,
+notification and indication on the bearer — so a central that outlives the server would be left with a
+connection it can no longer use for anything.
 
 Pending work is settled rather than abandoned: an unresolved `createServer` rejects with
 `ERR_NO_SERVER`, queued notifications reject, unanswered
@@ -1208,7 +1221,7 @@ Per-characteristic opt-in delegation of ATT request handling to JavaScript. Both
 
 | Flag | Effect |
 |---|---|
-| `read` | Always emit `onCharacteristicReadRequest` and wait for `sendResponse`, even when the characteristic already has a value to serve. Without it the module answers from the last known value as soon as one exists, so the event stops firing -- which is why a computed or dynamic read needs this. A configured `value` is still used as the payload of a notification |
+| `read` | Always emit `onCharacteristicReadRequest` and wait for `sendResponse`, even when the characteristic already has a value to serve. Without it the module answers from the last known value as soon as one exists, so the event stops firing -- which is why a computed or dynamic read needs this. It changes nothing about notifications, which always carry the `value` passed to [`sendNotification`](#sendnotification) |
 | `write` | Do not acknowledge writes automatically. The write stays unapplied and unanswered, and `onCharacteristicWriteRequest` arrives with `responseNeeded: true`, until `sendResponse` is called with `GATT_SUCCESS` or an `ATT_ERROR_*` code. **This is the only way to reject a write** |
 
 Both behave identically on Android and iOS, with three notes:
@@ -1717,7 +1730,7 @@ report the same one of the faults. `sendNotification`'s order is
 | `REQUEST_DEVICE_MISMATCH` | The `requestId` is pending, but for a different device than the `deviceId` supplied |
 | `ERR_RESPONSE_OFFSET` | The `offset` given to `sendResponse` is past the offset the request asked for, so the requested bytes would be missing |
 | `ERR_NOTIFY` | The Bluetooth stack refused the notification, or reported it as undelivered. A bad address is `ERR_DEVICE_DISCONNECTED` or `ERR_CHARACTERISTIC_NOT_FOUND` instead |
-| `ERR_NOTIFY_QUEUE_FULL` | 64 notifications are already queued for the device. Await earlier sends before queueing more |
+| `ERR_NOTIFY_QUEUE_FULL` | 64 notifications are already queued — for the device on Android, for the whole peripheral manager on iOS, whose transmit queue is not per-central. Await earlier sends before queueing more |
 | `ERR_DEVICE_DISCONNECTED` | The device is not connected, or disconnected -- or on iOS unsubscribed -- before a queued notification could be delivered. Also raised by `getMtu`, `sendResponse` and Android's `disconnectDevice` |
 | `ERR_CHARACTERISTIC_NOT_FOUND` | The pair of UUIDs names nothing in the published GATT database. An unknown `serviceUuid` shares this code, since iOS cannot tell the two apart |
 | `ERR_UPDATE_VALUE` | An `updateCharacteristicValue` argument was rejected by the native layer |

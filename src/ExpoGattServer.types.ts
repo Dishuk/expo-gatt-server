@@ -254,9 +254,12 @@ export interface AndroidAdvertiseOptions {
    * is the only control Android offers over the advertised name, which is why it is exposed at all,
    * but it defaults to `false`.
    *
-   * The previous name is restored on `stopAdvertising`, `stopServer` or module destruction, but only
-   * best-effort: `BluetoothAdapter.setName` fails while the adapter is off, and a killed process
-   * never runs it. Prefer `includeDeviceName` unless the exact advertised name matters.
+   * The previous name is restored on `stopAdvertising`, `stopServer` or module destruction, and the
+   * attempt is repeated the next time Bluetooth is turned back on — `BluetoothAdapter.setName` fails
+   * while the adapter is off, which is exactly when a teardown tends to run. It stays best-effort even
+   * so: a killed process never runs it, and neither does a teardown that happens while the adapter is
+   * off and is never followed by another power-on. Prefer `includeDeviceName` unless the exact
+   * advertised name matters.
    *
    * Requires `BLUETOOTH_CONNECT` on API 31+. Rejects with `ERR_ADVERTISE` when set without a
    * `localName`.
@@ -441,6 +444,12 @@ export interface CharacteristicSubscribedEvent {
  *
  * Also emitted for every subscription a central still held when it disconnects, and when
  * Bluetooth is turned off and the published database is dropped.
+ *
+ * On iOS, losing the last subscription is additionally reported as a disconnection, because
+ * CoreBluetooth delivers the same callback either way — see `DeviceDisconnectedEvent`. A delegated read
+ * or write that central still has outstanding is **not** cancelled by that inference: it may well still
+ * be connected and about to be answered, so the request is left to `CreateServerOptions.requestTimeoutMs`
+ * instead, which ends it only if the central really has gone.
  */
 export interface CharacteristicUnsubscribedEvent {
   deviceId: string;

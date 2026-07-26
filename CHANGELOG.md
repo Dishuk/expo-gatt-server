@@ -38,9 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   device or native app build. The concurrency is deliberately **not** covered; see
   [Development](docs/development.md#testing) for why.
 
-  `.github/workflows/ci.yml` runs all three suites,
-  the linter, the type-checker, both builds and a tarball-contents check, plus a job that compiles the
-  Android module against the real Expo toolchain.
+  `.github/workflows/ci.yml` runs all three suites, the linter, the type-checker, both builds and a
+  tarball-contents check, plus two jobs that compile each native binding against the real Expo
+  toolchain — `android-integration` builds `:expo-gatt-server` after an `expo prebuild`, and
+  `ios-integration` builds the `ExpoGattServer` pod target the same way. Those two exist because
+  `ExpoGattServerModule.kt` and `ExpoGattServerModule.swift` are the only sources the host-side harnesses
+  cannot compile, both importing Expo, and between them they are a third of the native code. The Gradle
+  wrapper the Android harness commits is checked against Gradle's published checksums by
+  `gradle/actions/wrapper-validation`.
+
+  The config plugin has a suite of its own, covering the two decisions that only surface in a build:
+  that it raises an existing `android.hardware.bluetooth_le` requirement but never relaxes one, and the
+  three-way precedence of `bluetoothAlwaysPermission`. `npm run lint` and `npm run typecheck` reach
+  `plugin/src` as well as `src`, and Jest is rooted at both — a test placed under `plugin/` would
+  previously not have run at all.
 
   The TypeScript suite was consolidated at the same time, from 910 reported tests to 218, with no loss
   of coverage — verified by reintroducing twelve plausible defects and confirming each still fails the
@@ -281,6 +292,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `stopAdvertising` could be silently overtaken by the `startAdvertising` it was meant to cancel.**
+  `stopAdvertising` is synchronous, so its body runs on the JavaScript thread the moment it is called,
+  while `startAdvertising` is asynchronous and its native body runs later on Expo's own worker queue —
+  so an un-awaited start issued *first* could reach the peripheral *after* the stop behind it, read the
+  stop's own generation counter as its baseline, pass its cancellation check and put the radio on the air
+  after the application had explicitly asked for the opposite. Neither platform is told which call came
+  first; JavaScript is single-threaded, so the shared layer now carries that order across and stops the
+  advertisement again if a stop was issued while a start was in flight. The start rejects with
+  `ERR_ADVERTISE`, the code a natively-cancelled start already reports. `stopServer` cancels a pending
+  start the same way, since it stops advertising too.
+
+- **iOS dropped a central's outstanding ATT requests when the server stopped, instead of answering them.**
+  `stopServer` disconnects nobody, so a delegated read or write still awaiting `sendResponse` belonged to a
+  live bearer — and leaving it unanswered stalls that bearer until the central's own 30 s ATT transaction
+  timeout expires, after which no further request, notification or indication may be sent on it at all
+  (Core Spec Vol 3, Part F, §3.3.3). It was the one teardown path not following the rule the rest of the
+  file is built around; both platforms now answer with `ATT_ERROR_UNLIKELY_ERROR` before unpublishing.
+
+- **iOS cancelled unrelated in-flight requests when a central unsubscribed.** CoreBluetooth reports a
+  cleared Client Characteristic Configuration and a vanished central through the same callback, so losing
+  the last subscription is the only disconnect signal the peripheral role has — but treating it as one also
+  answered every pending request for that central with `ATT_ERROR_UNLIKELY_ERROR` and made the matching
+  `sendResponse` reject with `REQUEST_NOT_FOUND`. A central that simply stopped streaming while a delegated
+  write was in JavaScript's hands therefore had that write killed on a live connection. The disconnection is
+  still reported, but an inferred one no longer ends anything: a request whose central really has gone
+  expires on its own via `requestTimeoutMs`. A subscription whose owning service could not be named is also
+  no longer left behind in `getConnectedDevices` for the life of the manager.
+
+- **A registration round that was never acknowledged hung `createServer` forever.** `onServiceAdded` on
+  Android and `didAdd` on iOS are the only things that advance a publication, and neither platform
+  guarantees one arrives — nor passes anything identifying which round a callback belongs to, so an
+  acknowledgement left over from a round an adapter power cycle discarded cannot be told from the current
+  round's. Either way the wait was unbounded, taking `createServer`'s promise and every caller parked in
+  `startAdvertising` with it for the life of the process. Both platforms now bound a round at 30 s and
+  report `ERR_CREATE_SERVER`, which is retryable. Registration is local bookkeeping that completes in
+  milliseconds, so nothing healthy comes close.
+
+- **A Read Blob of a descriptor was answered with the whole value again on Android, at every offset.**
+  `onDescriptorReadRequest` handed the stack the complete value together with the request's offset, and
+  the stack copies the value into the response PDU verbatim rather than slicing it — so a central
+  continuing a descriptor longer than one PDU reassembled a repeated prefix, and an offset past the end
+  was answered with success instead of `ATT_ERROR_INVALID_OFFSET`. A `0x2901` Characteristic User
+  Description over `ATT_MTU - 1` octets is the realistic case. Descriptor reads now slice and
+  bounds-check exactly as characteristic reads already did, through the one shared function both paths
+  now use.
+
+- **A `delegate` configured on one service reached the same characteristic UUID in another.** The
+  delegation lookup fell back to a characteristic-UUID-only map whenever the exact
+  service-and-characteristic address had no entry, rather than only when the owning service could not be
+  identified at all. GATT permits the same characteristic UUID in two services and this module accepts
+  it, so the second service's characteristic — which never opted in — had its Write Without Response
+  silently discarded and its reads handed to a listener that was never going to answer them, stalling
+  each one until the request timeout. iOS resolved the exact address all along.
+
 - **A long write to iOS truncated any part of the attribute it did not cover, while Android kept it.**
   CoreBluetooth runs the queued-write procedure below the app layer and delivers its result through the
   same delegate callback as an ordinary write, with no flag telling the two apart — so every fragment at
@@ -418,8 +483,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that succeeded and exposed a half-built or empty database to scanners. Both platforms now reject with
   `ERR_NO_SERVER` unless the database is published — the same condition `isServerRunning` reports — so
   advertising an unpublished database now fails instead of exposing it. A call that arrives while the
-  database is still being published waits for it on iOS and rejects with `ERR_NO_SERVER` on Android, so
-  awaiting `createServer` — or retrying until `isServerRunning` — is what behaves the same on both. On
+  database is still being published parks until it is, on both platforms — see the entry above — so
+  `startAdvertising` is safe immediately after an unawaited `createServer`. On
   iOS the services a failed registration did manage to publish are also unpublished again, once every
   callback of that round has arrived, rather than staying in the app's shared GATT database until the
   next `createServer`
