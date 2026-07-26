@@ -1,11 +1,6 @@
 import ExpoModulesCore
 import CoreBluetooth
 
-struct GattArgumentError: LocalizedError {
-  let message: String
-  var errorDescription: String? { message }
-}
-
 public class ExpoGattServerModule: Module {
   /// Read and written only on the main queue, along with everything the manager itself owns — see the
   /// note on `GattServerManager`.
@@ -243,7 +238,7 @@ public class ExpoGattServerModule: Module {
       do {
         try self.validateUuid(serviceUuid, field: "service")
         try self.validateUuid(characteristicUuid, field: "characteristic")
-        data = try self.parseBytes(value, field: "notification")
+        data = try parseBytes(value, field: "notification")
       } catch {
         promise.reject("ERR_NOTIFY", error.localizedDescription)
         return
@@ -289,7 +284,7 @@ public class ExpoGattServerModule: Module {
     ) in
       let data: Data
       do {
-        data = try self.parseBytes(value, field: "response")
+        data = try parseBytes(value, field: "response")
       } catch {
         promise.reject("ERR_RESPONSE", error.localizedDescription)
         return
@@ -326,7 +321,7 @@ public class ExpoGattServerModule: Module {
       do {
         try self.validateUuid(serviceUuid, field: "service")
         try self.validateUuid(characteristicUuid, field: "characteristic")
-        data = try self.parseBytes(value, field: "characteristic")
+        data = try parseBytes(value, field: "characteristic")
       } catch {
         promise.reject("ERR_UPDATE_VALUE", error.localizedDescription)
         return
@@ -433,21 +428,6 @@ public class ExpoGattServerModule: Module {
   }
 
   /// Anything outside 0...255 would be silently corrupted by a clamping or truncating conversion.
-  private func parseBytes(_ value: [Int], field: String) throws -> Data {
-    var bytes: [UInt8] = []
-    bytes.reserveCapacity(value.count)
-    for (index, element) in value.enumerated() {
-      guard let byte = UInt8(exactly: element) else {
-        throw GattArgumentError(
-          message: "Invalid \(field) byte \(element) at index \(index). " +
-            "Every element must be an integer between 0 and 255."
-        )
-      }
-      bytes.append(byte)
-    }
-    return Data(bytes)
-  }
-
   private func parseRequestTimeout(_ value: Any?) throws -> Int {
     guard let value = value else { return defaultRequestTimeoutMs }
     guard let millis = (value as? NSNumber)?.intValue,
@@ -540,9 +520,8 @@ public class ExpoGattServerModule: Module {
     //
     // `[]` is a configured value, not an absent one: it declares a present but zero-length attribute,
     // which Android caches and auto-answers reads from.
-    if let bytes = map["value"] as? [Int] {
-      initialValues[CharacteristicAddress(service: service, characteristic: uuid)] =
-        try parseBytes(bytes, field: "characteristic")
+    if let bytes = try parseByteArray(map["value"], field: "characteristic") {
+      initialValues[CharacteristicAddress(service: service, characteristic: uuid)] = bytes
     }
 
     let characteristic = CBMutableCharacteristic(
@@ -597,7 +576,9 @@ public class ExpoGattServerModule: Module {
   /// CoreBluetooth, which would reject the whole service at publication time.
   private func parseDescriptorConfig(_ map: [String: Any]) throws -> CBMutableDescriptor {
     let uuid = try parseUuid(map["uuid"], field: "descriptor")
-    let bytes = try parseBytes(map["value"] as? [Int] ?? [], field: "descriptor")
+    // An absent value publishes a zero-length descriptor, which is what Android's
+    // `toByteArray(… ?: emptyList())` does.
+    let bytes = try parseByteArray(map["value"], field: "descriptor") ?? Data()
 
     switch uuid {
     case CBUUID(string: CBUUIDCharacteristicUserDescriptionString):
