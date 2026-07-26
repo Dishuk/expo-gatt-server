@@ -1265,11 +1265,12 @@ class GattServerManager(
 
     // Null only for an adapter with no multi-advertisement support, the enabled check above having ruled
     // out the other cause. No amount of retrying makes it work, so it is reported as unsupported rather
-    // than as a failed advertisement.
-    val leAdvertiser = adapter.bluetoothLeAdvertiser
-      ?: throw GattServerException(
-        "ERR_UNSUPPORTED", "BLE advertising is not supported on this device"
-      )
+    // than as a failed advertisement. The name goes back first: it was applied for an advertisement that
+    // is now never going to start, and leaving it would rename the phone for good on a call that failed.
+    val leAdvertiser = adapter.bluetoothLeAdvertiser ?: run {
+      restoreAdapterName()
+      throw GattServerException("ERR_UNSUPPORTED", "BLE advertising is not supported on this device")
+    }
     advertiser.set(leAdvertiser)
 
     val settings = AdvertiseSettings.Builder()
@@ -1323,6 +1324,8 @@ class GattServerManager(
           else -> "Advertising failed (error $errorCode)"
         }
         Log.e(TAG, "Advertising failed: $msg")
+        // Nothing is on the air, so the rename this start applied has nothing left to justify it.
+        restoreAdapterName()
         finishAdvertise(GattServerException("ERR_ADVERTISE", msg))
       }
     }
@@ -1414,7 +1417,15 @@ class GattServerManager(
    */
   private fun scheduleAdvertisingTimeout(timeoutMs: Int) {
     if (timeoutMs <= 0) return
-    val expiry = Runnable { advertising.set(false) }
+    // The name goes back with the advertisement it was applied for. The platform stops advertising at
+    // this limit without reporting it, so nothing else runs here — and an `android.setAdapterName` start
+    // that carried a `timeoutMs` used to leave the phone's system-wide Bluetooth name changed for good,
+    // with nothing on the air to justify it. iOS's equivalent expiry already goes through its own
+    // `stopAdvertising` for the same reason.
+    val expiry = Runnable {
+      advertising.set(false)
+      restoreAdapterName()
+    }
     advertisingTimeout.set(expiry)
     timeoutHandler.postDelayed(expiry, timeoutMs.toLong())
   }
@@ -2339,13 +2350,17 @@ class GattServerManager(
   @SuppressLint("MissingPermission")
   fun stop(): Unit = synchronized(serverLifecycleLock) {
     stopped = true
-    unregisterStateReceiver()
-    onStateChange = null
     serviceFactory.set(null)
     // Dropped only here, not when the adapter goes down: a power cycle rebuilds the services from the
     // factory and carries these values across, whereas a stop ends the database for good.
     publishedServices.set(emptyList())
+    // Before the receiver goes, because this is what restores an `android.setAdapterName` rename, and the
+    // receiver is the only thing that could retry it. The retry still cannot outlive this call — nothing
+    // re-registers afterwards — so a stop issued while the adapter is off leaves the name changed; that
+    // is a documented limit of `setAdapterName`, not something the ordering here can fix.
     stopAdvertising()
+    unregisterStateReceiver()
+    onStateChange = null
     pendingServices.clear()
     finishOpen(
       DatabasePublication.FAILED,

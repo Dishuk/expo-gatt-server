@@ -256,12 +256,15 @@ export interface AndroidAdvertiseOptions {
    * is the only control Android offers over the advertised name, which is why it is exposed at all,
    * but it defaults to `false`.
    *
-   * The previous name is restored on `stopAdvertising`, `stopServer` or module destruction, and the
-   * attempt is repeated the next time Bluetooth is turned back on — `BluetoothAdapter.setName` fails
-   * while the adapter is off, which is exactly when a teardown tends to run. It stays best-effort even
-   * so: a killed process never runs it, and neither does a teardown that happens while the adapter is
-   * off and is never followed by another power-on. Prefer `includeDeviceName` unless the exact
-   * advertised name matters.
+   * The previous name is restored on `stopAdvertising`, `stopServer`, module destruction, an
+   * `AdvertiseConfig.timeoutMs` elapsing, and a start that fails after the rename was applied. While a
+   * server is running the attempt is repeated the next time Bluetooth is turned back on, because
+   * `BluetoothAdapter.setName` fails while the adapter is off.
+   *
+   * It stays best-effort even so, and the gaps are worth knowing: a killed process never runs it, and
+   * **a `stopServer` issued while the adapter is off leaves the name changed for good** — the restore
+   * fails at that moment, and the adapter-state receiver that would have retried it is unregistered by
+   * the same call. Prefer `includeDeviceName` unless the exact advertised name matters.
    *
    * Requires `BLUETOOTH_CONNECT` on API 31+. Rejects with `ERR_ADVERTISE` when set without a
    * `localName`.
