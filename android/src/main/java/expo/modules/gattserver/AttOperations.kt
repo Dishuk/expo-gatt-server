@@ -136,10 +136,16 @@ internal fun cccdEnables(bits: Int, confirm: Boolean): Boolean {
  *
  * [negotiatedMtu] is `null` for a link that has not negotiated one, which still carries the
  * specification default.
+ *
+ * The bound is the smaller of what the link can carry and [MAX_ATTRIBUTE_VALUE_LENGTH]. A link that
+ * negotiated the maximum ATT_MTU of 517 leaves 514 octets for the value, which is more than an
+ * attribute may hold — and `notifyCharacteristicChanged` answers that by throwing rather than by
+ * reporting a status, which on the queue-draining paths means an exception on a binder thread. iOS
+ * needs no equivalent: `CBCentral.maximumUpdateValueLength` is already bounded.
  */
 internal fun mtuErrorFor(negotiatedMtu: Int?, size: Int): MtuException? {
   val mtu = negotiatedMtu ?: DEFAULT_ATT_MTU
-  val maxPayload = mtu - ATT_NOTIFICATION_HEADER_SIZE
+  val maxPayload = minOf(mtu - ATT_NOTIFICATION_HEADER_SIZE, MAX_ATTRIBUTE_VALUE_LENGTH)
   if (size <= maxPayload) return null
   val hint = if (negotiatedMtu == null) {
     " The link is still at the default ATT MTU of $DEFAULT_ATT_MTU; a central that negotiates a " +
@@ -147,10 +153,16 @@ internal fun mtuErrorFor(negotiatedMtu: Int?, size: Int): MtuException? {
   } else {
     ""
   }
+  // Named separately when the attribute bound is the binding one, so a caller on a maximum-MTU link
+  // is not told to consult an ATT_MTU that is not what refused the payload.
+  val limit = if (maxPayload == MAX_ATTRIBUTE_VALUE_LENGTH) {
+    "an attribute value may hold (Core Spec Vol 3, Part F, §3.2.9)"
+  } else {
+    "a single notification or indication can carry on this link (ATT MTU $mtu)"
+  }
   return MtuException(
     "PAYLOAD_EXCEEDS_MTU",
-    "Payload size $size exceeds the $maxPayload bytes a single notification or indication can " +
-      "carry on this link (ATT MTU $mtu). Nothing was sent.$hint"
+    "Payload size $size exceeds the $maxPayload bytes $limit. Nothing was sent.$hint"
   )
 }
 

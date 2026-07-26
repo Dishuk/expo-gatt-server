@@ -330,6 +330,39 @@ class AttOperationsTest {
     assertFalse(mtuErrorFor(negotiatedMtu = 247, size = 400)!!.message!!.contains("default ATT MTU"))
   }
 
+  /**
+   * The maximum ATT_MTU of 517 leaves 514 octets for the value, but an attribute may hold only 512
+   * (Core Spec Vol 3, Part F, §3.2.9) — and `notifyCharacteristicChanged` answers a longer one by
+   * throwing rather than by reporting a status, on whichever thread drains the queue. Measuring by
+   * `ATT_MTU - 3` alone accepted those two octets and turned them into a crash.
+   */
+  @Test
+  fun `a payload past the attribute bound is refused however large the link is`() {
+    assertNull(mtuErrorFor(negotiatedMtu = 517, size = MAX_ATTRIBUTE_VALUE_LENGTH))
+    assertNotNull(mtuErrorFor(negotiatedMtu = 517, size = MAX_ATTRIBUTE_VALUE_LENGTH + 1))
+    // 514 is what the arithmetic alone would have allowed.
+    assertNotNull(mtuErrorFor(negotiatedMtu = 517, size = 517 - ATT_NOTIFICATION_HEADER_SIZE))
+  }
+
+  /** The link is not what refused it, so the message must not send the caller to the ATT_MTU. */
+  @Test
+  fun `the attribute bound refusal names the attribute rather than the link`() {
+    val message = mtuErrorFor(negotiatedMtu = 517, size = 513)!!.message!!
+
+    assertTrue(message, message.contains("512"))
+    assertTrue(message, message.contains("attribute value"))
+    assertFalse(message, message.contains("ATT MTU 517"))
+  }
+
+  /** Below the attribute bound the link is still the binding limit, and still what is reported. */
+  @Test
+  fun `a link smaller than the attribute bound is still measured by the link`() {
+    val message = mtuErrorFor(negotiatedMtu = 247, size = 400)!!.message!!
+
+    assertTrue(message, message.contains("ATT MTU 247"))
+    assertFalse(message, message.contains("attribute value"))
+  }
+
   @Test
   fun `the mtu refusal reports the code the api documents`() {
     assertEquals("PAYLOAD_EXCEEDS_MTU", mtuErrorFor(negotiatedMtu = 23, size = 40)!!.code)

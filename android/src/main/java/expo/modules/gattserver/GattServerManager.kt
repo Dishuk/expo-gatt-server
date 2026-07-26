@@ -51,6 +51,14 @@ const val DEFAULT_ATT_MTU = 23
 const val ATT_NOTIFICATION_HEADER_SIZE = 3
 
 /**
+ * The longest an attribute value may be — Core Spec Vol 3, Part F, §3.2.9. It bounds a notification
+ * independently of the link: `ATT_MTU - 3` reaches 514 on a link that negotiated the maximum 517, and
+ * `BluetoothGattServer.notifyCharacteristicChanged` throws `IllegalArgumentException` above 512 rather
+ * than returning a status, from whichever thread called it.
+ */
+const val MAX_ATTRIBUTE_VALUE_LENGTH = 512
+
+/**
  * Upper bound on notifications waiting behind the one the platform is still delivering. Only one may be
  * outstanding per the `onNotificationSent` contract, so without a bound a producer that outruns the
  * link would grow the queue forever.
@@ -194,8 +202,14 @@ fun advertiseTxPowerFor(name: String?): Int = when (name) {
  * [mtu] is exact and the payload capacity is derived from it.
  */
 data class DeviceMtu(val mtu: Int) {
-  /** Octets that fit in one notification or indication: `ATT_MTU - 3`. */
-  val maxNotificationPayload: Int = mtu - ATT_NOTIFICATION_HEADER_SIZE
+  /**
+   * Octets that fit in one notification or indication: `ATT_MTU - 3`, bounded by what an attribute
+   * value may hold. Reported to JavaScript so a payload can be sized before it is sent, so it has to
+   * agree with what [mtuErrorFor] would accept — at the maximum ATT_MTU of 517 the arithmetic alone
+   * would promise 514, and a payload sized to that is refused.
+   */
+  val maxNotificationPayload: Int =
+    minOf(mtu - ATT_NOTIFICATION_HEADER_SIZE, MAX_ATTRIBUTE_VALUE_LENGTH)
 }
 
 /** Every flag defaults to `false`, which keeps the module answering the request itself. */
@@ -1764,7 +1778,21 @@ class GattServerManager(
     // Re-checked as well as at enqueue time: the MTU can change while an entry waits its turn, and the
     // payload must never reach the stack if it cannot be carried intact.
     mtuErrorFor(deviceId, entry.value.size)?.let { return it }
-    return notifyValue(server, entry.device, entry.characteristic, entry.confirm, entry.value)
+    // Reported as a refusal rather than allowed to propagate. Two of the three callers —
+    // `onNotificationSent` and the timeout runnable — are the Bluetooth binder thread and the main
+    // looper, where nothing catches, so a throw from the stack would take the process down instead of
+    // failing the one send. `notifyCharacteristicChanged` does throw for arguments it will not carry,
+    // and the checks above cannot be assumed to have anticipated every one of them.
+    return try {
+      notifyValue(server, entry.device, entry.characteristic, entry.confirm, entry.value)
+    } catch (e: Exception) {
+      Log.e(TAG, "The Bluetooth stack refused the notification for ${entry.characteristicUuid}", e)
+      GattServerException(
+        "ERR_NOTIFY",
+        "The Bluetooth stack refused the notification for ${entry.characteristicUuid}: " +
+          (e.message ?: e::class.java.simpleName)
+      )
+    }
   }
 
   /**
