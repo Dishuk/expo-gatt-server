@@ -282,6 +282,13 @@ class GattServerManager(
      * be committed while JavaScript may still reject the rest.
      */
     val deferredValues: Map<BluetoothGattCharacteristic, DeferredWrite> = emptyMap(),
+    /**
+     * The Client Characteristic Configuration changes the same execute carried, withheld for the same
+     * reason. Applying them up front let a rejected batch still leave the client subscribed — and its
+     * subscribe event already delivered — so the server and the central disagreed about an execute the
+     * central saw refused.
+     */
+    val clientConfigurations: List<Pair<BluetoothGattDescriptor, Int>> = emptyList(),
   ) {
     // Assigned once, immediately after construction, because the expiry has to name the entry it expires.
     // Volatile because it is armed on a binder thread and read from the main looper and the caller's.
@@ -1619,20 +1626,22 @@ class GattServerManager(
       return
     }
 
-    // Left to here rather than done during the assembly, because a subscribe or unsubscribe transition
-    // reports to a listener.
-    for ((descriptor, bits) in assembled.clientConfigurations) {
-      applyClientConfiguration(device, descriptor.characteristic, bits)
-    }
-
     // A delegated write is JavaScript's to accept or reject, so the assembled values were withheld until
-    // it answers, and one pending request stands for the whole atomic execute.
+    // it answers, and one pending request stands for the whole atomic execute. The configuration changes
+    // ride along with them: the queued-write procedure is atomic, so a subscription the same execute
+    // asked for must not survive a rejection of it.
     if (assembled.delegated.isNotEmpty()) {
       registerPendingRequest(
         requestId, device.address, offset = 0, isRead = false,
-        deferredValues = assembled.deferredValues
+        deferredValues = assembled.deferredValues,
+        clientConfigurations = assembled.clientConfigurations
       )
     } else {
+      // Applied here rather than during the assembly, because a subscribe or unsubscribe transition
+      // reports to a listener.
+      for ((descriptor, bits) in assembled.clientConfigurations) {
+        applyClientConfiguration(device, descriptor.characteristic, bits)
+      }
       gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
     }
 
@@ -1756,9 +1765,10 @@ class GattServerManager(
     offset: Int,
     isRead: Boolean,
     deferredValues: Map<BluetoothGattCharacteristic, DeferredWrite> = emptyMap(),
+    clientConfigurations: List<Pair<BluetoothGattDescriptor, Int>> = emptyList(),
   ) {
     val key = RequestKey(deviceId, requestId)
-    val pending = PendingRequest(offset, isRead, deferredValues)
+    val pending = PendingRequest(offset, isRead, deferredValues, clientConfigurations)
     // The expiry names the entry it was armed for, so one already dispatched onto the main looper when its
     // request was answered or displaced cannot remove — and answer — whatever took its place.
     val timeout = if (requestTimeoutMs > 0) Runnable { expireRequest(key, pending) } else null
@@ -1851,6 +1861,16 @@ class GattServerManager(
         "ERR_RESPONSE",
         "The Bluetooth stack did not accept the response for request $requestId"
       )
+    }
+
+    // Applied only once the acceptance has actually reached the central, and only for a success: a
+    // rejected execute leaves the client's configuration exactly as it was, which is what the central
+    // believes. Left until after the response because each transition reports to a listener, and there is
+    // nothing to undo if the send is refused.
+    if (status == BluetoothGatt.GATT_SUCCESS) {
+      for ((descriptor, bits) in pending.clientConfigurations) {
+        applyClientConfiguration(device, descriptor.characteristic, bits)
+      }
     }
   }
 
