@@ -44,6 +44,7 @@
   "homepage": "https://github.com/Dishuk/expo-gatt-server",
   "license": "MIT",
   "devDependencies": {
+    "@types/node": "^26.1.1",
     "expo": "~57.0.8",
     "expo-module-scripts": "^56.0.3",
     "expo-modules-core": "~57.0.7"

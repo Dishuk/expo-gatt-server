@@ -2,6 +2,13 @@
 // excludes the suites, which would otherwise be emitted into `build/` and shipped to consumers.
 {
   "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // The base config declares `["jest"]` alone, which is right for the published sources — they run in
+    // the app's JavaScript runtime and must not reach for Node. The suites do: `nativeSurface.test.ts`
+    // reads the native sources off disk to compare them against the shared declaration. Added only
+    // here, so a `node:` import in `src` outside a test is still an error.
+    "types": ["jest", "node"]
+  },
   "include": ["./src"],
   "exclude": []
 }

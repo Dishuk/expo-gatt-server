@@ -50,8 +50,11 @@ type DeclaredMethod = Exclude<
  * These two aliases turn both into type errors. They are types, so they cost nothing at runtime.
  *
  * What no TypeScript check here can reach is whether `ExpoGattServerModule.ts`'s hand-written
- * declaration still matches the Kotlin and the Swift. That is what the `android-integration` and
- * `ios-integration` jobs in `.github/workflows/ci.yml` compile for.
+ * declaration still matches the Kotlin and the Swift — Expo resolves those names as strings at call
+ * time, so nothing in a type system sees them. The `android-integration` and `ios-integration` jobs do
+ * not close that either: they compile native code against Expo and never read this declaration, so a
+ * method renamed on both platforms passed every one of them. `nativeSurface.test.ts` reads the three
+ * sources and compares the names directly, which is what actually holds them together.
  */
 type MissingFromMock = Exclude<DeclaredMethod, keyof typeof nativeModuleMock>;
 type ReturnTypeMismatches = {

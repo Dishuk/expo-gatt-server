@@ -8,11 +8,14 @@ import {
   addDeviceDisconnectedListener,
   addMtuChangedListener,
   addNotificationSentListener,
+  createServer,
   getBluetoothState,
   getConnectedDevices,
   isAdvertising,
   isServerRunning,
   isSupported,
+  sendNotification,
+  startAdvertising,
   stopAdvertising,
   stopServer,
   type ConnectedDevice,
@@ -145,5 +148,75 @@ describe('listener helpers', () => {
     const eventNames = helpers.map(([, eventName]) => eventName);
 
     expect(new Set(eventNames).size).toBe(helpers.length);
+  });
+});
+
+/**
+ * What the public calls actually hand over.
+ *
+ * Every argument is validated before it is forwarded, and nothing was asserting it then *arrived*:
+ * dropping `options` from the `createServer` call, so a configured `requestTimeoutMs` never reached
+ * either platform, passed the whole suite. Validating a value and forwarding it are separate mistakes.
+ */
+describe('argument forwarding', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    nativeModuleMock.createServer.mockImplementation(async () => undefined);
+    nativeModuleMock.startAdvertising.mockImplementation(async () => undefined);
+  });
+
+  it('forwards createServer options rather than validating and discarding them', async () => {
+    await createServer([], { requestTimeoutMs: 2500 });
+
+    expect(nativeModuleMock.createServer).toHaveBeenCalledWith([], { requestTimeoutMs: 2500 });
+  });
+
+  it('forwards every advertising option, not only the normalised ones', async () => {
+    await startAdvertising({
+      localName: 'Harness',
+      serviceUuids: ['180d'],
+      connectable: false,
+      timeoutMs: 5000,
+      manufacturerData: [{ companyId: 0xffff, data: [1, 2] }],
+      serviceData: [{ uuid: '180d', data: [3] }],
+      android: { setAdapterName: true, includeDeviceName: false },
+    });
+
+    expect(nativeModuleMock.startAdvertising).toHaveBeenCalledWith({
+      localName: 'Harness',
+      // Normalised to the 128-bit form on the way through, which is the one thing that does change.
+      serviceUuids: ['0000180d-0000-1000-8000-00805f9b34fb'],
+      connectable: false,
+      timeoutMs: 5000,
+      manufacturerData: [{ companyId: 0xffff, data: [1, 2] }],
+      serviceData: [{ uuid: '0000180d-0000-1000-8000-00805f9b34fb', data: [3] }],
+      android: { setAdapterName: true, includeDeviceName: false },
+    });
+  });
+
+  it('forwards the notification arguments in the order the native module declares', async () => {
+    await sendNotification('AA:BB', '180d', '2a37', [1, 2], true, { requireSubscription: false });
+
+    expect(nativeModuleMock.sendNotification).toHaveBeenCalledWith(
+      'AA:BB',
+      '0000180d-0000-1000-8000-00805f9b34fb',
+      '00002a37-0000-1000-8000-00805f9b34fb',
+      [1, 2],
+      true,
+      false,
+    );
+  });
+
+  it('defaults requireSubscription to true rather than leaving it undefined', async () => {
+    await sendNotification('AA:BB', '180d', '2a37', [1]);
+
+    expect(nativeModuleMock.sendNotification).toHaveBeenCalledWith(
+      'AA:BB',
+      expect.any(String),
+      expect.any(String),
+      [1],
+      false,
+      true,
+    );
   });
 });

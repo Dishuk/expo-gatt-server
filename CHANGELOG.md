@@ -53,7 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `plugin/src` as well as `src`, and Jest is rooted at both — a test placed under `plugin/` would
   previously not have run at all.
 
-  The TypeScript suite was consolidated at the same time, from 910 reported tests to 218, with no loss
+  The TypeScript suite was consolidated at the same time, from 910 reported tests to roughly a quarter
+  of that, with no loss
   of coverage — verified by reintroducing twelve plausible defects and confirming each still fails the
   suite. The old figure was inflated by two things that added no detection: running every suite once per
   platform to reach three `Platform.OS` conditionals, which are now covered by mocking `Platform` and
@@ -203,7 +204,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The package now publishes compiled JavaScript.** `main` and `types` pointed at `src/index.ts`, so
   every consumer received raw TypeScript and type-checked this package's source under their own
   compiler settings; the `build` script's output was never shipped at all, and the test suites were.
-  `main` is now `build/index.js` with declarations and source maps alongside it, `prepublishOnly`
+  `main` is now `build/index.js` with declarations alongside it, `prepublishOnly`
   builds both `build/` and `plugin/build/`, and the suites stay out of the tarball. No API change —
   but anything importing a deep path into `src/` will no longer resolve.
 
