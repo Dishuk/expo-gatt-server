@@ -894,6 +894,13 @@ class GattServerManager: NSObject {
     completeOpen(GattServerError.serverStopped)
     flushReadinessWaiters(GattServerError.serverStopped)
     failPendingNotifications(.serverStopped)
+    // Answered rather than dropped, and before the services go with `removeAllServices`: `stop`
+    // disconnects nobody, so a central whose read or write is still outstanding is very likely still
+    // connected, and an unanswered request stalls its ATT bearer until the 30 s transaction timeout
+    // retires it for good (Core Spec Vol 3, Part F, §3.3.3). Dropping them silently was the one teardown
+    // path that did not follow the rule the rest of this file is written around; Android answers from its
+    // own `stop` too.
+    answerAndDiscardPendingRequests(withResult: .unlikelyError) { _ in true }
     peripheralManager?.removeAllServices()
 
     // Cleared before the delegate is dropped: `peripheralManagerDidUpdateState` re-publishes
@@ -908,7 +915,6 @@ class GattServerManager: NSObject {
     centralPayloadLengths.removeAll()
     subscribedCentrals.removeAll()
     characteristicValues.removeAll()
-    discardPendingRequests { _ in true }
     delegations.removeAll()
     requestCounter = 0
     onStateChange = nil
