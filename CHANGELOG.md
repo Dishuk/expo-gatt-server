@@ -405,6 +405,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   issued once it had came back parked on a registration round that nothing would ever start — a promise
   that never settled either way. Both are now installed before the adapter is checked, so the rejection
   leaves behind exactly what iOS leaves behind: a server that publishes itself when Bluetooth returns
+- A central could be sent values from a characteristic it had never subscribed to on Android, where two
+  services declare the same characteristic UUID — which the specification permits and this module
+  accepts. Client Characteristic Configuration state was keyed by characteristic UUID alone, so
+  subscribing to one service's characteristic marked the other service's namesake subscribed too: a
+  `sendNotification` naming the second passed the `requireSubscription` check and went out over the air,
+  since `notifyCharacteristicChanged` does not consult the descriptor itself. Reads of the descriptor
+  answered with the wrong instance's bits, the second subscription raised no
+  `onCharacteristicSubscribed`, and unsubscribing from either ended both. The configuration is now keyed
+  by service and characteristic, as it already was on iOS, and an unsubscribe reported on teardown names
+  the service the client actually configured rather than the first one declaring that UUID
 
 ### Removed
 

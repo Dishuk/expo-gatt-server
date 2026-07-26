@@ -324,8 +324,14 @@ class GattServerManager(
   // "Each client has its own instantiation of the Client Characteristic Configuration" and reads and
   // writes of it only concern that client (Core Spec Vol 3, Part G, §3.3.3.3). The framework hands out
   // one shared BluetoothGattDescriptor per characteristic, so the per-client configuration is kept here
-  // instead: device address, then characteristic UUID, then the raw two-octet configuration bits.
-  private val subscriptions = ConcurrentHashMap<String, ConcurrentHashMap<UUID, Int>>()
+  // instead: device address, then the characteristic's address, then the raw two-octet configuration
+  // bits.
+  //
+  // Keyed by service as well as characteristic, because GATT permits the same characteristic UUID in two
+  // services: under a UUID-only key one instance's configuration answered for the other's, so a send to a
+  // characteristic nobody had subscribed to passed the subscription check and went out over the air.
+  private val subscriptions =
+    ConcurrentHashMap<String, ConcurrentHashMap<CharacteristicAddress, Int>>()
 
   // `BluetoothGattCharacteristic.value` and `BluetoothGattDescriptor.value` are plain non-volatile fields
   // the framework never synchronises, and the characteristic's is also — on the pre-33
@@ -398,10 +404,27 @@ class GattServerManager(
   }
 
   private fun delegationFor(characteristic: BluetoothGattCharacteristic): CharacteristicDelegation {
-    characteristic.service?.uuid?.let { serviceUuid ->
-      delegations[CharacteristicAddress(serviceUuid, characteristic.uuid)]?.let { return it }
+    addressOf(characteristic)?.let { address ->
+      delegations[address]?.let { return it }
     }
     return delegationsByCharacteristic[characteristic.uuid] ?: CharacteristicDelegation.none
+  }
+
+  /**
+   * The service-and-characteristic address of a characteristic the framework handed back, or `null` when
+   * the published database cannot name its owner.
+   *
+   * `getService()` is set for every characteristic reached through a registered service, so the search
+   * below is only ever a fallback — but the field is plain mutable state the framework owns, and an
+   * address guessed from the UUID alone is exactly what the per-service keying exists to avoid. Matching
+   * the instance the database actually holds settles it without guessing.
+   */
+  private fun addressOf(characteristic: BluetoothGattCharacteristic): CharacteristicAddress? {
+    characteristic.service?.uuid?.let { return CharacteristicAddress(it, characteristic.uuid) }
+    val owner = gattServer?.services?.firstOrNull { service ->
+      service.characteristics.any { it === characteristic }
+    } ?: return null
+    return CharacteristicAddress(owner.uuid, characteristic.uuid)
   }
 
   /** Invoked for every adapter state change while the server is open. */
@@ -654,8 +677,12 @@ class GattServerManager(
     ) {
       // A CCCD read "only shows the configuration for that client", so it is answered from this device's
       // own configuration rather than from the descriptor instance every client shares.
+      // An address that cannot be named reads as the specified default of 0x0000, which is also what a
+      // client that never configured this characteristic is entitled to see.
       val value = if (descriptor.uuid == CCCD_UUID) {
-        cccdValue(clientConfiguration(device.address, descriptor.characteristic.uuid))
+        val bits = addressOf(descriptor.characteristic)
+          ?.let { clientConfiguration(device.address, it) } ?: 0
+        cccdValue(bits)
       } else {
         synchronized(attributeValueLock) {
           @Suppress("DEPRECATION")
@@ -1194,8 +1221,9 @@ class GattServerManager(
     // Checked before the connection, and iOS checks them in the same order, so a call carrying both a
     // stale deviceId and a mistyped UUID reports the same code on either platform. The address is the
     // permanent fault of the two: no retry fixes it, while a disconnection may well resolve itself.
+    val serviceId = UUID.fromString(serviceUuid)
     val characteristicId = UUID.fromString(characteristicUuid)
-    val characteristic = server.getService(UUID.fromString(serviceUuid))
+    val characteristic = server.getService(serviceId)
       ?.getCharacteristic(characteristicId)
       ?: throw GattServerException(
         "ERR_CHARACTERISTIC_NOT_FOUND",
@@ -1209,7 +1237,8 @@ class GattServerManager(
         "ERR_DEVICE_DISCONNECTED", "Device $deviceId is not connected"
       )
 
-    if (requireSubscription && !hasEnabled(deviceId, characteristicId, confirm)) {
+    val address = CharacteristicAddress(serviceId, characteristicId)
+    if (requireSubscription && !hasEnabled(deviceId, address, confirm)) {
       val kind = if (confirm) "indications" else "notifications"
       throw GattServerException(
         "ERR_NO_SUBSCRIBER",
@@ -1293,17 +1322,16 @@ class GattServerManager(
     byteArrayOf((bits and 0xFF).toByte(), ((bits shr 8) and 0xFF).toByte())
 
   /** The two-octet configuration this client last wrote, or the specified default of 0x0000. */
-  private fun clientConfiguration(deviceId: String, characteristicUuid: UUID): Int =
-    subscriptions[deviceId]?.get(characteristicUuid) ?: 0
+  private fun clientConfiguration(deviceId: String, address: CharacteristicAddress): Int =
+    subscriptions[deviceId]?.get(address) ?: 0
 
   /**
    * Whether [deviceId] set either the notification or the indication bit of its own CCCD. This is the
    * coarse question the subscribe and unsubscribe events answer; a send asks [hasEnabled] about one
    * specific bit.
    */
-  private fun isSubscribed(deviceId: String, characteristicUuid: UUID): Boolean =
-    clientConfiguration(deviceId, characteristicUuid) and
-      (CCCD_NOTIFY_BIT or CCCD_INDICATE_BIT) != 0
+  private fun isSubscribed(deviceId: String, address: CharacteristicAddress): Boolean =
+    clientConfiguration(deviceId, address) and (CCCD_NOTIFY_BIT or CCCD_INDICATE_BIT) != 0
 
   /**
    * Whether [deviceId] enabled exactly the transmission [confirm] selects. "When a bit is set, that
@@ -1311,9 +1339,13 @@ class GattServerManager(
    * client that enabled only indications must not be handed a notification, and vice versa — gating on
    * either bit would send whichever the caller asked for regardless of the client's configuration.
    */
-  private fun hasEnabled(deviceId: String, characteristicUuid: UUID, confirm: Boolean): Boolean {
+  private fun hasEnabled(
+    deviceId: String,
+    address: CharacteristicAddress,
+    confirm: Boolean,
+  ): Boolean {
     val required = if (confirm) CCCD_INDICATE_BIT else CCCD_NOTIFY_BIT
-    return clientConfiguration(deviceId, characteristicUuid) and required != 0
+    return clientConfiguration(deviceId, address) and required != 0
   }
 
   /**
@@ -1356,21 +1388,35 @@ class GattServerManager(
   ) {
     val deviceId = device.address
     val characteristicUuid = characteristic.uuid
-    val serviceUuid = characteristic.service?.uuid?.toString() ?: ""
     val enabled = bits and (CCCD_NOTIFY_BIT or CCCD_INDICATE_BIT) != 0
-    val wasEnabled = isSubscribed(deviceId, characteristicUuid)
 
+    // An unresolvable subscription is reported but not recorded, as iOS does with the same situation:
+    // filed under the wrong service it would make a send to another service's same-named characteristic
+    // look deliverable, and the stack transmits whatever it is handed without consulting the CCCD.
+    val address = addressOf(characteristic)
+    if (address == null) {
+      Log.w(TAG, "CCCD: cannot name the service owning $characteristicUuid, not recording the subscription")
+      if (enabled) {
+        listener?.onCharacteristicSubscribed(deviceId, "", characteristicUuid.toString())
+      } else {
+        listener?.onCharacteristicUnsubscribed(deviceId, "", characteristicUuid.toString())
+      }
+      return
+    }
+
+    val wasEnabled = isSubscribed(deviceId, address)
     if (bits == 0) {
       val forDevice = subscriptions[deviceId]
-      forDevice?.remove(characteristicUuid)
+      forDevice?.remove(address)
       if (forDevice != null && forDevice.isEmpty()) {
         subscriptions.remove(deviceId, forDevice)
       }
     } else {
-      subscriptions.getOrPut(deviceId) { ConcurrentHashMap() }[characteristicUuid] = bits
+      subscriptions.getOrPut(deviceId) { ConcurrentHashMap() }[address] = bits
     }
 
-    Log.d(TAG, "CCCD: device=$deviceId char=$characteristicUuid bits=$bits subscribed=$enabled")
+    val serviceUuid = address.service.toString()
+    Log.d(TAG, "CCCD: device=$deviceId service=$serviceUuid char=$characteristicUuid bits=$bits subscribed=$enabled")
     if (enabled && !wasEnabled) {
       listener?.onCharacteristicSubscribed(deviceId, serviceUuid, characteristicUuid.toString())
     } else if (!enabled && wasEnabled) {
@@ -1380,13 +1426,13 @@ class GattServerManager(
 
   private fun clearSubscriptions(deviceId: String) {
     val forDevice = subscriptions.remove(deviceId) ?: return
-    val server = gattServer
-    for ((characteristicUuid, bits) in forDevice) {
+    for ((address, bits) in forDevice) {
       if (bits and (CCCD_NOTIFY_BIT or CCCD_INDICATE_BIT) == 0) continue
-      val serviceUuid = server?.services
-        ?.firstOrNull { service -> service.getCharacteristic(characteristicUuid) != null }
-        ?.uuid?.toString() ?: ""
-      listener?.onCharacteristicUnsubscribed(deviceId, serviceUuid, characteristicUuid.toString())
+      // The service comes from the address the subscription was recorded under, so it names the very
+      // attribute the client configured rather than the first service happening to declare that UUID.
+      listener?.onCharacteristicUnsubscribed(
+        deviceId, address.service.toString(), address.characteristic.toString()
+      )
     }
   }
 
