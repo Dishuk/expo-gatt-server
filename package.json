@@ -22,6 +22,8 @@
     "lint": "expo-module lint",
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
     "test": "expo-module test",
+    "test:ios": "swift test",
+    "test:android": "./scripts/test-android.sh",
     "prepare": "expo-module build",
     "prepublishOnly": "expo-module prepublishOnly && expo-module build plugin"
   },

@@ -1,0 +1,23 @@
+// A test-only project, deliberately independent of the published build.
+//
+// `android/build.gradle` is driven by `expo-module-gradle-plugin`, which only resolves inside a host
+// app's Gradle build — so running unit tests through it would mean prebuilding the example app and
+// dragging in the whole React Native toolchain. This project instead compiles the module's Kotlin
+// sources directly, which is enough because none of them depend on Expo once the module binding is
+// left out (see `build.gradle`).
+pluginManagement {
+  repositories {
+    google()
+    mavenCentral()
+    gradlePluginPortal()
+  }
+}
+
+dependencyResolutionManagement {
+  repositories {
+    google()
+    mavenCentral()
+  }
+}
+
+rootProject.name = 'expo-gatt-server-android-tests'

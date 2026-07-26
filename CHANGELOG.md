@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Test suites for the native peripherals, and CI that runs everything.** `npm run test:ios` (XCTest,
+  via the root `Package.swift`) and `npm run test:android` (JUnit and Robolectric, via `tests/android`)
+  cover the logic that is invisible until a peer connects: write assembly, response rebasing, the ATT
+  error-code mapping, UUID spelling, MTU arithmetic, the CCCD bits, and the permission derivation that
+  stops an unbonded central subscribing to an encrypted characteristic. Several ATT cases are duplicated
+  across the two on purpose — the platforms implement those contracts independently, and asserting the
+  same inputs produce the same bytes on each is what holds them together. Both run on the host, with no
+  device or native app build. The concurrency is deliberately **not** covered; see
+  [Development](docs/development.md#testing) for why.
+
 - An Expo config plugin, so the package configures its own build-time requirements instead of leaving
   every consumer to hand-edit `app.json`. Adding `"plugins": ["expo-gatt-server"]` writes
   `NSBluetoothAlwaysUsageDescription`, without which iOS terminates the app the moment it touches

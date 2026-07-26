@@ -1,16 +1,27 @@
 # Build outputs
 build/
 *.aar
+*.tsbuildinfo
 
 # Android
 android/build/
 android/.gradle/
 android/local.properties
 
+# Android test harness (the wrapper itself is committed)
+tests/android/.gradle/
+tests/android/build/
+tests/android/local.properties
+
 # iOS
 ios/build/
 ios/*.xcframework
 ios/Pods/
+
+# Swift Package Manager (the host-side test build)
+.build/
+.swiftpm/
+Package.resolved
 
 # Node
 node_modules/
@@ -20,10 +31,6 @@ example/node_modules/
 example/ios/
 example/android/
 example/.expo/
-
-# TypeScript build
-build/
-*.tsbuildinfo
 
 # OS
 .DS_Store
