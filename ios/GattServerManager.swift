@@ -1225,7 +1225,11 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     }
   }
 
-  func peripheralManager(_ peripheral: CBPeripheralManager, didStartAdvertising error: Error?) {
+  // Spelled as CoreBluetooth declares it. `peripheralManager(_:didStartAdvertising:)` reads like the
+  // rest of the delegate but is a different selector, and because the requirement is optional it
+  // compiles without so much as a warning — leaving this the only path that resolves a
+  // `startAdvertising` promise unreachable, so every caller hung.
+  func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
     claimAdvertisingCompletion()?(error)
   }
 
@@ -1489,7 +1493,10 @@ extension GattServerManager: CBPeripheralManagerDelegate {
 
   /// Resends only the payloads that were actually refused, oldest first, stopping as soon as the transmit
   /// queue fills again so the rest keep their place in line.
-  func peripheralManagerIsReady(_ peripheral: CBPeripheralManager) {
+  ///
+  /// The argument label is part of the selector: `peripheralManagerIsReady(_:)` is not the requirement
+  /// and is never called, which left a queue that `updateValue` had parked with nothing to drain it.
+  func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
     drainPendingNotifications()
   }
 }
