@@ -84,10 +84,12 @@ export default function App() {
       }),
       addCharacteristicReadRequestListener((event) => {
         append(`onCharacteristicReadRequest req=${event.requestId} offset=${event.offset}`);
-        sendResponse(event.deviceId, event.requestId, GATT_SUCCESS, event.offset, [
-          0,
-          counter.current,
-        ]).catch((error: unknown) => append(`sendResponse failed: ${String(error)}`));
+        // `offset: 0` because the value passed is the whole attribute; the module rebases the response
+        // onto the offset the request asked for. Passing `event.offset` here with an unsliced value
+        // would resend the prefix on a Read Blob continuation.
+        sendResponse(event.deviceId, event.requestId, GATT_SUCCESS, 0, [0, counter.current]).catch(
+          (error: unknown) => append(`sendResponse failed: ${String(error)}`),
+        );
       }),
       addCharacteristicWriteRequestListener((event) => {
         append(
@@ -152,10 +154,11 @@ export default function App() {
     {
       label: 'startAdvertising',
       onPress: run('startAdvertising', () =>
+        // `includeTxPowerLevel` is deliberately omitted: iOS cannot express it, so passing it at all —
+        // even as `false` — makes the shared layer warn on every call in the harness the guides point at.
         startAdvertising({
           localName: 'GattHarness',
           serviceUuids: [SERVICE_UUID],
-          includeTxPowerLevel: false,
           connectable: true,
         })
       ),

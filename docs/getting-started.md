@@ -312,13 +312,11 @@ import {
 
 addCharacteristicReadRequestListener(async (event) => {
   const data = [0x06, 72]; // Flags + heart rate
-  await sendResponse(
-    event.deviceId,
-    event.requestId,
-    GATT_SUCCESS,
-    event.offset,
-    data,
-  );
+  // `offset: 0` says "this value starts at the beginning of the attribute", which is what `data` is.
+  // The module rebases the response onto the offset the request actually asked for, so a Read Blob
+  // continuation is answered correctly without slicing here. Pass `event.offset` only if you have
+  // already sliced `data` to start there — passing it with the whole value resends the prefix.
+  await sendResponse(event.deviceId, event.requestId, GATT_SUCCESS, 0, data);
 });
 ```
 
@@ -426,9 +424,11 @@ await updateCharacteristicValue('180d', '2a37', heartRate);
 await sendNotification(deviceId, '180d', '2a37', heartRate);
 ```
 
-**The promise resolves when the platform reports the send as complete**, not when it is handed to the
-Bluetooth stack, and sends issued while an earlier one is still in flight are queued in order. So
-awaiting it is what paces a stream against the link:
+**What a resolved promise reports differs by platform**: on Android it means the stack finished
+transmitting (and, for an indication, that the central confirmed), while on iOS it means only that
+CoreBluetooth accepted the payload for transmission — the peripheral role has no delivery callback at
+all. Either way, sends issued while an earlier one is still in flight are queued in order, so awaiting
+it is what paces a stream against the link:
 
 ```typescript
 for (const sample of samples) {
@@ -553,8 +553,9 @@ export default function HeartRatePeripheral() {
       const bpm = 60 + Math.floor(Math.random() * 40);
       for (const deviceId of Array.from(subscribers.current)) {
         try {
-          // Awaited per device: the promise settles when the platform reports the send as
-          // complete, which paces the stream against the link instead of overrunning it.
+          // Awaited per device: the promise settles once the platform has taken the payload — on
+          // Android when the send completed, on iOS when it was queued — which paces the stream
+          // against the link instead of overrunning it.
           await sendNotification(deviceId, SERVICE_UUID, HR_CHAR_UUID, [0x06, bpm]);
         } catch (error) {
           console.warn(`notification to ${deviceId} failed`, error);

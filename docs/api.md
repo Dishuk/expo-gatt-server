@@ -1009,8 +1009,12 @@ the execute says the value is real.
 > it from.) CoreBluetooth handles the procedure below the app layer and surfaces whatever it decides
 > to surface through `didReceiveWriteRequests`, so there is nothing for the module to buffer and
 > nothing to configure. Long writes to an iOS peripheral work, and each request's `offset` is honoured
-> when its value is stored, but the batch reaches JavaScript as one event per request rather than one
-> reassembled value per attribute, and the execute cannot be rejected.
+> when its value is stored. The module assembles the batch itself, so it still reaches JavaScript as
+> one event per attribute carrying the reassembled value at `offset: 0` — the same shape Android
+> reports — and a `delegate.write` characteristic in the batch can still reject it, because an
+> `ATT_ERROR_*` passed to `sendResponse` fails the whole batch. What iOS cannot report is the
+> *distinction*: a plain `ATT_WRITE_REQ` and an executed prepared write arrive through the same
+> callback, so a write is never labelled as having been reliable.
 
 ---
 

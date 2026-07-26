@@ -299,7 +299,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every `notify` or `indicate` characteristic now carries permissions derived from that characteristic
   instead of a fixed `PERMISSION_READ | PERMISSION_WRITE`. An encrypted read or write permission raises
   the descriptor's write to `PERMISSION_WRITE_ENCRYPTED`, an MITM one to
-  `PERMISSION_WRITE_ENCRYPTED_MITM`, and an encrypted read is mirrored onto the descriptor's read.
+  `PERMISSION_WRITE_ENCRYPTED_MITM`. The descriptor's *read* stays unprotected, so a central can always
+  discover whether it is subscribed.
   Android enforces permissions per attribute handle and checks nothing at all before sending a
   notification, so a plain descriptor let an unpaired central subscribe to a characteristic whose direct
   read it was correctly refused and then receive every value in cleartext. A characteristic declaring
