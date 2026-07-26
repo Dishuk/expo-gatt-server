@@ -1825,10 +1825,18 @@ class GattServerManager(
 
     // Reported once per attribute from offset 0, rather than replaying the fragments the client happened
     // to split the value into.
+    //
+    // Exactly one attribute is marked `responseNeeded`, because the execute is a single request and one
+    // pending request stands for the whole batch — the answer covers every attribute in it. Marking each
+    // delegated attribute instead handed them all the batch's one `requestId`, so the second
+    // `sendResponse` rejected with `REQUEST_NOT_FOUND` after the first had already answered the execute.
+    // A second delegated attribute still receives its event and can commit its value with
+    // `updateCharacteristicValue`; it simply must not answer again. This is the shape iOS reports.
+    val responder = assembled.characteristicValues.keys.firstOrNull { it in assembled.delegated }
     assembled.characteristicValues.forEach { (characteristic, value) ->
       listener?.onCharacteristicWriteRequest(
         device.address, requestId, characteristic.service?.uuid?.toString() ?: "",
-        characteristic.uuid.toString(), 0, value, characteristic in assembled.delegated
+        characteristic.uuid.toString(), 0, value, characteristic === responder
       )
     }
   }
