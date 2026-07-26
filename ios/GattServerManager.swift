@@ -1057,16 +1057,31 @@ class GattServerManager: NSObject {
   /// Drops every trace of `deviceId` and reports the disconnection exactly once: a device that was
   /// never seen, or has already been reported, produces nothing.
   ///
-  /// The disconnection is inferred rather than reported, so anything the central left pending is
-  /// answered instead of dropped: it may well still be connected, and a dropped request would cost it
-  /// its ATT bearer. "Unlikely Error" is the closest code the specification offers for a valid request
-  /// the server abandoned, and is what an expiry sends too.
-  private func markDisconnected(_ deviceId: String, reason: GattServerError) {
+  /// `abortPendingRequests` says whether the central's outstanding ATT requests are ended here.
+  ///
+  /// Pass `false` where the disconnection is **inferred** — losing the last subscription, which
+  /// CoreBluetooth reports with the same callback whether the central cleared its Client Characteristic
+  /// Configuration or went away. A central that merely stopped streaming is still connected and may still
+  /// be waiting on a delegated read or write that JavaScript is about to answer; ending those here
+  /// answered a live transaction with "Unlikely Error" and made the matching `sendResponse` reject with
+  /// `REQUEST_NOT_FOUND`. Left alone, a request whose central really has gone expires on its own after
+  /// `requestTimeoutMs`, which is what that timeout is for — strictly better than guessing.
+  ///
+  /// Pass `true` only where the central is known to be gone, which on this platform means the server is
+  /// stopping or Bluetooth has left `poweredOn`.
+  private func markDisconnected(
+    _ deviceId: String, reason: GattServerError, abortPendingRequests: Bool
+  ) {
     guard connectedCentrals.removeValue(forKey: deviceId) != nil else { return }
     centralPayloadLengths.removeValue(forKey: deviceId)
     subscribedCentrals.removeValue(forKey: deviceId)
-    answerAndDiscardPendingRequests(withResult: .unlikelyError) {
-      $0.request.central.identifier.uuidString == deviceId
+    if abortPendingRequests {
+      // Answered rather than dropped: an unanswered request stalls the bearer until the 30 s ATT
+      // transaction timeout retires it. "Unlikely Error" is the closest code the specification offers for
+      // a valid request the server abandoned, and is what an expiry sends too.
+      answerAndDiscardPendingRequests(withResult: .unlikelyError) {
+        $0.request.central.identifier.uuidString == deviceId
+      }
     }
     failPendingNotifications(reason) { $0.deviceId == deviceId }
     delegate?.onDeviceDisconnected(deviceId: deviceId)
@@ -1273,8 +1288,15 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     // Configuration or simply went away, and offers nothing to tell the two apart, so losing the last
     // subscription is the only disconnect signal available. A central that unsubscribes but stays
     // connected is therefore reported as disconnected, and a later read or write re-discovers it.
-    if subscribedCentrals[deviceId]?.isEmpty == true {
-      markDisconnected(deviceId, reason: .deviceDisconnected(deviceId: deviceId))
+    //
+    // Because it is only inferred, the central's outstanding ATT requests are left alone — see
+    // [markDisconnected]. `?? true` rather than `== true`: a subscription whose service could not be
+    // named was never recorded, so the entry is missing rather than empty, and the central would
+    // otherwise stay in `connectedCentrals` for the life of the manager.
+    if subscribedCentrals[deviceId]?.isEmpty ?? true {
+      markDisconnected(
+        deviceId, reason: .deviceDisconnected(deviceId: deviceId), abortPendingRequests: false
+      )
     }
   }
 
