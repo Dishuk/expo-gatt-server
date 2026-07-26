@@ -748,7 +748,7 @@ connection it can no longer use for anything.
 
 Pending work is settled rather than abandoned: an unresolved `createServer` rejects with
 `ERR_NO_SERVER`, queued notifications reject, unanswered
-delegated requests are dropped without being answered, and a pending `startAdvertising` rejects with
+delegated requests are answered with `ATT_ERROR_UNLIKELY_ERROR` as described above, and a pending `startAdvertising` rejects with
 `ERR_ADVERTISE` -- or with `ERR_NO_SERVER` if it was still waiting for the database -- restoring the
 adapter name on Android if `android.setAdapterName` changed it. Both platforms unpublish the whole database and stop
 listening for adapter state, so a later `createServer` starts from an empty GATT database rather than

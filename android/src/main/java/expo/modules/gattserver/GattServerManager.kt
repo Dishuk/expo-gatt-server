@@ -1988,6 +1988,37 @@ class GattServerManager(
   }
 
   /** See [expo.modules.gattserver.rebasedResponseValue], which this supplies the request's offset to. */
+  /**
+   * Answers every matching request with [status] and then forgets it — the counterpart of iOS's
+   * `answerAndDiscardPendingRequests`, and the reason [discardPendingRequests] is reserved for the
+   * paths where the link is already gone.
+   *
+   * `stop` disconnects nobody, so a central whose read or write is still outstanding is very likely
+   * still connected, and dropping the request silently stalls its ATT bearer until the 30 s
+   * transaction timeout retires it — after which no further request, notification or indication may
+   * be sent on it at all (Core Spec Vol 3, Part F, §3.3.3).
+   *
+   * Must run while `gattServer` and `connectedDevices` are still populated, which is why `stop`
+   * calls it before `close()` rather than alongside its other bookkeeping.
+   */
+  @SuppressLint("MissingPermission")
+  private fun answerAndDiscardPendingRequests(status: Int, predicate: (RequestKey) -> Boolean) {
+    val iterator = pendingRequests.entries.iterator()
+    while (iterator.hasNext()) {
+      val (key, pending) = iterator.next()
+      if (!predicate(key)) continue
+      pending.timeout?.let { timeoutHandler.removeCallbacks(it) }
+      iterator.remove()
+      val device = connectedDevices[key.deviceId] ?: continue
+      gattServer?.sendResponse(device, key.requestId, status, pending.offset, null)
+    }
+  }
+
+  /**
+   * Forgets every matching request without answering it. Correct only where the central cannot hear
+   * a response anyway — a disconnect, or the adapter going down. Everywhere else use
+   * [answerAndDiscardPendingRequests].
+   */
   private fun responsePayload(
     pending: PendingRequest,
     requestId: Int,
@@ -2083,7 +2114,6 @@ class GattServerManager(
     gattServer = null
     connectedDevices.clear()
     deviceMtu.clear()
-    discardPendingRequests { true }
     preparedWrites.clear()
     failAllNotifications(GattServerException("ERR_NO_SERVER", "Server stopped"))
     subscriptions.clear()
@@ -2091,3 +2121,6 @@ class GattServerManager(
     delegationsByCharacteristic.clear()
   }
 }
+    // Answered rather than dropped, and before `close()` takes the server and the device handles the
+    // response needs with it. `stop` disconnects nobody, so these transactions are still live.
+    answerAndDiscardPendingRequests(ATT_ERROR_UNLIKELY_ERROR) { true }

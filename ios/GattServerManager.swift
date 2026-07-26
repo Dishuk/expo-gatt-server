@@ -960,8 +960,8 @@ class GattServerManager: NSObject {
     // disconnects nobody, so a central whose read or write is still outstanding is very likely still
     // connected, and an unanswered request stalls its ATT bearer until the 30 s transaction timeout
     // retires it for good (Core Spec Vol 3, Part F, §3.3.3). Dropping them silently was the one teardown
-    // path that did not follow the rule the rest of this file is written around; Android answers from its
-    // own `stop` too.
+    // path that did not follow the rule the rest of this file is written around; Android's `stop` answers
+    // them too, from `answerAndDiscardPendingRequests` and for the same reason.
     answerAndDiscardPendingRequests(withResult: .unlikelyError) { _ in true }
     peripheralManager?.removeAllServices()
 
