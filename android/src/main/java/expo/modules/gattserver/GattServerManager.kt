@@ -408,12 +408,11 @@ class GattServerManager(
     }
   }
 
-  private fun delegationFor(characteristic: BluetoothGattCharacteristic): CharacteristicDelegation {
-    addressOf(characteristic)?.let { address ->
-      delegations[address]?.let { return it }
-    }
-    return delegationsByCharacteristic[characteristic.uuid] ?: CharacteristicDelegation.none
-  }
+  /** See [resolveDelegation] for why the UUID-only map is a last resort rather than a fallback. */
+  private fun delegationFor(characteristic: BluetoothGattCharacteristic): CharacteristicDelegation =
+    resolveDelegation(
+      addressOf(characteristic), characteristic.uuid, delegations, delegationsByCharacteristic
+    )
 
   /**
    * The service-and-characteristic address of a characteristic the framework handed back, or `null` when

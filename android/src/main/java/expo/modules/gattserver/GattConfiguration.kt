@@ -124,6 +124,29 @@ internal fun parseDelegations(
 }
 
 /**
+ * The delegation configured for an attribute, given the [address] the published database named it by —
+ * `null` when it could not be named at all — and the two maps [parseDelegations] feeds.
+ *
+ * [byCharacteristic] holds only the characteristic UUIDs that appear exactly once across every service,
+ * and exists purely for the unnameable case. It is consulted **only** then. Consulting it whenever
+ * [byAddress] merely had no entry for a perfectly nameable attribute let a delegation configured on one
+ * service reach a same-named characteristic in another — which GATT permits and this module accepts, so
+ * an attribute that never opted in had its Write Without Response silently dropped and its reads handed
+ * to a listener that was never going to answer them. iOS resolves the exact address with no fallback.
+ */
+internal fun resolveDelegation(
+  address: CharacteristicAddress?,
+  characteristicUuid: UUID,
+  byAddress: Map<CharacteristicAddress, CharacteristicDelegation>,
+  byCharacteristic: Map<UUID, CharacteristicDelegation>,
+): CharacteristicDelegation {
+  if (address == null) {
+    return byCharacteristic[characteristicUuid] ?: CharacteristicDelegation.none
+  }
+  return byAddress[address] ?: CharacteristicDelegation.none
+}
+
+/**
  * `BluetoothGattServer.getService` and `BluetoothGattService.getCharacteristic` both return the first
  * match, so a repeated UUID leaves one attribute unreachable and the other addressed by both
  * spellings. Rejected in JavaScript too; repeated here because the native module is reachable

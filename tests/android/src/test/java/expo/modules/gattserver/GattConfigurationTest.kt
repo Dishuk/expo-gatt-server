@@ -579,4 +579,84 @@ class GattConfigurationTest {
         .exceptionOrNull() is IllegalArgumentException
     )
   }
+
+  // MARK: - Resolving a delegation
+
+  /**
+   * `parseDelegations` keying by service and characteristic is only half of it: the *lookup* has to
+   * honour that key too. It did not — a miss on the exact address fell through to the UUID-only map,
+   * which the manager populates for every characteristic UUID that occurs once — so the very case the
+   * per-service key exists for was the case that leaked.
+   */
+  private val serviceA = java.util.UUID.fromString(serviceUuid)
+  private val serviceB = java.util.UUID.fromString("0000181a-0000-1000-8000-00805f9b34fb")
+  private val charX = java.util.UUID.fromString(characteristicUuid)
+
+  /** Mirrors what `GattServerManager.setDelegations` builds from a parsed map. */
+  private fun byCharacteristic(
+    byAddress: Map<CharacteristicAddress, CharacteristicDelegation>
+  ): Map<java.util.UUID, CharacteristicDelegation> {
+    val occurrences = byAddress.keys.groupingBy { it.characteristic }.eachCount()
+    return byAddress.filterKeys { occurrences[it.characteristic] == 1 }
+      .mapKeys { it.key.characteristic }
+  }
+
+  @Test
+  fun `a delegation configured on one service does not reach the same characteristic in another`() {
+    val delegated = CharacteristicDelegation(read = true, write = true)
+    val byAddress = mapOf(CharacteristicAddress(serviceA, charX) to delegated)
+
+    val resolved = resolveDelegation(
+      CharacteristicAddress(serviceB, charX), charX, byAddress, byCharacteristic(byAddress)
+    )
+
+    assertEquals(CharacteristicDelegation.none, resolved)
+  }
+
+  @Test
+  fun `the characteristic that did opt in still resolves to its delegation`() {
+    val delegated = CharacteristicDelegation(read = true, write = true)
+    val byAddress = mapOf(CharacteristicAddress(serviceA, charX) to delegated)
+
+    val resolved = resolveDelegation(
+      CharacteristicAddress(serviceA, charX), charX, byAddress, byCharacteristic(byAddress)
+    )
+
+    assertEquals(delegated, resolved)
+  }
+
+  /**
+   * The UUID-only map earns its keep only here: `addressOf` could not name the owning service, so the
+   * unambiguous single occurrence is the best available answer.
+   */
+  @Test
+  fun `an unnameable attribute falls back to the unambiguous characteristic`() {
+    val delegated = CharacteristicDelegation(read = true)
+    val byAddress = mapOf(CharacteristicAddress(serviceA, charX) to delegated)
+
+    val resolved = resolveDelegation(null, charX, byAddress, byCharacteristic(byAddress))
+
+    assertEquals(delegated, resolved)
+  }
+
+  /** Two services delegating the same characteristic UUID leave nothing unambiguous to fall back to. */
+  @Test
+  fun `an unnameable attribute with an ambiguous characteristic stays automatic`() {
+    val byAddress = mapOf(
+      CharacteristicAddress(serviceA, charX) to CharacteristicDelegation(read = true),
+      CharacteristicAddress(serviceB, charX) to CharacteristicDelegation(write = true),
+    )
+
+    val resolved = resolveDelegation(null, charX, byAddress, byCharacteristic(byAddress))
+
+    assertEquals(CharacteristicDelegation.none, resolved)
+  }
+
+  @Test
+  fun `an empty configuration leaves everything automatic`() {
+    assertEquals(
+      CharacteristicDelegation.none,
+      resolveDelegation(CharacteristicAddress(serviceA, charX), charX, emptyMap(), emptyMap())
+    )
+  }
 }
