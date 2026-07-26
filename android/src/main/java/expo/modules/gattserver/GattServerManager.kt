@@ -104,6 +104,22 @@ const val DEFAULT_REQUEST_TIMEOUT_MS = 10_000
  */
 private const val PUBLICATION_TIMEOUT_MS = 30_000L
 
+/**
+ * How long a notification handed to the stack may go without an `onNotificationSent` before the module
+ * gives up on it.
+ *
+ * Every other asynchronous wait in this file is bounded, for the reason given at [PUBLICATION_TIMEOUT_MS]:
+ * a platform callback that never arrives otherwise parks a promise for the life of the process. The
+ * in-flight notification was the one that was not. `notifyCharacteristicChanged` returning success
+ * without ever calling back wedged that device's queue permanently — its promise never settled, the next
+ * 64 sends queued behind it, and every one after that rejected `ERR_NOTIFY_QUEUE_FULL`, with no recovery
+ * short of a disconnect.
+ *
+ * Set to the ATT transaction timeout, which is the longest an indication can legitimately take to be
+ * confirmed (Core Spec Vol 3, Part F, §3.3.3).
+ */
+private const val NOTIFICATION_TIMEOUT_MS = 30_000L
+
 open class GattServerException(val code: String, message: String) : Exception(message)
 class MtuException(code: String, message: String) : GattServerException(code, message)
 
@@ -1620,6 +1636,7 @@ class GattServerManager(
       }
       if (!stillOurs) return
       next.onResult(error)
+      armNotificationTimeout(deviceId, queue, next)
     }
   }
 
@@ -1636,6 +1653,34 @@ class GattServerManager(
    * Removes [entry] from [queue] if it is still there, reporting whether this call is the one that took
    * it — so an entry a concurrent drain has already claimed is not settled a second time.
    */
+  /**
+   * Bounds the wait for one entry's `onNotificationSent`.
+   *
+   * The timer names the entry it was armed for and settles it through [takeQueued], so it needs no
+   * cancelling: one that fires after the callback already arrived finds the entry gone and does nothing.
+   * That keeps the bound off every path that clears `inFlight` — the callback, a disconnect, an adapter
+   * power cycle and `stop` — none of which can then forget to cancel it.
+   */
+  private fun armNotificationTimeout(
+    deviceId: String,
+    queue: NotificationQueue,
+    entry: QueuedNotification,
+  ) {
+    timeoutHandler.postDelayed({
+      if (!takeQueued(queue, entry)) return@postDelayed
+      Log.w(TAG, "No onNotificationSent for $deviceId within $NOTIFICATION_TIMEOUT_MS ms; failing the send")
+      entry.onResult(
+        GattServerException(
+          "ERR_NOTIFY",
+          "The Bluetooth stack accepted the notification but never reported it as sent within " +
+            "$NOTIFICATION_TIMEOUT_MS ms. The send is abandoned so the queue for this device can " +
+            "continue."
+        )
+      )
+      pumpNotifications(deviceId)
+    }, NOTIFICATION_TIMEOUT_MS)
+  }
+
   private fun takeQueued(queue: NotificationQueue, entry: QueuedNotification): Boolean =
     synchronized(queue) {
       if (queue.inFlight === entry) {
