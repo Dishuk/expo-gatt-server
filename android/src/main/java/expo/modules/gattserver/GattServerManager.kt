@@ -502,6 +502,10 @@ class GattServerManager(
   }
 
   private fun handleAdapterOn() {
+    // The later attempt [restoreAdapterName] logs about when it fails. `setName` cannot succeed while the
+    // adapter is off, which is exactly when a teardown is most likely to run, so a rename that
+    // `android.setAdapterName` made would otherwise survive the power cycle that prevented its undo.
+    restoreAdapterName()
     if (serviceFactory.get() == null) return
     Log.d(TAG, "Adapter on — reopening GATT server and re-registering services")
     if (!openServer()) {
