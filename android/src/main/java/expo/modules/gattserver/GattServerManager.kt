@@ -387,6 +387,11 @@ class GattServerManager(
   // the platform does not document as supported.
   private val serviceFactory = AtomicReference<(() -> List<BluetoothGattService>)?>(null)
 
+  // The instances the latest registration round built, retained past the server that held them so the
+  // values they accumulated can be carried onto the fresh instances the next round produces. Replaced as
+  // a whole, so a reference read here stays usable.
+  private val publishedServices = AtomicReference<List<BluetoothGattService>>(emptyList())
+
   /**
    * Call before [open]. The configuration is retained across the server rebuilds that an adapter power
    * cycle triggers.
@@ -807,17 +812,65 @@ class GattServerManager(
   @SuppressLint("MissingPermission")
   private fun openServer(): Boolean {
     val buildServices = serviceFactory.get() ?: return false
+    // Taken before the rebuild. The factory returns freshly constructed services carrying the configured
+    // initial values again, so without this every value a central or `updateCharacteristicValue` wrote
+    // would silently revert whenever the adapter was power-cycled — while iOS, which re-adds the very
+    // instances it built, keeps them. Nothing in the API says a power cycle empties the database.
+    val retained = currentCharacteristicValues()
     synchronized(publicationLock) { publication = DatabasePublication.IN_PROGRESS }
     val server = bluetoothManager.openGattServer(context, gattServerCallback) ?: return false
     gattServer = server
     server.clearServices()
 
     val services = buildServices()
+    restoreCharacteristicValues(services, retained)
+    publishedServices.set(services)
     pendingServices.clear()
     pendingServices.addAll(services)
     Log.d(TAG, "Server opened, registering ${services.size} service(s)")
     addNextService()
     return true
+  }
+
+  /**
+   * What every characteristic of the latest registration round holds now. Read from the retained service
+   * instances rather than through [gattServer], because the adapter going down closes that server long
+   * before the round that replaces it starts.
+   */
+  private fun currentCharacteristicValues(): Map<CharacteristicAddress, ByteArray> {
+    val services = publishedServices.get()
+    if (services.isEmpty()) return emptyMap()
+    val values = HashMap<CharacteristicAddress, ByteArray>()
+    synchronized(attributeValueLock) {
+      for (service in services) {
+        for (characteristic in service.characteristics) {
+          @Suppress("DEPRECATION")
+          val value = characteristic.value ?: continue
+          values[CharacteristicAddress(service.uuid, characteristic.uuid)] = value
+        }
+      }
+    }
+    return values
+  }
+
+  /**
+   * Carries [values] onto the matching characteristics of [services]. An address the configuration no
+   * longer declares is dropped, and one that was never written keeps whatever the configuration gave it.
+   */
+  private fun restoreCharacteristicValues(
+    services: List<BluetoothGattService>,
+    values: Map<CharacteristicAddress, ByteArray>,
+  ) {
+    if (values.isEmpty()) return
+    synchronized(attributeValueLock) {
+      for (service in services) {
+        for (characteristic in service.characteristics) {
+          val value = values[CharacteristicAddress(service.uuid, characteristic.uuid)] ?: continue
+          @Suppress("DEPRECATION")
+          characteristic.value = value
+        }
+      }
+    }
   }
 
   /**
@@ -2012,6 +2065,9 @@ class GattServerManager(
     unregisterStateReceiver()
     onStateChange = null
     serviceFactory.set(null)
+    // Dropped only here, not when the adapter goes down: a power cycle rebuilds the services from the
+    // factory and carries these values across, whereas a stop ends the database for good.
+    publishedServices.set(emptyList())
     stopAdvertising()
     pendingServices.clear()
     finishOpen(

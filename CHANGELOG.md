@@ -415,6 +415,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `onCharacteristicSubscribed`, and unsubscribing from either ended both. The configuration is now keyed
   by service and characteristic, as it already was on iOS, and an unsubscribe reported on teardown names
   the service the client actually configured rather than the first one declaring that UUID
+- Every attribute value written by a central or by `updateCharacteristicValue` reverted to the value the
+  configuration declared whenever Bluetooth was power-cycled on Android, while iOS kept them. The
+  adapter going down invalidates the server, so the services are rebuilt from the configuration to
+  re-register them — and the rebuilt characteristics carried the configured initial values again. The
+  values the published characteristics hold are now carried across the rebuild, so a power cycle costs
+  the connections and the subscriptions, as documented, but not the contents of the database
 
 ### Removed
 
