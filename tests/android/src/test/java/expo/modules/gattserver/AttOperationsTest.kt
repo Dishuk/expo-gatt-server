@@ -359,4 +359,43 @@ class AttOperationsTest {
 
     assertTrue(error!!.message!!, error.message!!.contains(characteristic.toString()))
   }
+
+  // MARK: - Slicing a read
+
+  /**
+   * The opposite contract to [rebasedResponseValue], which answers past-the-end with an empty value
+   * because the caller supplying it has declared where the attribute ends. Here the module owns the
+   * value, so it knows the offset is out of range and must say so — the distinction is easy to invert,
+   * and inverting it is invisible until a peer asks for a blob.
+   */
+  @Test
+  fun `an offset past the end is out of range`() {
+    assertNull(readSliceAt(bytes(1, 2, 3), 4))
+  }
+
+  /** An offset exactly at the end is in range, and the attribute ends there. */
+  @Test
+  fun `an offset at the end reads empty`() {
+    assertArrayEquals(ByteArray(0), readSliceAt(bytes(1, 2, 3), 3))
+  }
+
+  @Test
+  fun `an offset of zero reads the whole value`() {
+    assertArrayEquals(bytes(1, 2, 3), readSliceAt(bytes(1, 2, 3), 0))
+  }
+
+  /**
+   * The continuation an `ATT_READ_BLOB_REQ` asks for. Answering with the whole value again — which the
+   * descriptor path used to do — makes the central reassemble a repeated prefix.
+   */
+  @Test
+  fun `a blob continuation reads from the offset onwards`() {
+    assertArrayEquals(bytes(3, 4, 5), readSliceAt(bytes(1, 2, 3, 4, 5), 2))
+  }
+
+  @Test
+  fun `an empty attribute reads empty at offset zero and is out of range beyond it`() {
+    assertArrayEquals(ByteArray(0), readSliceAt(ByteArray(0), 0))
+    assertNull(readSliceAt(ByteArray(0), 1))
+  }
 }

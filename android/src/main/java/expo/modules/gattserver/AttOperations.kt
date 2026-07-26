@@ -32,6 +32,22 @@ internal fun spliceAt(current: ByteArray, offset: Int, part: ByteArray): ByteArr
 }
 
 /**
+ * The bytes a read of [value] from [offset] is answered with, or `null` for an offset past the end —
+ * which the specification answers with "Invalid Offset" (Core Spec Vol 3, Part F, §3.4.1.1). An offset
+ * exactly at the end is in range and reads as empty.
+ *
+ * The stack copies the value into the response PDU verbatim rather than slicing it by the offset, so the
+ * alignment has to happen here. Shared by the characteristic and the descriptor read paths, which had
+ * otherwise drifted: the descriptor one answered every Read Blob with the whole value again, so a
+ * central reassembling a value longer than one PDU saw its prefix repeated.
+ */
+internal fun readSliceAt(value: ByteArray, offset: Int): ByteArray? {
+  if (offset > value.size) return null
+  if (offset == value.size) return ByteArray(0)
+  return value.copyOfRange(offset, value.size)
+}
+
+/**
  * Rebases a response value supplied from [suppliedOffset] onto [requestedOffset], the offset the
  * request actually asked for.
  *

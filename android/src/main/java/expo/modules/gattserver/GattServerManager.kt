@@ -557,15 +557,11 @@ class GattServerManager(
         // §3.4.1.1), rather than handed to a listener the characteristic never opted in to, which left
         // the central waiting for its ATT transaction to time out. An offset equal to the length is in
         // range and answered with an empty value.
-        if (offset > value.size) {
+        val responseValue = readSliceAt(value, offset)
+        if (responseValue == null) {
           Log.w(TAG, "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset past end of ${value.size}-byte value, rejecting")
           gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null)
           return
-        }
-        val responseValue = if (offset < value.size) {
-          value.copyOfRange(offset, value.size)
-        } else {
-          ByteArray(0)
         }
         Log.d(TAG, "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset auto-respond valueLen=${responseValue.size}")
         gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, responseValue)
@@ -693,8 +689,17 @@ class GattServerManager(
           descriptor.value
         } ?: BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
       }
-      Log.d(TAG, "onDescriptorReadRequest: device=${device.address} desc=${descriptor.uuid} value=${value.joinToString(",") { String.format("%02x", it) }}")
-      gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+      // Sliced and bounds-checked exactly as a characteristic read is: a user description long enough to
+      // need a Read Blob continuation would otherwise be answered with the whole value again at every
+      // offset, and the central would reassemble a repeated prefix.
+      val responseValue = readSliceAt(value, offset)
+      if (responseValue == null) {
+        Log.w(TAG, "onDescriptorReadRequest: device=${device.address} desc=${descriptor.uuid} offset=$offset past end of ${value.size}-byte value, rejecting")
+        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, offset, null)
+        return
+      }
+      Log.d(TAG, "onDescriptorReadRequest: device=${device.address} desc=${descriptor.uuid} offset=$offset value=${responseValue.joinToString(",") { String.format("%02x", it) }}")
+      gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, responseValue)
     }
 
     override fun onNotificationSent(device: BluetoothDevice, status: Int) {
