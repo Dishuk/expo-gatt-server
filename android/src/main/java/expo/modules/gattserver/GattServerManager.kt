@@ -1404,11 +1404,19 @@ class GattServerManager(
     // Bumped before anything else, so a start released from `whenDatabasePublished` in the meantime still
     // sees this stop rather than reaching the radio behind it.
     advertisingGeneration.incrementAndGet()
+    // Claimed before any other state is published, because it is the only thing `AdvertiseCallback.current`
+    // tests. Clearing `advertising` first left a window in which `onStartSuccess` — delivered on the main
+    // looper, so it can land mid-way through this method — still recognised itself as current, set the flag
+    // back to `true`, re-armed the timeout and settled the start as a success. The stop then took the
+    // callback and really did stop the advertisement, leaving `isAdvertising` reporting an advertisement
+    // that is not running for the rest of the process, and a `startAdvertising` that resolved where the
+    // caller had asked for the opposite. Taken rather than read for the same reason as before: only the
+    // caller that claims it hands it to the platform, and a start still in flight learns from its absence
+    // that it has to stop the advertisement it just created.
+    val callback = advertiseCallback.getAndSet(null)
     cancelAdvertisingTimeout()
     advertising.set(false)
-    // Taken rather than read: only the caller that claims the callback hands it to the platform, and a start
-    // still in flight learns from its absence that it has to stop the advertisement it just created.
-    advertiseCallback.getAndSet(null)?.let { advertiser.get()?.stopAdvertising(it) }
+    callback?.let { advertiser.get()?.stopAdvertising(it) }
     finishAdvertise(advertisingStopped())
     restoreAdapterName()
   }
