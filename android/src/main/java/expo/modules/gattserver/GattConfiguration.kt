@@ -14,6 +14,41 @@ import java.util.UUID
  * byte conversion is silent at runtime and visible only to a peer.
  */
 
+private val SHORT_UUID = Regex("^[0-9a-fA-F]{4}$|^[0-9a-fA-F]{8}$")
+private val LONG_UUID =
+  Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+/** The Bluetooth Base UUID — Core Spec Vol 3, Part B, §2.5.1. */
+private const val BLUETOOTH_BASE_UUID_SUFFIX = "-0000-1000-8000-00805f9b34fb"
+
+/**
+ * Parses a configured UUID, expanding a 16-bit or 32-bit alias onto the Bluetooth Base UUID.
+ *
+ * Repeated here as well as in JavaScript because the native module is reachable directly, which is the
+ * same reason the duplicate-UUID and byte-range checks below are. It is also the check the two platforms
+ * most needed to agree on: `CBUUID` accepts all three widths, while `java.util.UUID.fromString` requires
+ * the 8-4-4-4-12 form — so `'180D'` was accepted on iOS and threw here, the exact divergence the shared
+ * `normalizeUuid` exists to remove, left unrepeated on the platform that needs it.
+ *
+ * `UUID.fromString` is also lenient about group widths: it accepts `"180d-0-1000-8000-00805f9b34fb"`
+ * and silently zero-pads. The pattern is matched first so a malformed spelling is reported rather than
+ * quietly turned into a different UUID.
+ */
+internal fun parseUuid(value: Any?, field: String): UUID {
+  val text = value as? String
+  if (text == null || (!SHORT_UUID.matches(text) && !LONG_UUID.matches(text))) {
+    throw IllegalArgumentException(
+      "Invalid $field UUID $value. Expected 4 hex digits (16-bit), 8 hex digits (32-bit) or the " +
+        "hyphenated 8-4-4-4-12 form (128-bit)."
+    )
+  }
+  val lower = text.lowercase()
+  // The specification defines an alias as `short_value * 2^96 + Bluetooth_Base_UUID`, which lands the
+  // value in the leading 32 bits — so the expansion is a left-pad to eight hex digits plus the base.
+  val expanded = if (LONG_UUID.matches(lower)) lower else lower.padStart(8, '0') + BLUETOOTH_BASE_UUID_SUFFIX
+  return UUID.fromString(expanded)
+}
+
 /** Anything outside 0..255 would be silently truncated by [Int.toByte]. */
 internal fun toByteArray(value: List<*>, field: String): ByteArray {
   val bytes = ByteArray(value.size)
@@ -94,7 +129,7 @@ internal fun parseServiceData(value: Any?): List<ServiceData> {
   val list = value as? List<*> ?: return emptyList()
   return list.mapNotNull { item ->
     val map = item as? Map<*, *> ?: return@mapNotNull null
-    val uuid = UUID.fromString(map["uuid"] as String)
+    val uuid = parseUuid(map["uuid"], "service data")
     val data = (map["data"] as? List<*>) ?: emptyList<Any>()
     ServiceData(uuid, toByteArray(data, "service data"))
   }
@@ -106,7 +141,7 @@ internal fun parseDelegations(
 ): Map<CharacteristicAddress, CharacteristicDelegation> {
   val result = mutableMapOf<CharacteristicAddress, CharacteristicDelegation>()
   for (service in services) {
-    val serviceUuid = UUID.fromString(service["uuid"] as String)
+    val serviceUuid = parseUuid(service["uuid"], "service")
     val characteristics = (service["characteristics"] as? List<*>) ?: emptyList<Any>()
     for (item in characteristics) {
       val charMap = item as? Map<*, *> ?: continue
@@ -116,7 +151,7 @@ internal fun parseDelegations(
         write = delegate["write"] as? Boolean ?: false,
       )
       if (delegation == CharacteristicDelegation.none) continue
-      result[CharacteristicAddress(serviceUuid, UUID.fromString(charMap["uuid"] as String))] =
+      result[CharacteristicAddress(serviceUuid, parseUuid(charMap["uuid"], "characteristic"))] =
         delegation
     }
   }
@@ -167,7 +202,7 @@ internal fun parseServices(services: List<Map<String, Any?>>): List<BluetoothGat
 }
 
 internal fun parseServiceConfig(map: Map<String, Any?>): BluetoothGattService {
-  val uuid = UUID.fromString(map["uuid"] as String)
+  val uuid = parseUuid(map["uuid"], "service")
   val service = BluetoothGattService(uuid, parseServiceType(map["type"] as? String))
 
   val characteristics = (map["characteristics"] as? List<*>) ?: emptyList<Any>()
@@ -195,7 +230,7 @@ internal fun parseServiceType(name: String?): Int = when (name) {
 }
 
 internal fun parseCharacteristicConfig(map: Map<*, *>): BluetoothGattCharacteristic {
-  val uuid = UUID.fromString(map["uuid"] as String)
+  val uuid = parseUuid(map["uuid"], "characteristic")
   val properties = parseProperties(map["properties"] as? List<*>)
   val permissions = parsePermissions(map["permissions"] as? List<*>)
   val characteristic = BluetoothGattCharacteristic(uuid, properties, permissions)
@@ -258,7 +293,7 @@ internal fun cccdPermissions(permissions: Int): Int {
  * alongside the module's own and shadow the per-client subscription tracking that answers it.
  */
 internal fun parseDescriptorConfig(map: Map<*, *>): BluetoothGattDescriptor {
-  val uuid = UUID.fromString(map["uuid"] as String)
+  val uuid = parseUuid(map["uuid"], "descriptor")
   if (uuid == CCCD_UUID) {
     throw IllegalArgumentException(
       "Descriptor $uuid is the Client Characteristic Configuration descriptor, which the module " +

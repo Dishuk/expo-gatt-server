@@ -7,11 +7,13 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.UUID
 
 /**
  * What a configuration turns into, run against the real `android.bluetooth` attribute classes rather
@@ -658,5 +660,71 @@ class GattConfigurationTest {
       CharacteristicDelegation.none,
       resolveDelegation(CharacteristicAddress(serviceA, charX), charX, emptyMap(), emptyMap())
     )
+  }
+}
+
+/**
+ * Parsing a configured UUID.
+ *
+ * The one rule the two platforms most needed to agree on and did not: `CBUUID` accepts a 16-bit, a
+ * 32-bit or a 128-bit spelling, while `java.util.UUID.fromString` requires the last of the three — so a
+ * direct native caller passing `"180D"` succeeded on iOS and threw here.
+ */
+class UuidParsingTest {
+  private val heartRate = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
+
+  @Test
+  fun `a 16 bit alias expands onto the bluetooth base uuid`() {
+    assertEquals(heartRate, parseUuid("180d", "service"))
+    assertEquals(heartRate, parseUuid("180D", "service"))
+  }
+
+  @Test
+  fun `a 32 bit alias expands onto the bluetooth base uuid`() {
+    assertEquals(heartRate, parseUuid("0000180d", "service"))
+  }
+
+  @Test
+  fun `the 128 bit form is taken as written`() {
+    assertEquals(heartRate, parseUuid("0000180D-0000-1000-8000-00805F9B34FB", "service"))
+  }
+
+  /** All three spellings name one attribute, which is what makes one configuration portable. */
+  @Test
+  fun `every spelling of one uuid parses to the same value`() {
+    assertEquals(parseUuid("180d", "service"), parseUuid("0000180d", "service"))
+    assertEquals(
+      parseUuid("180d", "service"),
+      parseUuid("0000180d-0000-1000-8000-00805f9b34fb", "service")
+    )
+  }
+
+  @Test
+  fun `a malformed uuid is rejected rather than parsed`() {
+    for (bad in listOf("", "180", "180dd", "not-a-uuid", "0000180d-0000-1000-8000")) {
+      assertThrows(IllegalArgumentException::class.java) { parseUuid(bad, "service") }
+    }
+  }
+
+  /**
+   * `UUID.fromString` accepts short groups and silently zero-pads them, so this spelling used to parse
+   * as a different UUID than it reads as.
+   */
+  @Test
+  fun `a uuid with short groups is rejected rather than silently padded`() {
+    assertThrows(IllegalArgumentException::class.java) {
+      parseUuid("180d-0-1000-8000-00805f9b34fb", "service")
+    }
+  }
+
+  @Test
+  fun `a non string is rejected with a message naming the field`() {
+    val error = assertThrows(IllegalArgumentException::class.java) { parseUuid(42, "descriptor") }
+    assertTrue(error.message!!, error.message!!.contains("descriptor"))
+  }
+
+  @Test
+  fun `a missing uuid is rejected rather than throwing a cast error`() {
+    assertThrows(IllegalArgumentException::class.java) { parseUuid(null, "service") }
   }
 }

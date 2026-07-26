@@ -1594,8 +1594,8 @@ class GattServerManager(
     // Checked before the connection, and iOS checks them in the same order, so a call carrying both a
     // stale deviceId and a mistyped UUID reports the same code on either platform. The address is the
     // permanent fault of the two: no retry fixes it, while a disconnection may well resolve itself.
-    val serviceId = UUID.fromString(serviceUuid)
-    val characteristicId = UUID.fromString(characteristicUuid)
+    val serviceId = parseUuid(serviceUuid, "service")
+    val characteristicId = parseUuid(characteristicUuid, "characteristic")
     val characteristic = server.getService(serviceId)
       ?.getCharacteristic(characteristicId)
       ?: throw GattServerException(
@@ -2460,8 +2460,8 @@ class GattServerManager(
    */
   fun updateCharacteristicValue(serviceUuid: String, characteristicUuid: String, value: ByteArray) {
     val server = gattServer ?: throw serverUnavailable()
-    val characteristic = server.getService(UUID.fromString(serviceUuid))
-      ?.getCharacteristic(UUID.fromString(characteristicUuid))
+    val characteristic = server.getService(parseUuid(serviceUuid, "service"))
+      ?.getCharacteristic(parseUuid(characteristicUuid, "characteristic"))
       ?: throw GattServerException(
         "ERR_CHARACTERISTIC_NOT_FOUND",
         "Characteristic $characteristicUuid was not found in service $serviceUuid"

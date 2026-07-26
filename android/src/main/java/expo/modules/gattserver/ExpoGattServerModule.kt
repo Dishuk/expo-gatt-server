@@ -7,7 +7,6 @@ import androidx.core.os.bundleOf
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import java.util.UUID
 
 class ExpoGattServerModule : Module() {
   /**
@@ -201,9 +200,11 @@ class ExpoGattServerModule : Module() {
       try {
         val options = AdvertiseOptions(
           localName = localName,
+          // Every entry parsed rather than the non-strings dropped: silently advertising one fewer
+          // service UUID than the caller asked for makes the peripheral undiscoverable to a central
+          // filtering on it, with nothing anywhere reporting why.
           serviceUuids = (config["serviceUuids"] as? List<*>)
-            ?.mapNotNull { it as? String }
-            ?.map { UUID.fromString(it) }
+            ?.map { parseUuid(it, "service") }
             ?: emptyList(),
           includeTxPower = config["includeTxPowerLevel"] as? Boolean ?: false,
           connectable = config["connectable"] as? Boolean ?: true,
