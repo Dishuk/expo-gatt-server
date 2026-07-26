@@ -134,11 +134,11 @@ describe('listener helpers', () => {
     expect(nativeModuleMock.addListener).toHaveBeenCalledWith(eventName, listener);
   });
 
-  it.each(helpers)('%s hands back the native subscription', (_name, _eventName, subscribe) => {
+  it('hands back the native subscription rather than wrapping it', () => {
     const subscription = { remove: jest.fn() };
     nativeModuleMock.addListener.mockReturnValueOnce(subscription);
 
-    expect(subscribe(() => {})).toBe(subscription);
+    expect(addMtuChangedListener(() => {})).toBe(subscription);
   });
 
   it('subscribes each helper to an event name no other helper claims', () => {

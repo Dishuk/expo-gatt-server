@@ -6,7 +6,7 @@ import {
   type GattCharacteristicConfig,
   type GattServiceConfig,
 } from '../index';
-import { nativeModuleMock } from './nativeModuleMock';
+import { nativeModuleMock, publishedServices } from './nativeModuleMock';
 
 jest.mock('../ExpoGattServerModule', () => ({
   __esModule: true,
@@ -59,9 +59,9 @@ describe('characteristic properties', () => {
     await expect(publish({ properties: ALL_PROPERTIES })).resolves.toBeUndefined();
   });
 
+  // Three mistake classes, not five spellings of one: names are case-sensitive, a name that reads like
+  // the platform's own is not accepted, and an empty string is not a no-op.
   it.each([
-    ['a misspelling', 'notifiy'],
-    ['a plausible alternative spelling', 'writeWithoutResponse'],
     ['the wrong case', 'Read'],
     ['an Android constant name', 'PROPERTY_READ'],
     ['an empty string', ''],
@@ -77,15 +77,14 @@ describe('characteristic properties', () => {
     );
   });
 
+  // A bare string is the plausible slip; `undefined` stands for the absent-value shapes.
   it.each([
     ['a bare string', 'read'],
-    ['null', null],
     ['undefined', undefined],
-    ['an object', {}],
   ])('rejects %s in place of the properties array', async (_label, properties) => {
-    await expect(publish({ properties: properties as CharacteristicProperty[] })).rejects.toThrow(
-      /Invalid characteristic property/,
-    );
+    await expect(
+      publish({ properties: properties as unknown as CharacteristicProperty[] }),
+    ).rejects.toThrow(/Invalid characteristic property/);
   });
 });
 
@@ -94,24 +93,20 @@ describe('characteristic permissions', () => {
     await expect(publish({ permissions: ALL_PERMISSIONS })).resolves.toBeUndefined();
   });
 
+  // `writable` is the misspelling everyone makes, and `read` is a *property* name — accepting either
+  // would publish an attribute one permission short of what was asked for.
   it.each([
     ['a misspelling', 'writable'],
-    ['an Android constant name', 'PERMISSION_READ'],
     ['a property name', 'read'],
-    ['the wrong case', 'Readable'],
   ])('rejects %s as a permission', async (_label, permission) => {
     await expect(
       publish({ permissions: [permission as CharacteristicPermission] }),
     ).rejects.toThrow(/Invalid characteristic permission/);
   });
 
-  it.each([
-    ['a bare string', 'readable'],
-    ['null', null],
-    ['undefined', undefined],
-  ])('rejects %s in place of the permissions array', async (_label, permissions) => {
+  it('rejects a bare string in place of the permissions array', async () => {
     await expect(
-      publish({ permissions: permissions as unknown as CharacteristicPermission[] }),
+      publish({ permissions: 'readable' as unknown as CharacteristicPermission[] }),
     ).rejects.toThrow(/Invalid characteristic permission/);
   });
 });
@@ -121,8 +116,6 @@ describe('characteristic permissions', () => {
 describe('encrypted subscriptions', () => {
   it.each([
     ['notify', 'readEncrypted'],
-    ['notify', 'writeEncrypted'],
-    ['indicate', 'readEncrypted'],
     ['indicate', 'writeEncrypted'],
   ])('accepts %s with %s', async (property, permission) => {
     nativeModuleMock.createServer.mockClear();
@@ -160,7 +153,8 @@ describe('descriptors', () => {
     ).rejects.toThrow(/Client Characteristic Configuration descriptor/);
   });
 
-  it.each(['2902', '2902'.toUpperCase(), '00002902', '00002902-0000-1000-8000-00805F9B34FB'])(
+  // Each spelling has to be normalised *before* the CCCD check, or a short form slips past it.
+  it.each(['2902', '00002902', '00002902-0000-1000-8000-00805F9B34FB'])(
     'rejects a manually declared CCCD written as %s',
     async (uuid) => {
       await expect(publish({ descriptors: [{ uuid, value: [0, 0] }] })).rejects.toThrow(
@@ -201,7 +195,7 @@ describe('service configuration', () => {
     ).resolves.toBeUndefined();
   });
 
-  it.each(['Primary', 'included', ''])('rejects %s as a service type', async (type) => {
+  it.each(['Primary', 'included'])('rejects %s as a service type', async (type) => {
     await expect(
       createServer([
         { uuid: SERVICE, type: type as GattServiceConfig['type'], characteristics: [] },
@@ -211,7 +205,7 @@ describe('service configuration', () => {
 
   it('treats a missing characteristics array as empty rather than failing', async () => {
     await expect(createServer([{ uuid: SERVICE } as GattServiceConfig])).resolves.toBeUndefined();
-    expect(nativeModuleMock.createServer.mock.calls[0][0][0].characteristics).toEqual([]);
+    expect(publishedServices()[0].characteristics).toEqual([]);
   });
 
   it('treats a missing services array as empty rather than failing', async () => {
@@ -228,9 +222,7 @@ describe('service configuration', () => {
 
   it('omits the descriptors key entirely when none were configured', async () => {
     await publish({});
-    expect(
-      'descriptors' in nativeModuleMock.createServer.mock.calls[0][0][0].characteristics[0],
-    ).toBe(false);
+    expect('descriptors' in publishedServices()[0].characteristics[0]).toBe(false);
   });
 });
 

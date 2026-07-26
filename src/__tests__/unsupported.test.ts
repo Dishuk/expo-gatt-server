@@ -36,6 +36,10 @@ describe('isSupported', () => {
   });
 });
 
+/**
+ * Every call is listed because the guard is per call site — one that forgets it does not fail here,
+ * it throws `Cannot read property of null` from inside the module, naming neither the cause nor the fix.
+ */
 describe('calls that cannot be approximated', () => {
   const rejecting: [string, () => Promise<unknown>][] = [
     ['createServer', () => createServer([])],
@@ -47,19 +51,19 @@ describe('calls that cannot be approximated', () => {
     ['disconnectDevice', () => disconnectDevice('AA:BB')],
   ];
 
-  it.each(rejecting)('%s rejects', async (_name, call) => {
-    await expect(call()).rejects.toThrow(/\[expo-gatt-server\]/);
-  });
-
   it.each(rejecting)(
-    '%s explains how to get a binary containing the module',
-    async (_name, call) => {
+    '%s rejects with the explanation, not a null dereference',
+    async (_n, call) => {
+      await expect(call()).rejects.toThrow(/\[expo-gatt-server\]/);
       await expect(call()).rejects.toThrow(/development build/);
+      await expect(call()).rejects.not.toThrow(/of null|null is not an object/);
     },
   );
 
-  it('rejects rather than letting a property access on null surface as the error', async () => {
-    await expect(createServer([])).rejects.not.toThrow(/of null|null is not an object/);
+  // The message has to name the platform it is talking about, since the advice differs by platform —
+  // `unsupportedWeb.test.ts` covers the web wording, which must not mention a rebuild at all.
+  it('names the platform whose binary is missing the module', async () => {
+    await expect(createServer([])).rejects.toThrow(/not present in this android binary/);
   });
 });
 
@@ -80,13 +84,9 @@ describe('calls that degrade gracefully', () => {
     await expect(isAdvertising()).resolves.toBe(false);
   });
 
-  it('lets stopAdvertising be called without throwing', () => {
-    expect(() => stopAdvertising()).not.toThrow();
+  // A teardown path is the wrong place to raise a configuration error the setup path already reported.
+  it('lets the teardown calls be made without throwing', () => {
     expect(stopAdvertising()).toBeUndefined();
-  });
-
-  it('lets stopServer be called without throwing', () => {
-    expect(() => stopServer()).not.toThrow();
     expect(stopServer()).toBeUndefined();
   });
 });
@@ -106,15 +106,17 @@ describe('listener helpers', () => {
     ['addBluetoothStateChangedListener', addBluetoothStateChangedListener],
   ];
 
+  // Listed per helper because each could independently be written to throw or return nothing. What
+  // they return is one shared object, so its behaviour is pinned once, below.
   it.each(helpers)('%s returns a subscription rather than throwing', (_name, subscribe) => {
-    const subscription = subscribe(() => {});
-    expect(typeof subscription.remove).toBe('function');
+    expect(typeof subscribe(() => {}).remove).toBe('function');
   });
 
   // An effect that registers a listener pairs it with a `remove()` in its teardown, which would
   // otherwise crash on a value it never received.
-  it.each(helpers)('%s returns a subscription that can be removed twice', (_name, subscribe) => {
-    const subscription = subscribe(() => {});
+  it('hands back a subscription that can be removed repeatedly', () => {
+    const subscription = addDeviceConnectedListener(() => {});
+
     expect(() => {
       subscription.remove();
       subscription.remove();

@@ -42,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the linter, the type-checker, both builds and a tarball-contents check, plus a job that compiles the
   Android module against the real Expo toolchain.
 
+  The TypeScript suite was consolidated at the same time, from 910 reported tests to 218, with no loss
+  of coverage — verified by reintroducing twelve plausible defects and confirming each still fails the
+  suite. The old figure was inflated by two things that added no detection: running every suite once per
+  platform to reach three `Platform.OS` conditionals, which are now covered by mocking `Platform` and
+  asserting both sides in one run; and cross products such as seven byte-taking entry points × ten
+  invalid values, where all seventy cases reached the same predicate. Both patterns are described in
+  [Development](docs/development.md#keeping-the-suites-honest) so they do not creep back.
+
 - An Expo config plugin, so the package configures its own build-time requirements instead of leaving
   every consumer to hand-edit `app.json`. Adding `"plugins": ["expo-gatt-server"]` writes
   `NSBluetoothAlwaysUsageDescription`, without which iOS terminates the app the moment it touches

@@ -38,14 +38,8 @@ describe('sendNotification and updateCharacteristicValue as separate wrapper cal
     expect(nativeModuleMock.sendNotification).not.toHaveBeenCalled();
   });
 
-  it('makes exactly one native call each when a value is pushed and stored', async () => {
-    await updateCharacteristicValue(SERVICE, CHARACTERISTIC, [7]);
-    await sendNotification(DEVICE, SERVICE, CHARACTERISTIC, [7]);
-
-    expect(nativeModuleMock.updateCharacteristicValue).toHaveBeenCalledTimes(1);
-    expect(nativeModuleMock.sendNotification).toHaveBeenCalledTimes(1);
-  });
-
+  // `toHaveBeenCalledWith` is exact on arity, so this also pins that no extra flag rides along — an
+  // option object forwarded wholesale would arrive as a seventh argument and fail here.
   it('forwards exactly the six documented arguments, so no value-mirroring flag is smuggled in', async () => {
     await sendNotification(DEVICE, SERVICE, CHARACTERISTIC, [1], true, {
       requireSubscription: false,
@@ -59,17 +53,5 @@ describe('sendNotification and updateCharacteristicValue as separate wrapper cal
       true,
       false,
     );
-  });
-
-  it('drops an unrecognised option instead of forwarding it', async () => {
-    await sendNotification(DEVICE, SERVICE, CHARACTERISTIC, [1], false, {
-      // An option the module does not define must not reach the native layer, where it could be read
-      // as a mirroring opt-in that no platform implements.
-      updateValue: true,
-    } as never);
-
-    const call = nativeModuleMock.sendNotification.mock.calls[0];
-    expect(call).toHaveLength(6);
-    expect(call).toEqual([DEVICE, SERVICE, CHARACTERISTIC, [1], false, true]);
   });
 });

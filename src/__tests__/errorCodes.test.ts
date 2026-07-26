@@ -24,121 +24,45 @@ function codedError(code: string): Error & { code: string } {
 }
 
 /**
- * Every entry point that can reject with a code, and the codes it is documented to produce on **either**
- * platform. Some are raised by only one of them — `ERR_NO_CONTEXT` needs an Android `Context`, and
- * `disconnectDevice` rejects with `ERR_UNSUPPORTED` only on iOS, where CoreBluetooth cannot drop a
- * central at all.
+ * Every entry point that can reject with a native code.
  *
- * The table is deliberately **not** split by platform anyway, because what it pins down is the
- * JavaScript wrapper handing the native code back untouched — flattening one into a generic code, or
- * losing it behind a rethrown `Error`, is what stops a consumer branching on it. That pass-through is
- * the same code either side of the boundary, so feeding a platform its counterpart's code still
- * exercises it, and a JavaScript-side branch here would only fail one of the two runs.
+ * Listed per **entry point**, not per code. The wrapper has no per-code logic — it returns the native
+ * promise and the rejection propagates untouched — so the codes a platform can raise are documentation,
+ * not behaviour, and enumerating forty of them here asserted the same pass-through forty times while
+ * proving nothing about the native side that raises them.
+ *
+ * What can genuinely break is per entry point: one that grows a `try`/`catch` and rethrows a plain
+ * `Error`, or awaits and re-wraps, silently strips the code a consumer branches on. That is what this
+ * pins, once each.
  */
-const CODED_ENTRY_POINTS: {
-  name: string;
-  native: jest.Mock;
-  invoke: () => Promise<unknown>;
-  codes: string[];
-}[] = [
-  {
-    name: 'createServer',
-    native: nativeModuleMock.createServer,
-    invoke: () => createServer([]),
-    codes: [
-      'ERR_BLUETOOTH',
-      'ERR_PERMISSION',
-      'ERR_NO_CONTEXT',
-      'ERR_UNSUPPORTED',
-      'ERR_NO_SERVER',
-      'ERR_CREATE_SERVER',
-    ],
-  },
-  {
-    name: 'startAdvertising',
-    native: nativeModuleMock.startAdvertising,
-    invoke: () => startAdvertising(),
-    codes: [
-      'ERR_BLUETOOTH',
-      'ERR_PERMISSION',
-      'ERR_NO_CONTEXT',
-      'ERR_UNSUPPORTED',
-      'ERR_NO_SERVER',
-      'ERR_ADVERTISE',
-    ],
-  },
-  {
-    name: 'sendNotification',
-    native: nativeModuleMock.sendNotification,
-    invoke: () => sendNotification(DEVICE, SERVICE, CHARACTERISTIC, [1]),
-    codes: [
-      'ERR_BLUETOOTH',
-      'ERR_NO_SERVER',
-      'ERR_DEVICE_DISCONNECTED',
-      'ERR_CHARACTERISTIC_NOT_FOUND',
-      'ERR_CONFIRM_UNSUPPORTED',
-      'ERR_NO_SUBSCRIBER',
-      'PAYLOAD_EXCEEDS_MTU',
-      'ERR_NOTIFY_QUEUE_FULL',
-      'ERR_NOTIFY',
-    ],
-  },
-  {
-    name: 'sendResponse',
-    native: nativeModuleMock.sendResponse,
-    invoke: () => sendResponse(DEVICE, 1, 0, 0, [1]),
-    codes: [
-      'ERR_BLUETOOTH',
-      'ERR_NO_SERVER',
-      'ERR_DEVICE_DISCONNECTED',
-      'REQUEST_NOT_FOUND',
-      'REQUEST_DEVICE_MISMATCH',
-      'ERR_RESPONSE_OFFSET',
-      'ERR_RESPONSE',
-    ],
-  },
-  {
-    name: 'updateCharacteristicValue',
-    native: nativeModuleMock.updateCharacteristicValue,
-    invoke: () => updateCharacteristicValue(SERVICE, CHARACTERISTIC, [1]),
-    codes: ['ERR_BLUETOOTH', 'ERR_NO_SERVER', 'ERR_CHARACTERISTIC_NOT_FOUND', 'ERR_UPDATE_VALUE'],
-  },
-  {
-    name: 'getMtu',
-    native: nativeModuleMock.getMtu,
-    invoke: () => getMtu(DEVICE),
-    codes: ['ERR_NO_SERVER', 'ERR_DEVICE_DISCONNECTED'],
-  },
-  {
-    name: 'disconnectDevice',
-    native: nativeModuleMock.disconnectDevice,
-    invoke: () => disconnectDevice(DEVICE),
-    codes: [
-      'ERR_UNSUPPORTED',
-      'ERR_PERMISSION',
-      'ERR_NO_CONTEXT',
-      'ERR_NO_SERVER',
-      'ERR_DEVICE_DISCONNECTED',
-      'ERR_DISCONNECT',
-    ],
-  },
+const CODED_ENTRY_POINTS: [string, jest.Mock, () => Promise<unknown>][] = [
+  ['createServer', nativeModuleMock.createServer, () => createServer([])],
+  ['startAdvertising', nativeModuleMock.startAdvertising, () => startAdvertising()],
+  [
+    'sendNotification',
+    nativeModuleMock.sendNotification,
+    () => sendNotification(DEVICE, SERVICE, CHARACTERISTIC, [1]),
+  ],
+  ['sendResponse', nativeModuleMock.sendResponse, () => sendResponse(DEVICE, 1, 0, 0, [1])],
+  [
+    'updateCharacteristicValue',
+    nativeModuleMock.updateCharacteristicValue,
+    () => updateCharacteristicValue(SERVICE, CHARACTERISTIC, [1]),
+  ],
+  ['getMtu', nativeModuleMock.getMtu, () => getMtu(DEVICE)],
+  ['disconnectDevice', nativeModuleMock.disconnectDevice, () => disconnectDevice(DEVICE)],
 ];
 
-const codedCases = CODED_ENTRY_POINTS.flatMap(({ name, native, invoke, codes }) =>
-  codes.map((code) => [name, code, native, invoke] as const),
-);
+describe('a native rejection reaches the caller unchanged', () => {
+  it.each(CODED_ENTRY_POINTS)(
+    '%s keeps the code and the message',
+    async (_name, native, invoke) => {
+      native.mockRejectedValueOnce(codedError('ERR_BLUETOOTH'));
 
-describe('a native error code reaches the caller unchanged', () => {
-  it.each(codedCases)('%s surfaces %s', async (_name, code, native, invoke) => {
-    native.mockRejectedValueOnce(codedError(code));
-    await expect(invoke()).rejects.toMatchObject({ code });
-  });
+      await expect(invoke()).rejects.toMatchObject({ code: 'ERR_BLUETOOTH' });
 
-  it.each(codedCases)(
-    '%s surfaces the native message for %s',
-    async (_name, code, native, invoke) => {
-      native.mockRejectedValueOnce(codedError(code));
-      await expect(invoke()).rejects.toThrow(`Rejected with ${code}`);
+      native.mockRejectedValueOnce(codedError('ERR_BLUETOOTH'));
+      await expect(invoke()).rejects.toThrow('Rejected with ERR_BLUETOOTH');
     },
   );
 });
@@ -147,7 +71,7 @@ describe('a native error code reaches the caller unchanged', () => {
  * A coded rejection therefore always came from the platform, which is what lets a consumer treat a
  * missing `code` as "fix the configuration" and a present one as "handle this at runtime".
  */
-describe('a rejection raised in JavaScript carries no code', () => {
+describe('a rejection raised in JavaScript carries no code and never reaches the platform', () => {
   const validationFailures: [string, () => Promise<unknown>][] = [
     ['createServer with a malformed service UUID', () => createServer([{ uuid: 'nope' } as never])],
     [
@@ -167,13 +91,11 @@ describe('a rejection raised in JavaScript carries no code', () => {
   ];
 
   it.each(validationFailures)('%s', async (_name, invoke) => {
-    await expect(invoke()).rejects.not.toMatchObject({ code: expect.anything() });
-  });
-
-  it.each(validationFailures)('%s never reaches the native module', async (_name, invoke) => {
     jest.clearAllMocks();
-    await expect(invoke()).rejects.toThrow();
-    for (const { native } of CODED_ENTRY_POINTS) {
+
+    await expect(invoke()).rejects.not.toMatchObject({ code: expect.anything() });
+
+    for (const [, native] of CODED_ENTRY_POINTS) {
       expect(native).not.toHaveBeenCalled();
     }
   });

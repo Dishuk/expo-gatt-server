@@ -16,116 +16,129 @@ jest.mock('../ExpoGattServerModule', () => ({
 const CHARACTERISTIC = '00002a37-0000-1000-8000-00805f9b34fb';
 const SERVICE = '0000180d-0000-1000-8000-00805f9b34fb';
 
-/** Every entry point that takes raw bytes, so the check cannot be lost from one of them unnoticed. */
-const byteConsumers: [string, (value: unknown) => Promise<unknown>][] = [
-  [
-    'a characteristic value',
-    (value) =>
-      createServer([
-        {
-          uuid: SERVICE,
-          characteristics: [
-            {
-              uuid: CHARACTERISTIC,
-              properties: ['read'],
-              permissions: ['readable'],
-              value: value as number[],
-            },
-          ],
-        },
-      ]),
-  ],
-  [
-    'a descriptor value',
-    (value) =>
-      createServer([
-        {
-          uuid: SERVICE,
-          characteristics: [
-            {
-              uuid: CHARACTERISTIC,
-              properties: ['read'],
-              permissions: ['readable'],
-              descriptors: [{ uuid: '2901', value: value as number[] }],
-            },
-          ],
-        },
-      ]),
-  ],
-  [
-    'a notification value',
-    (value) => sendNotification('AA:BB', SERVICE, CHARACTERISTIC, value as number[]),
-  ],
-  ['a response value', (value) => sendResponse('AA:BB', 1, GATT_SUCCESS, 0, value as number[])],
-  [
-    'an updated characteristic value',
-    (value) => updateCharacteristicValue(SERVICE, CHARACTERISTIC, value as number[]),
-  ],
-  [
-    'manufacturer data',
-    (value) =>
-      startAdvertising({ manufacturerData: [{ companyId: 0xffff, data: value as number[] }] }),
-  ],
-  [
-    'service data',
-    (value) => startAdvertising({ serviceData: [{ uuid: '180d', data: value as number[] }] }),
-  ],
-];
+/**
+ * Byte validation has two independent failure modes, and this file tests them as two axes rather than
+ * their cross product.
+ *
+ * *What counts as a byte* is decided in one place, `assertValidBytes`, so the interesting values need
+ * exercising once — running all of them through all seven entry points asserted the same predicate
+ * seventy times.
+ *
+ * *Whether an entry point consults it at all* is per call site, and is the failure that actually
+ * happens: a new argument, or a new caller, that forgets the check. One representative bad value per
+ * entry point catches that, which is what the second block does.
+ */
+const badValueUnderTest = [256];
 
-const invalidBytes: [string, unknown][] = [
-  ['a value above 255', [256]],
-  ['a value far above 255', [1000]],
-  ['a negative value', [-1]],
-  ['negative zero-adjacent values', [0, -128]],
-  ['a non-integer', [1.5]],
-  ['NaN', [NaN]],
-  ['Infinity', [Infinity]],
-  ['a numeric string', ['1']],
-  ['null inside the array', [null]],
-  ['undefined inside the array', [undefined]],
-];
+describe('what counts as a byte', () => {
+  // Checked through one entry point, since they all reach the same predicate.
+  const reject = (value: unknown) =>
+    sendNotification('AA:BB', SERVICE, CHARACTERISTIC, value as number[]);
 
-const nonArrays: [string, unknown][] = [
-  ['a string', 'abc'],
-  ['a number', 1],
-  ['null', null],
-  ['an object', { 0: 1 }],
-  ['a Uint8Array', new Uint8Array([1, 2])],
-];
-
-describe.each(byteConsumers)('byte validation for %s', (_label, call) => {
-  it.each(invalidBytes)('rejects %s', async (_case, value) => {
-    await expect(call(value)).rejects.toThrow(/Every element must be an integer between 0 and 255/);
-  });
-
-  it.each(nonArrays)('rejects %s', async (_case, value) => {
-    await expect(call(value)).rejects.toThrow(/Expected an array of byte values/);
-  });
-
-  it('accepts the 0 and 255 boundaries', async () => {
-    await expect(call([0, 255])).resolves.toBeUndefined();
-  });
-
-  it('accepts an empty array', async () => {
-    await expect(call([])).resolves.toBeUndefined();
-  });
-});
-
-describe('byte validation reporting', () => {
-  it('reports the index of the first offending byte', async () => {
-    await expect(sendNotification('AA:BB', SERVICE, CHARACTERISTIC, [0, 1, 300])).rejects.toThrow(
-      /Invalid notification byte 300 at index 2/,
+  it.each([
+    ['a value above 255', [256]],
+    ['a negative value', [-1]],
+    ['a non-integer', [1.5]],
+    ['NaN', [NaN]],
+    ['Infinity', [Infinity]],
+    ['a numeric string', ['1']],
+    ['null inside the array', [null]],
+    ['undefined inside the array', [undefined]],
+  ])('rejects %s', async (_case, value) => {
+    await expect(reject(value)).rejects.toThrow(
+      /Every element must be an integer between 0 and 255/,
     );
   });
 
-  it('names the field the bytes belong to', async () => {
+  // A different message, because the fault is the container rather than an element — and a `Uint8Array`
+  // is the plausible mistake, being exactly the thing a caller expects to be able to pass.
+  it.each([
+    ['a string', 'abc'],
+    ['a number', 1],
+    ['null', null],
+    ['an object', { 0: 1 }],
+    ['a Uint8Array', new Uint8Array([1, 2])],
+  ])('rejects %s in place of the array', async (_case, value) => {
+    await expect(reject(value)).rejects.toThrow(/Expected an array of byte values/);
+  });
+
+  it('accepts the 0 and 255 boundaries, and an empty array', async () => {
+    await expect(reject([0, 255])).resolves.toBeUndefined();
+    await expect(reject([])).resolves.toBeUndefined();
+  });
+
+  it('reports the offending byte, its index and the field it belongs to', async () => {
+    await expect(sendNotification('AA:BB', SERVICE, CHARACTERISTIC, [0, 1, 300])).rejects.toThrow(
+      /Invalid notification byte 300 at index 2/,
+    );
     await expect(sendResponse('AA:BB', 1, GATT_SUCCESS, 0, [-1])).rejects.toThrow(
       /Invalid response byte -1 at index 0/,
     );
   });
+});
 
-  it('never reaches the native module with invalid bytes', async () => {
-    await expect(sendNotification('AA:BB', SERVICE, CHARACTERISTIC, [256])).rejects.toThrow();
+describe('every entry point taking raw bytes consults the check', () => {
+  const byteConsumers: [string, (value: number[]) => Promise<unknown>][] = [
+    [
+      'a characteristic value',
+      (value) =>
+        createServer([
+          {
+            uuid: SERVICE,
+            characteristics: [
+              { uuid: CHARACTERISTIC, properties: ['read'], permissions: ['readable'], value },
+            ],
+          },
+        ]),
+    ],
+    [
+      'a descriptor value',
+      (value) =>
+        createServer([
+          {
+            uuid: SERVICE,
+            characteristics: [
+              {
+                uuid: CHARACTERISTIC,
+                properties: ['read'],
+                permissions: ['readable'],
+                descriptors: [{ uuid: '2901', value }],
+              },
+            ],
+          },
+        ]),
+    ],
+    ['a notification value', (value) => sendNotification('AA:BB', SERVICE, CHARACTERISTIC, value)],
+    ['a response value', (value) => sendResponse('AA:BB', 1, GATT_SUCCESS, 0, value)],
+    [
+      'an updated characteristic value',
+      (value) => updateCharacteristicValue(SERVICE, CHARACTERISTIC, value),
+    ],
+    [
+      'manufacturer data',
+      (value) => startAdvertising({ manufacturerData: [{ companyId: 0xffff, data: value }] }),
+    ],
+    ['service data', (value) => startAdvertising({ serviceData: [{ uuid: '180d', data: value }] })],
+  ];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it.each(byteConsumers)('%s is validated', async (_label, call) => {
+    await expect(call(badValueUnderTest)).rejects.toThrow(
+      /Every element must be an integer between 0 and 255/,
+    );
+  });
+
+  // Validation that runs after the call has already been made is no validation at all.
+  it.each(byteConsumers)('%s reaches no native call when invalid', async (_label, call) => {
+    await expect(call(badValueUnderTest)).rejects.toThrow();
+
+    expect(nativeModuleMock.createServer).not.toHaveBeenCalled();
     expect(nativeModuleMock.sendNotification).not.toHaveBeenCalled();
+    expect(nativeModuleMock.sendResponse).not.toHaveBeenCalled();
+    expect(nativeModuleMock.updateCharacteristicValue).not.toHaveBeenCalled();
+    expect(nativeModuleMock.startAdvertising).not.toHaveBeenCalled();
   });
 });

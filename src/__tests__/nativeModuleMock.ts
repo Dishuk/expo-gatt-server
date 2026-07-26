@@ -27,3 +27,31 @@ export const nativeModuleMock = {
   isAdvertising: jest.fn(async () => true),
   addListener: jest.fn((..._args: any[]) => ({ remove: jest.fn() })),
 } satisfies Partial<Record<keyof ExpoGattServerModuleType, jest.Mock>>;
+
+/**
+ * The arguments of the `nth` call to `method`, failing the test rather than returning `undefined` when
+ * there was no such call.
+ *
+ * Reaching into `mock.calls[n]` directly reads as an assertion but is not one: an index that does not
+ * exist yields `undefined`, and the property accesses that follow then throw a `TypeError` naming a
+ * line rather than the missing call. Checking here turns "the module was never called" into that
+ * sentence.
+ */
+export function callArgs<Method extends keyof typeof nativeModuleMock>(
+  method: Method,
+  nth = 0,
+): any[] {
+  const calls = nativeModuleMock[method].mock.calls;
+  if (nth >= calls.length) {
+    throw new Error(
+      `Expected ${String(method)} to have been called at least ${nth + 1} time(s), ` +
+        `but it was called ${calls.length} time(s).`,
+    );
+  }
+  return calls[nth] as any[];
+}
+
+/** The normalised service list `createServer` was handed, which most assertions are about. */
+export function publishedServices(nth = 0): any[] {
+  return callArgs('createServer', nth)[0];
+}

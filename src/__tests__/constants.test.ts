@@ -68,34 +68,34 @@ const EXPORTED_ERROR_CODES_IN_SPEC_ORDER = [
 ];
 
 describe('ATT error constants', () => {
-  it.each(SPECIFIED_ERROR_CODES.map((entry, index) => [...entry, index] as const))(
-    'assigns %d to %s',
-    (code, _name, index) => {
-      expect(EXPORTED_ERROR_CODES_IN_SPEC_ORDER[index]).toBe(code);
-    },
-  );
-
-  it('exports one constant per specified error code', () => {
+  // One test rather than seventeen: a wrong or transposed value fails here just the same, and naming
+  // the code in the assertion says which one without needing a case per row.
+  it('assigns each specified error code to its own constant', () => {
     expect(EXPORTED_ERROR_CODES_IN_SPEC_ORDER).toHaveLength(SPECIFIED_ERROR_CODES.length);
+
+    SPECIFIED_ERROR_CODES.forEach(([code, name], index) => {
+      expect(`${name} = ${EXPORTED_ERROR_CODES_IN_SPEC_ORDER[index]}`).toBe(`${name} = ${code}`);
+    });
   });
 
+  // A transposed pair would still satisfy the count above, so distinctness is checked separately.
   it('assigns a distinct code to each constant', () => {
     expect(new Set(EXPORTED_ERROR_CODES_IN_SPEC_ORDER).size).toBe(
       EXPORTED_ERROR_CODES_IN_SPEC_ORDER.length,
     );
   });
 
-  it('keeps every code inside the single byte the ATT error field carries', () => {
+  // Android narrows the status to a byte on its way into the stack, so a wider constant would go out as
+  // an unrelated error rather than the one named.
+  it('reserves zero for success and keeps every error inside a single byte', () => {
+    expect(GATT_SUCCESS).toBe(0);
+    expect(EXPORTED_ERROR_CODES_IN_SPEC_ORDER).not.toContain(GATT_SUCCESS);
+
     for (const code of EXPORTED_ERROR_CODES_IN_SPEC_ORDER) {
       expect(Number.isInteger(code)).toBe(true);
       expect(code).toBeGreaterThanOrEqual(0);
       expect(code).toBeLessThanOrEqual(255);
     }
-  });
-
-  it('reserves zero for success, which is not an error code', () => {
-    expect(GATT_SUCCESS).toBe(0);
-    expect(EXPORTED_ERROR_CODES_IN_SPEC_ORDER).not.toContain(GATT_SUCCESS);
   });
 });
 
