@@ -93,6 +93,17 @@ const val ATT_TRANSACTION_TIMEOUT_MS = 30_000
  */
 const val DEFAULT_REQUEST_TIMEOUT_MS = 10_000
 
+/**
+ * How long one registration round may go unacknowledged before the publication is reported failed.
+ *
+ * `addService` is local bookkeeping that completes in milliseconds, so nothing healthy comes close to
+ * this. It exists only so a round that can never finish is *reported*: `onServiceAdded` is the sole thing
+ * that advances the queue, and an `addService` that returns true without ever calling back left
+ * `createServer` and every caller parked in [GattServerManager.whenDatabasePublished] pending for the
+ * life of the process. Deliberately generous, and matched on iOS.
+ */
+private const val PUBLICATION_TIMEOUT_MS = 30_000L
+
 open class GattServerException(val code: String, message: String) : Exception(message)
 class MtuException(code: String, message: String) : GattServerException(code, message)
 
@@ -392,6 +403,12 @@ class GattServerManager(
   private val publicationLock = Any()
   private var publication = DatabasePublication.IDLE
   private val readinessWaiters = mutableListOf<(GattServerException?) -> Unit>()
+
+  /** Identifies the current registration round, so a bound armed for one cannot fail another. */
+  private val publicationRound = AtomicInteger(0)
+
+  /** The bound on the current round. See [PUBLICATION_TIMEOUT_MS]. */
+  private val publicationTimeout = AtomicReference<Runnable?>(null)
 
   // The adapter being disabled invalidates the whole server, so the configuration is retained as a
   // factory and fresh BluetoothGattService instances are built for every registration pass. Re-adding
@@ -848,8 +865,41 @@ class GattServerManager(
     pendingServices.clear()
     pendingServices.addAll(services)
     Log.d(TAG, "Server opened, registering ${services.size} service(s)")
+    armPublicationTimeout()
     addNextService()
     return true
+  }
+
+  /** Bounds the round that is about to start. See [PUBLICATION_TIMEOUT_MS]. */
+  private fun armPublicationTimeout() {
+    cancelPublicationTimeout()
+    // Stamped with the round, so a bound that fires just as an adapter power cycle starts a new round
+    // cannot fail the round now running.
+    val round = publicationRound.incrementAndGet()
+    val timeout = Runnable {
+      if (publicationRound.get() != round) return@Runnable
+      val stillRegistering = synchronized(publicationLock) {
+        publication == DatabasePublication.IN_PROGRESS
+      }
+      if (!stillRegistering) return@Runnable
+      Log.e(TAG, "No onServiceAdded within $PUBLICATION_TIMEOUT_MS ms; reporting the round as failed")
+      pendingServices.clear()
+      finishOpen(
+        DatabasePublication.FAILED,
+        GattServerException(
+          "ERR_CREATE_SERVER",
+          "The Bluetooth stack did not acknowledge a service registration within " +
+            "$PUBLICATION_TIMEOUT_MS ms, so the database was not published. Call createServer again " +
+            "to retry."
+        )
+      )
+    }
+    publicationTimeout.set(timeout)
+    timeoutHandler.postDelayed(timeout, PUBLICATION_TIMEOUT_MS)
+  }
+
+  private fun cancelPublicationTimeout() {
+    publicationTimeout.getAndSet(null)?.let { timeoutHandler.removeCallbacks(it) }
   }
 
   /**
@@ -928,6 +978,8 @@ class GattServerManager(
    * completion and everyone parked in [whenDatabasePublished] are settled with [error].
    */
   private fun finishOpen(state: DatabasePublication, error: GattServerException?) {
+    // The round is over however it ended, so its bound goes with it.
+    cancelPublicationTimeout()
     val parked = synchronized(publicationLock) {
       publication = state
       val waiters = readinessWaiters.toList()

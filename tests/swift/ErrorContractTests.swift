@@ -17,6 +17,7 @@ final class ErrorContractTests: XCTestCase {
     ("ERR_RESPONSE_OFFSET", .responseOffsetAfterRequest(requestId: 1, requested: 0, supplied: 2)),
     ("ERR_BLUETOOTH", .bluetoothUnavailable(state: .poweredOff)),
     ("ERR_CREATE_SERVER", .serviceRegistrationFailed(uuid: "180d", reason: "why")),
+    ("ERR_CREATE_SERVER", .publicationTimedOut(awaiting: ["180d"], timeoutMs: 30_000)),
     ("ERR_NO_SERVER", .serverStopped),
     ("ERR_NO_SERVER", .databaseNotPublished),
     ("ERR_CHARACTERISTIC_NOT_FOUND", .characteristicNotFound(service: "180d", characteristic: "2a37")),
@@ -34,10 +35,14 @@ final class ErrorContractTests: XCTestCase {
     }
   }
 
+  /// Asserted on the code the *error* reports, not on the table's own literal — reading it from the
+  /// literal made this pass no matter what `GattServerError.code` returned.
   func testEveryCodeIsScreamingSnakeCase() {
-    for (code, _) in Self.codes {
+    for (_, error) in Self.codes {
+      let code = error.code
       XCTAssertEqual(code, code.uppercased(), code)
       XCTAssertFalse(code.contains(" "), code)
+      XCTAssertFalse(code.isEmpty, "\(error)")
     }
   }
 

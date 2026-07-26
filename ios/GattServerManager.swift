@@ -26,6 +26,14 @@ let attTransactionTimeoutMs = 30_000
 /// asynchronous work.
 let defaultRequestTimeoutMs = 10_000
 
+/// How long one round of `add(_:)` calls may go unacknowledged before the publication is reported failed.
+///
+/// Registering a service is local bookkeeping that completes in milliseconds, so this is not a deadline
+/// anything healthy comes close to — it exists only so a round that can never complete is *reported*
+/// rather than leaving `createServer` and every parked `startAdvertising` pending for the life of the
+/// process. Deliberately generous for that reason.
+let publicationTimeoutMs = 30_000
+
 enum GattServerError: Error {
   case payloadExceedsMtu(maxPayload: Int, payloadSize: Int)
   case requestNotFound(requestId: Int)
@@ -33,6 +41,7 @@ enum GattServerError: Error {
   case responseOffsetAfterRequest(requestId: Int, requested: Int, supplied: Int)
   case bluetoothUnavailable(state: CBManagerState)
   case serviceRegistrationFailed(uuid: String, reason: String)
+  case publicationTimedOut(awaiting: [String], timeoutMs: Int)
   case serverStopped
   case databaseNotPublished
   case characteristicNotFound(service: String, characteristic: String)
@@ -51,7 +60,7 @@ enum GattServerError: Error {
     case .responseOffsetAfterRequest: return "ERR_RESPONSE_OFFSET"
     case .bluetoothUnavailable(let state):
       return state == .unauthorized ? "ERR_PERMISSION" : "ERR_BLUETOOTH"
-    case .serviceRegistrationFailed: return "ERR_CREATE_SERVER"
+    case .serviceRegistrationFailed, .publicationTimedOut: return "ERR_CREATE_SERVER"
     case .serverStopped, .databaseNotPublished: return "ERR_NO_SERVER"
     case .characteristicNotFound: return "ERR_CHARACTERISTIC_NOT_FOUND"
     case .notifyQueueFull: return "ERR_NOTIFY_QUEUE_FULL"
@@ -90,6 +99,9 @@ enum GattServerError: Error {
       }
     case .serviceRegistrationFailed(let uuid, let reason):
       return "Failed to publish service \(uuid): \(reason)"
+    case .publicationTimedOut(let awaiting, let timeoutMs):
+      return "CoreBluetooth did not acknowledge \(awaiting.joined(separator: ", ")) within " +
+        "\(timeoutMs) ms, so the database was not published. Call createServer again to retry."
     case .serverStopped:
       return "Server was stopped before it finished opening"
     case .databaseNotPublished:
@@ -289,6 +301,19 @@ class GattServerManager: NSObject {
 
   private var publication: DatabasePublication = .idle
 
+  /// Identifies the current publication round, so a timer armed for one cannot settle another.
+  private var publicationGeneration = 0
+
+  /// Bounds a publication round.
+  ///
+  /// `add(_:)` is the only thing that produces a `didAdd`, and CoreBluetooth documents no guarantee that
+  /// one always arrives — nor does it pass anything identifying the round a callback belongs to, so an
+  /// acknowledgement left over from a round a power cycle discarded is indistinguishable from the current
+  /// round's and can be credited to it, leaving this round waiting for one it will never get. Either way
+  /// the wait was unbounded: `createServer`'s promise and every caller parked in `whenDatabasePublished`
+  /// hung for the life of the process. This turns that into a rejection the app can retry.
+  private var publicationTimeout: DispatchWorkItem?
+
   /// Whether every configured service is currently published.
   private var databasePublished: Bool { publication == .published }
 
@@ -430,18 +455,55 @@ class GattServerManager: NSObject {
   }
 
   private func publishConfiguredServices(on peripheral: CBPeripheralManager) {
+    publicationGeneration += 1
     publication = .inProgress
     registrationFailed = false
     servicesAwaitingRegistration = Set(serviceConfiguration.map { $0.uuid })
     guard !servicesAwaitingRegistration.isEmpty else {
       publication = .published
+      cancelPublicationTimeout()
       completeOpen(nil)
       flushReadinessWaiters(nil)
       return
     }
+    armPublicationTimeout()
     for service in serviceConfiguration {
       peripheral.add(service)
     }
+  }
+
+  /// Bounds the round that has just started. See [publicationTimeout].
+  private func armPublicationTimeout() {
+    cancelPublicationTimeout()
+    // Stamped with the round, so a timer that fires just as a power cycle starts a new one cannot fail
+    // the round now running.
+    let generation = publicationGeneration
+    let work = DispatchWorkItem { [weak self] in
+      guard let self = self,
+            self.publicationGeneration == generation,
+            self.publication == .inProgress else { return }
+      self.publicationTimeout = nil
+      let error = GattServerError.publicationTimedOut(
+        awaiting: self.servicesAwaitingRegistration.map { $0.normalizedString }.sorted(),
+        timeoutMs: publicationTimeoutMs
+      )
+      self.publication = .failed
+      // Set so the deferred unpublish below recognises this as a failed round, and so a late
+      // acknowledgement cannot publish a database this has already reported as absent.
+      self.registrationFailed = true
+      self.unpublishFailedRegistration()
+      self.completeOpen(error)
+      self.flushReadinessWaiters(error)
+    }
+    publicationTimeout = work
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + .milliseconds(publicationTimeoutMs), execute: work
+    )
+  }
+
+  private func cancelPublicationTimeout() {
+    publicationTimeout?.cancel()
+    publicationTimeout = nil
   }
 
   /// Advertises once the database is published, holding the call until then rather than refusing it, and
@@ -908,6 +970,7 @@ class GattServerManager: NSObject {
     // back to life through either route.
     serviceConfiguration.removeAll()
     servicesAwaitingRegistration.removeAll()
+    cancelPublicationTimeout()
     publication = .idle
     registrationFailed = false
     addedServices.removeAll()
@@ -1125,6 +1188,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
   /// than answered, because the bearers they belong to are gone with the connections.
   private func discardPublishedDatabase(reason: GattServerError) {
     publication = .idle
+    cancelPublicationTimeout()
     servicesAwaitingRegistration.removeAll()
 
     // `peripheralManagerDidStartAdvertising:error:` is documented only as returning "the result of a
@@ -1194,6 +1258,8 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     // The set is no longer cleared on failure, so the siblings still registering are waited for rather
     // than abandoned — which is what makes the unpublish below safe to schedule.
     guard servicesAwaitingRegistration.isEmpty else { return }
+    // The round is over either way, so its bound goes with it.
+    cancelPublicationTimeout()
     if registrationFailed {
       publication = .failed
       unpublishFailedRegistration()
