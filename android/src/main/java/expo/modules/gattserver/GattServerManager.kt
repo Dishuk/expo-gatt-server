@@ -567,7 +567,18 @@ class GattServerManager(
       .onFailure { Log.w(TAG, "Failed to unregister adapter state receiver", it) }
   }
 
-  private val gattServerCallback = object : BluetoothGattServerCallback() {
+  /**
+   * Builds the callback for one publication round.
+   *
+   * One instance per `openGattServer` rather than one shared across every server this manager opens, so
+   * a callback can tell which round it belongs to. `onServiceAdded` carries no server or round of its
+   * own, so a late acknowledgement from a server that an adapter power cycle already closed was
+   * indistinguishable from one belonging to the round now running — and being indistinguishable, it was
+   * acted on: a success popped an entry off the new round's queue out of turn, putting two `addService`
+   * calls in flight against the platform's "do not add another service before this callback" rule, and a
+   * failure tore down a healthy round.
+   */
+  private fun gattServerCallback(round: Int) = object : BluetoothGattServerCallback() {
     @SuppressLint("MissingPermission")
     override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
       val id = device.address
@@ -837,6 +848,12 @@ class GattServerManager(
    * the adapter is disabled and re-enabled, so it must return freshly constructed services.
    */
   fun open(
+      // A registration belonging to a round that has since been discarded says nothing about the one
+      // running now, and must not advance or fail it.
+      if (publicationRound.get() != round) {
+        Log.d(TAG, "onServiceAdded: ignoring service=${service.uuid} from discarded round $round")
+        return
+      }
     onReady: (error: GattServerException?) -> Unit,
     buildServices: () -> List<BluetoothGattService>,
   ): Unit = synchronized(serverLifecycleLock) {
@@ -874,7 +891,9 @@ class GattServerManager(
     // instances it built, keeps them. Nothing in the API says a power cycle empties the database.
     val retained = currentCharacteristicValues()
     synchronized(publicationLock) { publication = DatabasePublication.IN_PROGRESS }
-    val server = bluetoothManager?.openGattServer(context, gattServerCallback) ?: return false
+    // Claimed before the server exists, so the callback it is handed can name the round it serves.
+    val round = publicationRound.incrementAndGet()
+    val server = bluetoothManager?.openGattServer(context, gattServerCallback(round)) ?: return false
     gattServer = server
     server.clearServices()
 
@@ -884,17 +903,16 @@ class GattServerManager(
     pendingServices.clear()
     pendingServices.addAll(services)
     Log.d(TAG, "Server opened, registering ${services.size} service(s)")
-    armPublicationTimeout()
+    armPublicationTimeout(round)
     addNextService()
     return true
   }
 
   /** Bounds the round that is about to start. See [PUBLICATION_TIMEOUT_MS]. */
-  private fun armPublicationTimeout() {
+  private fun armPublicationTimeout(round: Int) {
     cancelPublicationTimeout()
     // Stamped with the round, so a bound that fires just as an adapter power cycle starts a new round
     // cannot fail the round now running.
-    val round = publicationRound.incrementAndGet()
     val timeout = Runnable {
       if (publicationRound.get() != round) return@Runnable
       val stillRegistering = synchronized(publicationLock) {
