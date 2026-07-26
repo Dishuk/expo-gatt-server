@@ -798,22 +798,34 @@ class GattServerManager: NSObject {
     peripheralManager?.respond(to: request, withResult: result)
   }
 
-  /// Rebases a supplied response value onto the offset the request asked for. `CBATTRequest.offset` is
-  /// read-only and `respond(to:withResult:)` takes no offset — CoreBluetooth derives it from the
-  /// request — so honouring the caller's `offset` means aligning the value to it here.
   private func responsePayload(
     for pending: PendingRequest, requestId: Int, offset: Int, value: Data
   ) throws -> Data {
-    // A Write Response carries no value, so there is nothing to rebase.
-    guard pending.isRead else { return value }
+    try rebasedResponseValue(
+      value, isRead: pending.isRead, suppliedOffset: offset,
+      requestedOffset: pending.request.offset, requestId: requestId
+    )
+  }
 
-    let requested = pending.request.offset
-    guard offset <= requested else {
+  /// Rebases a response value supplied from `suppliedOffset` onto `requestedOffset`, the offset the
+  /// request actually asked for. `CBATTRequest.offset` is read-only and `respond(to:withResult:)` takes
+  /// no offset — CoreBluetooth derives it from the request — so honouring the caller's offset means
+  /// aligning the value to it here.
+  ///
+  /// Split out from `responsePayload` so it can be exercised without a `CBATTRequest`, which has no
+  /// public initialiser. Android's `responsePayload` implements the same contract.
+  func rebasedResponseValue(
+    _ value: Data, isRead: Bool, suppliedOffset: Int, requestedOffset: Int, requestId: Int
+  ) throws -> Data {
+    // A Write Response carries no value, so there is nothing to rebase.
+    guard isRead else { return value }
+
+    guard suppliedOffset <= requestedOffset else {
       throw GattServerError.responseOffsetAfterRequest(
-        requestId: requestId, requested: requested, supplied: offset
+        requestId: requestId, requested: requestedOffset, supplied: suppliedOffset
       )
     }
-    let skip = requested - offset
+    let skip = requestedOffset - suppliedOffset
     guard skip > 0 else { return value }
     // The caller supplied nothing at or beyond the requested offset, which is the specification's
     // signal that the attribute ends there.
@@ -936,7 +948,7 @@ class GattServerManager: NSObject {
   /// Assembling a queued part at offset 0 as a replacement — which this used to do, having only the
   /// offset to go on — truncated an attribute that a long write did not cover to its end, while Android
   /// kept the remainder.
-  private func spliced(_ current: Data, offset: Int, part: Data, queued: Bool) -> Data? {
+  func spliced(_ current: Data, offset: Int, part: Data, queued: Bool) -> Data? {
     guard offset <= current.count else { return nil }
     guard queued else { return part }
     var result = Data(current.prefix(offset))
@@ -960,7 +972,7 @@ class GattServerManager: NSObject {
   ///
   /// Takes the offsets rather than the requests, because `CBATTRequest` has no public initialiser and
   /// this is the whole of what the decision depends on.
-  private func isQueuedWriteBatch(offsets: [Int]) -> Bool {
+  func isQueuedWriteBatch(offsets: [Int]) -> Bool {
     offsets.count > 1 || offsets.contains { $0 > 0 }
   }
 

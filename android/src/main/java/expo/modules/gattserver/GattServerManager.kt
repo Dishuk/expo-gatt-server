@@ -45,9 +45,9 @@ private const val MAX_QUEUED_NOTIFICATIONS_PER_DEVICE = 64
  * 0x0000.
  */
 val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-private const val CCCD_VALUE_LENGTH = 2
-private const val CCCD_NOTIFY_BIT = 0x0001
-private const val CCCD_INDICATE_BIT = 0x0002
+internal const val CCCD_VALUE_LENGTH = 2
+internal const val CCCD_NOTIFY_BIT = 0x0001
+internal const val CCCD_INDICATE_BIT = 0x0002
 
 /**
  * Longest duration `AdvertiseSettings.Builder.setTimeout` accepts — "May not exceed 180000
@@ -1368,14 +1368,8 @@ class GattServerManager(
     server.cancelConnection(device)
   }
 
-  private fun cccdBits(value: ByteArray): Int =
-    (value[0].toInt() and 0xFF) or ((value[1].toInt() and 0xFF) shl 8)
-
-  private fun cccdValue(bits: Int): ByteArray =
-    byteArrayOf((bits and 0xFF).toByte(), ((bits shr 8) and 0xFF).toByte())
-
   /** The two-octet configuration this client last wrote, or the specified default of 0x0000. */
-  private fun clientConfiguration(deviceId: String, address: CharacteristicAddress): Int =
+  internal fun clientConfiguration(deviceId: String, address: CharacteristicAddress): Int =
     subscriptions[deviceId]?.get(address) ?: 0
 
   /**
@@ -1384,50 +1378,20 @@ class GattServerManager(
    * specific bit.
    */
   private fun isSubscribed(deviceId: String, address: CharacteristicAddress): Boolean =
-    clientConfiguration(deviceId, address) and (CCCD_NOTIFY_BIT or CCCD_INDICATE_BIT) != 0
+    cccdSubscribed(clientConfiguration(deviceId, address))
 
-  /**
-   * Whether [deviceId] enabled exactly the transmission [confirm] selects. "When a bit is set, that
-   * action shall be enabled, otherwise it will not be used" (Core Spec Vol 3, Part G, §3.3.3.3), so a
-   * client that enabled only indications must not be handed a notification, and vice versa — gating on
-   * either bit would send whichever the caller asked for regardless of the client's configuration.
-   */
-  private fun hasEnabled(
+  /** Whether [deviceId] enabled exactly the transmission [confirm] selects. See [cccdEnables]. */
+  internal fun hasEnabled(
     deviceId: String,
     address: CharacteristicAddress,
     confirm: Boolean,
-  ): Boolean {
-    val required = if (confirm) CCCD_INDICATE_BIT else CCCD_NOTIFY_BIT
-    return clientConfiguration(deviceId, address) and required != 0
-  }
+  ): Boolean = cccdEnables(clientConfiguration(deviceId, address), confirm)
 
-  /**
-   * Refuses a transmission type the characteristic never declared. The specification permits each
-   * transmission only when its property is set (Core Spec Vol 3, Part G, Table 3.5) and lets a client
-   * enable the matching CCCD bit only then (Table 3.11). Android's `notifyCharacteristicChanged` checks
-   * neither, so without this the stack would emit a PDU no client could legally have asked for.
-   */
+  /** See [expo.modules.gattserver.confirmError], which this reads the declaration for. */
   private fun confirmError(
     characteristic: BluetoothGattCharacteristic,
     confirm: Boolean,
-  ): GattServerException? {
-    val required = if (confirm) {
-      BluetoothGattCharacteristic.PROPERTY_INDICATE
-    } else {
-      BluetoothGattCharacteristic.PROPERTY_NOTIFY
-    }
-    if (characteristic.properties and required != 0) return null
-    val message = if (confirm) {
-      "Characteristic ${characteristic.uuid} does not declare the \"indicate\" property, so it " +
-        "cannot send the acknowledged indication confirm: true asks for. Declare \"indicate\" on " +
-        "the characteristic, or send a notification with confirm: false."
-    } else {
-      "Characteristic ${characteristic.uuid} does not declare the \"notify\" property, so it " +
-        "cannot send an unacknowledged notification. Declare \"notify\" on the characteristic, or " +
-        "send an indication with confirm: true."
-    }
-    return GattServerException("ERR_CONFIRM_UNSUPPORTED", message)
-  }
+  ): GattServerException? = confirmError(characteristic.properties, characteristic.uuid, confirm)
 
   /**
    * Records a client's new CCCD value and reports the transition. Only the change from "receiving
@@ -1559,29 +1523,9 @@ class GattServerManager(
     notificationQueues.keys.toList().forEach { failNotifications(it, error) }
   }
 
-  /**
-   * Refuses a payload the link cannot carry in one notification, before anything is transmitted. The
-   * platform silently truncates an oversized notification rather than failing it, and a notification has
-   * no continuation mechanism — unlike a read, which the central can finish with a Read Blob request —
-   * so sending it would lose the tail with nothing to recover it.
-   */
-  private fun mtuErrorFor(deviceId: String, size: Int): MtuException? {
-    val negotiatedMtu = deviceMtu[deviceId]
-    val mtu = negotiatedMtu ?: DEFAULT_ATT_MTU
-    val maxPayload = mtu - ATT_NOTIFICATION_HEADER_SIZE
-    if (size <= maxPayload) return null
-    val hint = if (negotiatedMtu == null) {
-      " The link is still at the default ATT MTU of $DEFAULT_ATT_MTU; a central that negotiates a " +
-        "larger one is reported through onMtuChanged."
-    } else {
-      ""
-    }
-    return MtuException(
-      "PAYLOAD_EXCEEDS_MTU",
-      "Payload size $size exceeds the $maxPayload bytes a single notification or indication can " +
-        "carry on this link (ATT MTU $mtu). Nothing was sent.$hint"
-    )
-  }
+  /** See [expo.modules.gattserver.mtuErrorFor], which this supplies the link's negotiated MTU to. */
+  private fun mtuErrorFor(deviceId: String, size: Int): MtuException? =
+    mtuErrorFor(deviceMtu[deviceId], size)
 
   /**
    * Holds one part of a long or reliable write until the execute arrives, and echoes it back: the
@@ -1775,17 +1719,6 @@ class GattServerManager(
       )
     }
 
-  /**
-   * Returns `null` for an offset beyond the current end, which the specification answers with "Invalid
-   * Offset". An offset exactly at the end appends and is in range.
-   */
-  private fun spliceAt(current: ByteArray, offset: Int, part: ByteArray): ByteArray? {
-    if (offset > current.size) return null
-    val result = current.copyOf(maxOf(current.size, offset + part.size))
-    part.copyInto(result, offset)
-    return result
-  }
-
   /** Replaces the mirrored value a read of [characteristic] is answered from, under the value monitor. */
   private fun storeCharacteristicValue(
     characteristic: BluetoothGattCharacteristic,
@@ -1962,36 +1895,16 @@ class GattServerManager(
     )
   }
 
-  /**
-   * Rebases a supplied response value onto the offset the request asked for. The stack copies the value
-   * into the response PDU verbatim — it does not slice it by the offset, which for a read response is
-   * never even transmitted — so the alignment has to happen here.
-   */
+  /** See [expo.modules.gattserver.rebasedResponseValue], which this supplies the request's offset to. */
   private fun responsePayload(
     pending: PendingRequest,
     requestId: Int,
     offset: Int,
     value: ByteArray,
-  ): ByteArray {
-    // A Write Response carries no value, so there is nothing to rebase.
-    if (!pending.isRead) return value
-
-    if (offset > pending.offset) {
-      throw GattServerException(
-        "ERR_RESPONSE_OFFSET",
-        "Request $requestId asked for the attribute from offset ${pending.offset}, but the " +
-          "response supplies it from offset $offset, which leaves the requested bytes missing. " +
-          "Pass the value together with the offset it starts at — offset 0 with the whole value " +
-          "always works."
-      )
-    }
-    val skip = pending.offset - offset
-    if (skip == 0) return value
-    // The caller supplied nothing at or beyond the requested offset, which is the specification's
-    // signal that the attribute ends there.
-    if (skip >= value.size) return ByteArray(0)
-    return value.copyOfRange(skip, value.size)
-  }
+  ): ByteArray = rebasedResponseValue(
+    value, pending.isRead, suppliedOffset = offset, requestedOffset = pending.offset,
+    requestId = requestId
+  )
 
   /**
    * Hands one notification to the stack. Returns `null` when it was accepted — and only then will
