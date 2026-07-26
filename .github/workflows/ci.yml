@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  javascript:
+    name: JavaScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      # Both build outputs are published but not committed, so a break in either only ever surfaces at
+      # `npm publish` otherwise.
+      - run: npm run build
+      - run: npm run build:plugin
+      - name: Check the tarball contents
+        run: |
+          npm pack --dry-run --json > pack.json
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const files = JSON.parse(readFileSync("pack.json", "utf8"))[0].files.map((f) => f.path);
+            const required = [
+              "build/index.js",
+              "build/index.d.ts",
+              "app.plugin.js",
+              "plugin/build/index.js",
+              "expo-module.config.json",
+              "ios/GattServerManager.swift",
+              "android/src/main/java/expo/modules/gattserver/GattServerManager.kt",
+            ];
+            const missing = required.filter((f) => !files.includes(f));
+            if (missing.length) throw new Error("missing from the tarball: " + missing.join(", "));
+            // Tests, the host-side harnesses and raw TypeScript have no business in a consumers install.
+            const forbidden = files.filter(
+              (f) => f.startsWith("src/") || f.startsWith("tests/") || f === "Package.swift"
+            );
+            if (forbidden.length) throw new Error("should not ship: " + forbidden.join(", "));
+            console.log(`tarball looks right (${files.length} files)`);
+          '
+
+  swift:
+    name: Swift (iOS peripheral logic)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm run test:ios
+
+  android:
+    name: Kotlin (Android peripheral logic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - run: npm run test:android
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: android-test-report
+          path: tests/android/build/reports/tests/
+
+  android-integration:
+    name: Android module builds against Expo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - run: npm ci
+      - run: npm ci
+        working-directory: example
+      - run: npx expo prebuild --platform android --no-install
+        working-directory: example
+      # The unit-test harness deliberately leaves `ExpoGattServerModule.kt` out, because the Expo
+      # Gradle plugin only resolves inside a host app's build. This is the job that compiles it — so a
+      # binding that no longer matches the parsers or the manager fails here rather than in someone's
+      # app.
+      - run: ./gradlew :expo-gatt-server:compileReleaseKotlin --console=plain
+        working-directory: example/android

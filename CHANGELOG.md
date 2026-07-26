@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   device or native app build. The concurrency is deliberately **not** covered; see
   [Development](docs/development.md#testing) for why.
 
+  `.github/workflows/ci.yml` runs all three suites,
+  the linter, the type-checker, both builds and a tarball-contents check, plus a job that compiles the
+  Android module against the real Expo toolchain.
+
 - An Expo config plugin, so the package configures its own build-time requirements instead of leaving
   every consumer to hand-edit `app.json`. Adding `"plugins": ["expo-gatt-server"]` writes
   `NSBluetoothAlwaysUsageDescription`, without which iOS terminates the app the moment it touches
