@@ -139,106 +139,206 @@ export default function App() {
     [append]
   );
 
+  // Kept as data rather than inline JSX so every cell of the grid is laid out identically, and so the
+  // count stays even — an odd one out would stretch across its whole row.
+  const actions: Action[] = [
+    { label: 'requestPermissions', onPress: run('requestPermissions', requestPermissions) },
+    { label: 'createServer', onPress: run('createServer', () => createServer(SERVICES)) },
+    {
+      label: 'startAdvertising',
+      onPress: run('startAdvertising', () =>
+        startAdvertising({
+          localName: 'GattHarness',
+          serviceUuids: [SERVICE_UUID],
+          includeTxPowerLevel: false,
+          connectable: true,
+        })
+      ),
+    },
+    { label: 'stopAdvertising', tone: 'stop', onPress: run('stopAdvertising', () => stopAdvertising()) },
+    {
+      label: 'updateCharacteristicValue',
+      onPress: run('updateCharacteristicValue', () => {
+        counter.current = (counter.current + 1) % 256;
+        return updateCharacteristicValue(SERVICE_UUID, CHARACTERISTIC_UUID, [0, counter.current]);
+      }),
+    },
+    {
+      label: 'sendNotification',
+      onPress: run('sendNotification', () => {
+        if (!deviceId) {
+          throw new Error('no connected device');
+        }
+        return sendNotification(
+          deviceId,
+          SERVICE_UUID,
+          CHARACTERISTIC_UUID,
+          [0, counter.current],
+          false
+        );
+      }),
+    },
+    {
+      label: 'getConnectedDevices',
+      tone: 'query',
+      onPress: run('getConnectedDevices', async () => {
+        append(JSON.stringify(await getConnectedDevices()));
+      }),
+    },
+    {
+      label: 'status',
+      tone: 'query',
+      onPress: run('status', async () => {
+        append(
+          `supported=${isSupported()} running=${await isServerRunning()} ` +
+            `advertising=${await isAdvertising()}`
+        );
+      }),
+    },
+    {
+      label: 'disconnectDevice',
+      tone: 'stop',
+      onPress: run('disconnectDevice', () => {
+        if (!deviceId) {
+          throw new Error('no connected device');
+        }
+        return disconnectDevice(deviceId);
+      }),
+    },
+    { label: 'stopServer', tone: 'stop', onPress: run('stopServer', () => stopServer()) },
+  ];
+
   return (
     <View style={styles.container}>
       <StatusBar barStyle="dark-content" />
-      <Text style={styles.header}>expo-gatt-server harness</Text>
-      <Text style={styles.status}>connected: {deviceId ?? 'none'}</Text>
 
-      <View style={styles.buttons}>
-        <Button
-          label="requestPermissions"
-          onPress={run('requestPermissions', requestPermissions)}
-        />
-        <Button label="createServer" onPress={run('createServer', () => createServer(SERVICES))} />
-        <Button
-          label="startAdvertising"
-          onPress={run('startAdvertising', () =>
-            startAdvertising({
-              localName: 'GattHarness',
-              serviceUuids: [SERVICE_UUID],
-              includeTxPowerLevel: false,
-              connectable: true,
-            })
-          )}
-        />
-        <Button label="stopAdvertising" onPress={run('stopAdvertising', () => stopAdvertising())} />
-        <Button
-          label="updateCharacteristicValue"
-          onPress={run('updateCharacteristicValue', () => {
-            counter.current = (counter.current + 1) % 256;
-            return updateCharacteristicValue(SERVICE_UUID, CHARACTERISTIC_UUID, [0, counter.current]);
-          })}
-        />
-        <Button
-          label="sendNotification"
-          onPress={run('sendNotification', () => {
-            if (!deviceId) {
-              throw new Error('no connected device');
-            }
-            return sendNotification(
-              deviceId,
-              SERVICE_UUID,
-              CHARACTERISTIC_UUID,
-              [0, counter.current],
-              false
-            );
-          })}
-        />
-        <Button
-          label="getConnectedDevices"
-          onPress={run('getConnectedDevices', async () => {
-            append(JSON.stringify(await getConnectedDevices()));
-          })}
-        />
-        <Button
-          label="status"
-          onPress={run('status', async () => {
-            append(
-              `supported=${isSupported()} running=${await isServerRunning()} ` +
-                `advertising=${await isAdvertising()}`
-            );
-          })}
-        />
-        <Button
-          label="disconnectDevice"
-          onPress={run('disconnectDevice', () => {
-            if (!deviceId) {
-              throw new Error('no connected device');
-            }
-            return disconnectDevice(deviceId);
-          })}
-        />
-        <Button label="stopServer" onPress={run('stopServer', () => stopServer())} />
-        <Button label="clear log" onPress={() => setLog([])} />
+      <View style={styles.header}>
+        <Text style={styles.title}>expo-gatt-server</Text>
+        <View style={[styles.badge, deviceId ? styles.badgeOn : styles.badgeOff]}>
+          <Text style={styles.badgeLabel}>{deviceId ? 'connected' : 'no device'}</Text>
+        </View>
+      </View>
+      <Text style={styles.deviceId} numberOfLines={1}>
+        {deviceId ?? '—'}
+      </Text>
+
+      <View style={styles.grid}>
+        {actions.map((action) => (
+          <Button key={action.label} {...action} />
+        ))}
       </View>
 
-      <ScrollView style={styles.log}>
-        {log.map((line, index) => (
-          <Text key={`${index}-${line}`} style={styles.logLine}>
-            {line}
-          </Text>
-        ))}
+      <View style={styles.logHeader}>
+        <Text style={styles.logTitle}>log</Text>
+        <Text style={styles.logCount}>{log.length}</Text>
+        <View style={styles.spacer} />
+        <Pressable
+          style={({ pressed }) => [styles.clear, pressed && styles.pressed]}
+          onPress={() => setLog([])}>
+          <Text style={styles.clearLabel}>clear</Text>
+        </Pressable>
+      </View>
+      <ScrollView style={styles.log} contentContainerStyle={styles.logContent}>
+        {log.length === 0 ? (
+          <Text style={styles.logEmpty}>no events yet</Text>
+        ) : (
+          log.map((line, index) => (
+            <Text key={`${index}-${line}`} style={styles.logLine}>
+              {line}
+            </Text>
+          ))
+        )}
       </ScrollView>
     </View>
   );
 }
 
-function Button({ label, onPress }: { label: string; onPress: () => void }) {
+/** `stop` and `query` only tint the cell; every tone is the same size, so the grid stays regular. */
+type Action = { label: string; tone?: 'stop' | 'query'; onPress: () => void };
+
+function Button({ label, tone, onPress }: Action) {
   return (
-    <Pressable style={styles.button} onPress={onPress}>
-      <Text style={styles.buttonLabel}>{label}</Text>
+    <Pressable
+      style={({ pressed }) => [
+        styles.button,
+        tone === 'stop' && styles.buttonStop,
+        tone === 'query' && styles.buttonQuery,
+        pressed && styles.pressed,
+      ]}
+      onPress={onPress}>
+      {/* Two lines rather than one: `updateCharacteristicValue` does not fit a half-width cell on a
+          narrow phone, and wrapping keeps it readable where ellipsis would not. The cell height is
+          fixed either way, so a wrapped label does not make its row taller than the others. */}
+      <Text style={styles.buttonLabel} numberOfLines={2}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
 
+// Android reports no safe area of its own, so the status bar is measured; iOS keeps a notch-safe inset.
+const TOP_INSET = Platform.OS === 'android' ? (StatusBar.currentHeight ?? 0) + 12 : 60;
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#eee', paddingTop: 60, paddingHorizontal: 12 },
-  header: { fontSize: 20, fontWeight: '600', marginBottom: 4 },
-  status: { fontSize: 12, color: '#555', marginBottom: 8 },
-  buttons: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  button: { backgroundColor: '#2f6fed', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 7 },
-  buttonLabel: { color: '#fff', fontSize: 12 },
-  log: { flex: 1, marginTop: 12, backgroundColor: '#fff', borderRadius: 6, padding: 8 },
-  logLine: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', fontSize: 10 },
+  container: {
+    flex: 1,
+    backgroundColor: '#eee',
+    paddingTop: TOP_INSET,
+    paddingBottom: 12,
+    paddingHorizontal: 12,
+  },
+
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  title: { fontSize: 20, fontWeight: '600', color: '#111' },
+  badge: { borderRadius: 10, paddingHorizontal: 8, paddingVertical: 3 },
+  badgeOn: { backgroundColor: '#d6f0dd' },
+  badgeOff: { backgroundColor: '#e2e2e2' },
+  badgeLabel: { fontSize: 11, fontWeight: '600', color: '#333' },
+  deviceId: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 11,
+    color: '#666',
+    marginTop: 4,
+    marginBottom: 12,
+  },
+
+  // Two equal columns: `flexBasis` under half sets the count, `flexGrow` squares the edges off.
+  grid: { flexDirection: 'row', flexWrap: 'wrap', columnGap: 8, rowGap: 6 },
+  button: {
+    flexBasis: '47%',
+    flexGrow: 1,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#2f6fed',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+  },
+  buttonStop: { backgroundColor: '#8a94a6' },
+  buttonQuery: { backgroundColor: '#4a5568' },
+  buttonLabel: {
+    color: '#fff',
+    fontSize: 12,
+    lineHeight: 14,
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+  pressed: { opacity: 0.7 },
+
+  logHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, marginBottom: 6 },
+  logTitle: { fontSize: 12, fontWeight: '600', color: '#444', textTransform: 'uppercase' },
+  logCount: { fontSize: 11, color: '#888' },
+  spacer: { flex: 1 },
+  clear: { borderRadius: 6, paddingHorizontal: 10, paddingVertical: 4, backgroundColor: '#ddd' },
+  clearLabel: { fontSize: 11, fontWeight: '600', color: '#444' },
+
+  log: { flex: 1, backgroundColor: '#fff', borderRadius: 8 },
+  logContent: { padding: 10, gap: 2 },
+  logEmpty: { fontSize: 11, color: '#aaa', fontStyle: 'italic' },
+  logLine: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 11,
+    lineHeight: 15,
+    color: '#222',
+  },
 });
