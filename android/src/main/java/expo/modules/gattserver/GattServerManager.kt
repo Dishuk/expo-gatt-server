@@ -204,8 +204,13 @@ class GattServerManager(
 
   var listener: Listener? = null
 
-  private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-  private val bluetoothAdapter: BluetoothAdapter? = bluetoothManager.adapter
+  // `as?` rather than a cast: a device with no Bluetooth returns null from `getSystemService`, and a
+  // failed cast in a property initialiser throws out of the constructor — so the very device
+  // [bluetoothUnavailable] exists to report was answered with ERR_CREATE_SERVER and a
+  // ClassCastException message instead of the documented ERR_BLUETOOTH. `currentBluetoothState` already
+  // reads the service this way.
+  private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+  private val bluetoothAdapter: BluetoothAdapter? = bluetoothManager?.adapter
   @Volatile
   private var gattServer: BluetoothGattServer? = null
   // The advertising callbacks are posted to the main looper — `BluetoothLeAdvertiser` wraps them in
@@ -822,7 +827,7 @@ class GattServerManager(
     // instances it built, keeps them. Nothing in the API says a power cycle empties the database.
     val retained = currentCharacteristicValues()
     synchronized(publicationLock) { publication = DatabasePublication.IN_PROGRESS }
-    val server = bluetoothManager.openGattServer(context, gattServerCallback) ?: return false
+    val server = bluetoothManager?.openGattServer(context, gattServerCallback) ?: return false
     gattServer = server
     server.clearServices()
 
