@@ -1577,7 +1577,12 @@ class GattServerManager(
     mtuErrorFor(deviceId, value.size)?.let { throw it }
 
     val entry = QueuedNotification(device, characteristic, characteristicUuid, confirm, value, onResult)
-    val queue = notificationQueues.getOrPut(deviceId) { NotificationQueue() }
+    // `computeIfAbsent` rather than `getOrPut`, which is a plain `get() ?: put()` — `kotlin.concurrent`
+    // is not imported, so the atomic overload is not the one that resolves. Two first sends to the same
+    // device racing each other both built a queue and the second replaced the first in the map, leaving
+    // whatever the first had enqueued in a queue nothing would drain. The same hazard `subscriptions`
+    // uses `compute` for.
+    val queue = notificationQueues.computeIfAbsent(deviceId) { NotificationQueue() }
     synchronized(queue) {
       if (queue.waiting.size >= MAX_QUEUED_NOTIFICATIONS_PER_DEVICE) {
         throw GattServerException(
@@ -1588,14 +1593,23 @@ class GattServerManager(
       }
       queue.waiting.addLast(entry)
     }
-    // The device may have gone away between the check above and the queue being registered, in which
-    // case nothing would ever drain it.
-    if (!connectedDevices.containsKey(deviceId)) {
+    // Two ways this entry can land somewhere nothing will drain it, both from a teardown running between
+    // the lookup above and the enqueue.
+    //
+    // The device may simply have gone away. Or — the case testing `connectedDevices` alone missed — the
+    // central may have disconnected and reconnected inside the window: the teardown detached this queue
+    // from the map and the reconnection registered a new one, so the device is present again while this
+    // entry sits in the detached queue with no timeout armed and a promise that never settles. A
+    // detached queue is never re-registered, so its identity is what distinguishes the two.
+    val detached = notificationQueues[deviceId] !== queue
+    val disconnected = !connectedDevices.containsKey(deviceId)
+    if (detached || disconnected) {
       val error = GattServerException("ERR_DEVICE_DISCONNECTED", "Device $deviceId disconnected")
-      failNotifications(deviceId, error)
-      // Also completed straight from this entry, because every teardown removes the device before it
-      // drains the queues: the queue this entry landed in may already have been detached from the map, and
-      // the drain above would then find nothing and leave the awaiting promise pending for good.
+      // Only when the device itself is gone. A queue the central has already reconnected behind belongs
+      // to the live connection, and failing its entries would settle sends that are still perfectly good.
+      if (disconnected) failNotifications(deviceId, error)
+      // Settled straight from this entry either way, because the drain above cannot reach a queue that
+      // is no longer the registered one.
       if (takeQueued(queue, entry)) entry.onResult(error)
       return
     }
