@@ -230,6 +230,25 @@ class AttOperationsTest {
     }
   }
 
+  /**
+   * Pins the two bits to the values the specification assigns them, rather than to themselves.
+   *
+   * Every other case here uses the constants on both sides of the assertion, so swapping their values
+   * left the whole suite green while the server delivered indications to a client that had asked for
+   * notifications and vice versa — the exact confusion `cccdEnables` exists to prevent. Core Spec Vol 3,
+   * Part G, §3.3.3.3: bit 0 is Notification, bit 1 is Indication.
+   */
+  @Test
+  fun `the configuration bits are the ones the specification assigns`() {
+    assertEquals(0x0001, CCCD_NOTIFY_BIT)
+    assertEquals(0x0002, CCCD_INDICATE_BIT)
+    // Stated against literals too, so the pairing cannot be inverted without this failing.
+    assertTrue(cccdEnables(0x0001, confirm = false))
+    assertFalse(cccdEnables(0x0001, confirm = true))
+    assertTrue(cccdEnables(0x0002, confirm = true))
+    assertFalse(cccdEnables(0x0002, confirm = false))
+  }
+
   @Test
   fun `either bit counts as subscribed and neither does not`() {
     assertFalse(cccdSubscribed(0x0000))
