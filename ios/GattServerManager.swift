@@ -643,6 +643,23 @@ class GattServerManager: NSObject {
     }
   }
 
+  /// Hands queued notifications to CoreBluetooth until one is refused, taking each off the queue before
+  /// delivering it.
+  ///
+  /// Dequeuing first because [deliver] settles the entry's promise, and settling is JavaScript's cue to
+  /// send the next value: an entry still sitting in the array while its own completion runs could be
+  /// removed a second time, or have a different one removed in its place. A refusal puts it back at the
+  /// head, since the order a characteristic's values go out in is the order they were queued.
+  private func drainPendingNotifications() {
+    while let next = pendingNotifications.first {
+      pendingNotifications.removeFirst()
+      guard deliver(next) else {
+        pendingNotifications.insert(next, at: 0)
+        return
+      }
+    }
+  }
+
   /// Hands one queued notification to CoreBluetooth. Returns `false` only when the transmit queue
   /// is full and the entry must stay queued until the manager reports it is ready.
   private func deliver(_ entry: QueuedNotification) -> Bool {
@@ -681,6 +698,12 @@ class GattServerManager: NSObject {
     pendingNotifications.removeAll(where: predicate)
     for entry in abandoned {
       entry.completion(error)
+    }
+    // The refusal that owes us a `peripheralManagerIsReady` may have belonged to an entry just abandoned,
+    // and CoreBluetooth owes nothing on behalf of a central that has gone. Whatever is still queued would
+    // then wait for a callback that never arrives — and never time out — so it is retried here instead.
+    if !pendingNotifications.isEmpty && peripheralManager != nil {
+      drainPendingNotifications()
     }
   }
 
@@ -1373,9 +1396,6 @@ extension GattServerManager: CBPeripheralManagerDelegate {
   /// Resends only the payloads that were actually refused, oldest first, stopping as soon as the transmit
   /// queue fills again so the rest keep their place in line.
   func peripheralManagerIsReady(_ peripheral: CBPeripheralManager) {
-    while let next = pendingNotifications.first {
-      guard deliver(next) else { return }
-      pendingNotifications.removeFirst()
-    }
+    drainPendingNotifications()
   }
 }
