@@ -319,6 +319,14 @@ class GattServerManager(
     class ToCharacteristic(
       val characteristic: BluetoothGattCharacteristic,
       override val offset: Int,
+    /**
+     * The plain (non-CCCD) descriptor values the same execute carried, withheld for the same reason.
+     * These used to be applied while the batch was assembled, before delegation was even worked out, so
+     * a rejected execute still left a vendor descriptor holding the new value — the server and the
+     * central disagreeing about an execute the central saw refused, which is exactly what the
+     * queued-write procedure's atomicity forbids.
+     */
+    val deferredDescriptors: Map<BluetoothGattDescriptor, ByteArray> = emptyMap(),
       override val value: ByteArray,
     ) : PreparedWrite()
 
@@ -1743,7 +1751,8 @@ class GattServerManager(
       registerPendingRequest(
         requestId, device.address, offset = 0, isRead = false,
         deferredValues = assembled.deferredValues,
-        clientConfigurations = assembled.clientConfigurations
+        clientConfigurations = assembled.clientConfigurations,
+        deferredDescriptors = assembled.deferredDescriptors,
       )
     } else {
       // Applied here rather than during the assembly, because a subscribe or unsubscribe transition
@@ -1768,6 +1777,8 @@ class GattServerManager(
    * Merges every queued part onto the value its attribute holds *now* and commits the result, the whole
    * read-modify-write under [attributeValueLock]. Assembling outside it would merge onto a value a
    * concurrent write or `updateCharacteristicValue` had already replaced, and the commit would then lose
+    /** Plain descriptor values withheld for the same reason, and on the same condition. */
+    val deferredDescriptors: Map<BluetoothGattDescriptor, ByteArray> = emptyMap(),
    * that write.
    *
    * Nothing is committed unless every part validates. A CCCD is only assembled and returned, because
@@ -1821,8 +1832,7 @@ class GattServerManager(
         if (descriptor.uuid == CCCD_UUID) {
           clientConfigurations.add(descriptor to cccdBits(value))
         } else {
-          @Suppress("DEPRECATION")
-          descriptor.value = value
+          plainDescriptors[descriptor] = value
         }
       }
 
@@ -1874,10 +1884,20 @@ class GattServerManager(
     offset: Int,
     isRead: Boolean,
     deferredValues: Map<BluetoothGattCharacteristic, DeferredWrite> = emptyMap(),
+      // Decided per characteristic, as the direct write path already does: one that never opted in must
+      // still have its value applied, even when a sibling in the same execute delegates. Worked out
+      // before anything is committed, because whether this execute is still refusable is what decides
+      // which parts of it may be applied now.
+      val delegated = characteristicValues.keys.filterTo(LinkedHashSet()) { delegationFor(it).write }
+      val automatic = characteristicValues.filterKeys { it !in delegated }
+      val refusable = delegated.isNotEmpty()
+
     clientConfigurations: List<Pair<BluetoothGattDescriptor, Int>> = emptyList(),
+      val plainDescriptors = LinkedHashMap<BluetoothGattDescriptor, ByteArray>()
   ) {
     val key = RequestKey(deviceId, requestId)
-    val pending = PendingRequest(offset, isRead, deferredValues, clientConfigurations)
+    val pending =
+      PendingRequest(offset, isRead, deferredValues, clientConfigurations, deferredDescriptors)
     // The expiry names the entry it was armed for, so one already dispatched onto the main looper when its
     // request was answered or displaced cannot remove — and answer — whatever took its place.
     val timeout = if (requestTimeoutMs > 0) Runnable { expireRequest(key, pending) } else null
@@ -1893,6 +1913,10 @@ class GattServerManager(
 
   /**
    * Answers a request JavaScript left unanswered, so the central's transaction completes with an
+        for ((descriptor, value) in plainDescriptors) {
+          @Suppress("DEPRECATION")
+          descriptor.value = value
+        }
    * error rather than stalling until its own ATT transaction timeout drops the connection.
    *
    * "Unlikely Error" is the closest the specification offers: the request was valid and the server
@@ -1906,6 +1930,7 @@ class GattServerManager(
     gattServer?.sendResponse(device, key.requestId, ATT_ERROR_UNLIKELY_ERROR, pending.offset, null)
   }
 
+        deferredDescriptors = if (refusable) plainDescriptors else emptyMap(),
   private fun discardPendingRequests(predicate: (RequestKey) -> Boolean) {
     val iterator = pendingRequests.entries.iterator()
     while (iterator.hasNext()) {
@@ -1931,6 +1956,7 @@ class GattServerManager(
    */
   @SuppressLint("MissingPermission")
   fun sendResponse(deviceId: String, requestId: Int, status: Int, offset: Int, value: ByteArray) {
+    deferredDescriptors: Map<BluetoothGattDescriptor, ByteArray> = emptyMap(),
     // Every rejection the caller could have caused is checked before the pending entry is touched, so a
     // rejected attempt leaves the request answerable instead of stranding the central until its ATT
     // transaction times out. The request is looked up first, so answering one the server has forgotten —
@@ -2057,12 +2083,33 @@ class GattServerManager(
   @SuppressLint("MissingPermission")
   private fun answerAndDiscardPendingRequests(status: Int, predicate: (RequestKey) -> Boolean) {
     val iterator = pendingRequests.entries.iterator()
+    // The plain descriptors of the same execute, held back for the same reason and applied at the same
+    // moment. Unlike a characteristic there is nothing else that writes a descriptor between the
+    // assembly and here, so no baseline comparison is needed — but the revert below still has to undo
+    // them, since a response the stack refuses did not complete the execute either.
+    val previousDescriptorValues = LinkedHashMap<BluetoothGattDescriptor, ByteArray?>()
+    if (status == BluetoothGatt.GATT_SUCCESS) {
+      synchronized(attributeValueLock) {
+        for ((descriptor, value) in pending.deferredDescriptors) {
+          @Suppress("DEPRECATION")
+          previousDescriptorValues[descriptor] = descriptor.value
+          @Suppress("DEPRECATION")
+          descriptor.value = value
+        }
+      }
+    }
     while (iterator.hasNext()) {
       val (key, pending) = iterator.next()
       if (!predicate(key)) continue
       pending.timeout?.let { timeoutHandler.removeCallbacks(it) }
       iterator.remove()
       val device = connectedDevices[key.deviceId] ?: continue
+      synchronized(attributeValueLock) {
+        for ((descriptor, previous) in previousDescriptorValues) {
+          @Suppress("DEPRECATION")
+          descriptor.value = previous
+        }
+      }
       gattServer?.sendResponse(device, key.requestId, status, pending.offset, null)
     }
   }
