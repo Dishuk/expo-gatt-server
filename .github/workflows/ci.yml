@@ -31,6 +31,12 @@ jobs:
         working-directory: example
       - run: npx tsc --noEmit -p tsconfig.json
         working-directory: example
+      # Linted as well as type-checked, and for the same reason. `expo-module lint` hardcodes its target
+      # to `src`, so `npm run lint` never reached the example — which meant the rules the package fails
+      # its own build over were unenforced in the one place a reader is pointed at, and it had accumulated
+      # real errors while CI stayed green.
+      - run: npx eslint . --max-warnings 0
+        working-directory: example
       # Both build outputs are published but not committed, so a break in either only ever surfaces at
       # `npm publish` otherwise.
       - run: npm run build

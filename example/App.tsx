@@ -22,7 +22,7 @@ import {
   type EventSubscription,
   type GattServiceConfig,
 } from 'expo-gatt-server';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   PermissionsAndroid,
   Platform,
@@ -63,10 +63,14 @@ const SERVICES: GattServiceConfig[] = [
   },
 ];
 
+// The value the harness reports and notifies, outside React because nothing renders it: it is read and
+// written only from event handlers and from the read-request listener. Holding it in a `useRef` made
+// every action that touched it a ref-reading closure, which is what the button list is built out of.
+let counter = 60;
+
 export default function App() {
   const [log, setLog] = useState<string[]>([]);
   const [deviceId, setDeviceId] = useState<string | null>(null);
-  const counter = useRef(60);
 
   const append = useCallback((line: string) => {
     setLog((prev) => [`${new Date().toISOString().slice(11, 19)}  ${line}`, ...prev].slice(0, 200));
@@ -87,13 +91,13 @@ export default function App() {
         // `offset: 0` because the value passed is the whole attribute; the module rebases the response
         // onto the offset the request asked for. Passing `event.offset` here with an unsliced value
         // would resend the prefix on a Read Blob continuation.
-        sendResponse(event.deviceId, event.requestId, GATT_SUCCESS, 0, [0, counter.current]).catch(
+        sendResponse(event.deviceId, event.requestId, GATT_SUCCESS, 0, [0, counter]).catch(
           (error: unknown) => append(`sendResponse failed: ${String(error)}`),
         );
       }),
       addCharacteristicWriteRequestListener((event) => {
         append(
-          `onCharacteristicWriteRequest req=${event.requestId} value=[${event.value.join(',')}]`
+          `onCharacteristicWriteRequest req=${event.requestId} value=[${event.value.join(',')}]`,
         );
         if (event.responseNeeded) {
           sendResponse(
@@ -101,7 +105,7 @@ export default function App() {
             event.requestId,
             GATT_SUCCESS,
             event.offset,
-            event.value
+            event.value,
           ).catch((error: unknown) => append(`sendResponse failed: ${String(error)}`));
         }
       }),
@@ -134,8 +138,10 @@ export default function App() {
     append(JSON.stringify(result));
   }, [append]);
 
+  // Invoked when a button is pressed rather than while the action list is built, so the list holds the
+  // actions themselves rather than closures already wrapped around them.
   const run = useCallback(
-    (label: string, action: () => void | Promise<void>) => async () => {
+    async (label: string, action: () => void | Promise<void>) => {
       try {
         await action();
         append(`${label}: ok`);
@@ -143,77 +149,73 @@ export default function App() {
         append(`${label}: ${String(error)}`);
       }
     },
-    [append]
+    [append],
   );
+
+  // Held in callbacks rather than written inline in the action list below, so the list stays a plain
+  // description of the buttons.
+  const nextValue = useCallback(() => {
+    counter = (counter + 1) % 256;
+    return updateCharacteristicValue(SERVICE_UUID, CHARACTERISTIC_UUID, [0, counter]);
+  }, []);
+
+  const notifyValue = useCallback(() => {
+    if (!deviceId) {
+      throw new Error('no connected device');
+    }
+    return sendNotification(deviceId, SERVICE_UUID, CHARACTERISTIC_UUID, [0, counter], false);
+  }, [deviceId]);
 
   // Kept as data rather than inline JSX so every cell of the grid is laid out identically, and so the
   // count stays even — an odd one out would stretch across its whole row.
   const actions: Action[] = [
-    { label: 'requestPermissions', onPress: run('requestPermissions', requestPermissions) },
-    { label: 'createServer', onPress: run('createServer', () => createServer(SERVICES)) },
+    { label: 'requestPermissions', action: requestPermissions },
+    { label: 'createServer', action: () => createServer(SERVICES) },
     {
       label: 'startAdvertising',
-      onPress: run('startAdvertising', () =>
+      action: () =>
         // `includeTxPowerLevel` is deliberately omitted: iOS cannot express it, so passing it at all —
         // even as `false` — makes the shared layer warn on every call in the harness the guides point at.
         startAdvertising({
           localName: 'GattHarness',
           serviceUuids: [SERVICE_UUID],
           connectable: true,
-        })
-      ),
+        }),
     },
-    { label: 'stopAdvertising', tone: 'stop', onPress: run('stopAdvertising', () => stopAdvertising()) },
+    { label: 'stopAdvertising', tone: 'stop', action: () => stopAdvertising() },
     {
       label: 'updateCharacteristicValue',
-      onPress: run('updateCharacteristicValue', () => {
-        counter.current = (counter.current + 1) % 256;
-        return updateCharacteristicValue(SERVICE_UUID, CHARACTERISTIC_UUID, [0, counter.current]);
-      }),
+      action: nextValue,
     },
-    {
-      label: 'sendNotification',
-      onPress: run('sendNotification', () => {
-        if (!deviceId) {
-          throw new Error('no connected device');
-        }
-        return sendNotification(
-          deviceId,
-          SERVICE_UUID,
-          CHARACTERISTIC_UUID,
-          [0, counter.current],
-          false
-        );
-      }),
-    },
+    { label: 'sendNotification', action: notifyValue },
     {
       label: 'getConnectedDevices',
       tone: 'query',
-      onPress: run('getConnectedDevices', async () => {
+      action: async () => {
         append(JSON.stringify(await getConnectedDevices()));
-      }),
+      },
     },
     {
       label: 'status',
       tone: 'query',
-      onPress: run('status', async () => {
+      action: async () => {
         append(
           `supported=${isSupported()} running=${await isServerRunning()} ` +
-            `advertising=${await isAdvertising()}`
+            `advertising=${await isAdvertising()}`,
         );
-      }),
+      },
     },
     {
       label: 'disconnectDevice',
       tone: 'stop',
-      onPress: run('disconnectDevice', () => {
+      action: () => {
         if (!deviceId) {
           throw new Error('no connected device');
         }
         return disconnectDevice(deviceId);
-      }),
+      },
     },
-    { label: 'stopServer', tone: 'stop', onPress: run('stopServer', () => stopServer()) },
+    { label: 'stopServer', tone: 'stop', action: () => stopServer() },
   ];
 
   return (
@@ -231,8 +233,13 @@ export default function App() {
       </Text>
 
       <View style={styles.grid}>
-        {actions.map((action) => (
-          <Button key={action.label} {...action} />
+        {actions.map((entry) => (
+          <Button
+            key={entry.label}
+            label={entry.label}
+            tone={entry.tone}
+            onPress={() => run(entry.label, entry.action)}
+          />
         ))}
       </View>
 
@@ -262,9 +269,9 @@ export default function App() {
 }
 
 /** `stop` and `query` only tint the cell; every tone is the same size, so the grid stays regular. */
-type Action = { label: string; tone?: 'stop' | 'query'; onPress: () => void };
+type Action = { label: string; tone?: 'stop' | 'query'; action: () => void | Promise<void> };
 
-function Button({ label, tone, onPress }: Action) {
+function Button({ label, tone, onPress }: Omit<Action, 'action'> & { onPress: () => void }) {
   return (
     <Pressable
       style={({ pressed }) => [

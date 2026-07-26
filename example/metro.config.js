@@ -11,9 +11,7 @@ config.resolver.blockList = [
   ...Array.from(config.resolver.blockList ?? []),
   // On windows the path will resolve with `\`. We need to escape it with `\\` for the RegExp.
   new RegExp(path.resolve(__dirname, '..', 'node_modules', 'react').replace(/\\/g, '\\\\')),
-  new RegExp(
-    path.resolve(__dirname, '..', 'node_modules', 'react-native').replace(/\\/g, '\\\\')
-  ),
+  new RegExp(path.resolve(__dirname, '..', 'node_modules', 'react-native').replace(/\\/g, '\\\\')),
 ];
 
 config.resolver.nodeModulesPaths = [
