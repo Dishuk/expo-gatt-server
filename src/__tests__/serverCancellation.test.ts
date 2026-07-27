@@ -190,4 +190,27 @@ describe('a stop issued while a create is in flight', () => {
 
     await expect(advertise).rejects.toThrow(/cancelled by a stopAdvertising/);
   });
+
+  // A create the native side refused took no radio, so it owes an in-flight start nothing. Cancelling
+  // regardless rejected that start naming a `stopAdvertising` nobody issued, and its guard then really
+  // stopped the advertisement that was working.
+  it('leaves an in-flight advertisement alone when the create is rejected natively', async () => {
+    let releaseAdvertise: () => void = () => {};
+    nativeModuleMock.startAdvertising.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((resolve) => {
+          releaseAdvertise = () => resolve(undefined);
+        }),
+    );
+    nativeModuleMock.createServer.mockImplementationOnce(async () => {
+      throw Object.assign(new Error('Bluetooth permission denied'), { code: 'ERR_PERMISSION' });
+    });
+
+    const advertise = startAdvertising({});
+    await expect(createServer(SERVICES)).rejects.toMatchObject({ code: 'ERR_PERMISSION' });
+    releaseAdvertise();
+
+    await expect(advertise).resolves.toBeUndefined();
+    expect(nativeModuleMock.stopAdvertising).not.toHaveBeenCalled();
+  });
 });

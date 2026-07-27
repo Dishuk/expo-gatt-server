@@ -594,12 +594,15 @@ export async function createServer(
   // stop to the create genuinely in flight. That create rejected saying the database was not published
   // while it was, which is the exact outcome this whole mechanism exists to prevent.
   const generation = ++serverStartEpoch;
-  // Both natives stop advertising as part of accepting a new server, so a `startAdvertising` still in
-  // flight has had the radio taken from under it and must not go on to resolve as though it were on the
-  // air. `stopServer` bumps this for the same reason.
-  advertisingStopEpoch += 1;
   try {
     await nativeModule().createServer(normalizedServices, options);
+    // Bumped once the native side has accepted, not before it is called: both natives stop advertising
+    // as part of *accepting* a new server, so a `startAdvertising` still in flight has had the radio
+    // taken and must not resolve as though it were on the air. A create rejected before that — a denied
+    // permission, a configuration the native parser refuses — took nothing, and bumping regardless
+    // rejected the in-flight start naming a `stopAdvertising` the application never issued, then had its
+    // `finally` stop a working advertisement for real. `stopServer` bumps this for the same reason.
+    advertisingStopEpoch += 1;
   } finally {
     // In a `finally`, so a create whose native call rejects still releases its claim. Left to the
     // success path alone, a rejected create stayed the most recent one for good and every later
