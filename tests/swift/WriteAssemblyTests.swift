@@ -317,7 +317,7 @@ extension WriteAssemblyTests {
   }
 
   /// Assembly bounds the offset and not the result, so fragments that are each within what a PDU carries
-  /// can still build a value longer than an attribute may hold. The batch is refused whole for it.
+  /// can still build a value longer than an attribute may hold.
   func testFragmentsWithinRangeCanStillAssemblePastTheLimit() {
     let manager = GattServerManager(requestTimeoutMs: 1000)
     let address = CharacteristicAddress(
@@ -332,5 +332,51 @@ extension WriteAssemblyTests {
 
     XCTAssertEqual(assembled?[address]?.count, 1000)
     XCTAssertTrue(exceedsAttributeLength(assembled?[address]?.count ?? 0))
+  }
+
+  /// And the batch is refused whole for it, with the ATT error Android answers the same input with.
+  func testABatchThatAssemblesPastTheLimitIsRefusedWhole() {
+    let manager = GattServerManager(requestTimeoutMs: 1000)
+    let address = CharacteristicAddress(
+      service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
+    )
+    let fragments = [
+      GattServerManager.WriteFragment(address: address, offset: 0, value: Data(repeating: 1, count: 500)),
+      GattServerManager.WriteFragment(address: address, offset: 500, value: Data(repeating: 2, count: 500)),
+    ]
+
+    XCTAssertEqual(
+      manager.resolveWriteBatch(fragments, current: [:]), .exceedsAttributeLength
+    )
+  }
+
+  func testABatchAtTheLimitIsAccepted() {
+    let manager = GattServerManager(requestTimeoutMs: 1000)
+    let address = CharacteristicAddress(
+      service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
+    )
+    let fragments = [
+      GattServerManager.WriteFragment(address: address, offset: 0, value: Data(repeating: 1, count: 256)),
+      GattServerManager.WriteFragment(address: address, offset: 256, value: Data(repeating: 2, count: 256)),
+    ]
+
+    XCTAssertEqual(
+      manager.resolveWriteBatch(fragments, current: [:]),
+      .assembled([address: Data(repeating: 1, count: 256) + Data(repeating: 2, count: 256)])
+    )
+  }
+
+  /// A fragment addressing a gap past the end of its attribute is the other way a batch resolves to
+  /// nothing, and it answers a different ATT error.
+  func testAFragmentPastTheEndIsRefusedAsAnInvalidOffset() {
+    let manager = GattServerManager(requestTimeoutMs: 1000)
+    let address = CharacteristicAddress(
+      service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
+    )
+    let fragments = [
+      GattServerManager.WriteFragment(address: address, offset: 4, value: Data([1, 2]))
+    ]
+
+    XCTAssertEqual(manager.resolveWriteBatch(fragments, current: [:]), .invalidOffset)
   }
 }

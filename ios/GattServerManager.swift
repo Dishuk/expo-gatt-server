@@ -24,6 +24,13 @@ func exceedsAttributeLength(_ size: Int) -> Bool {
   size > maxAttributeValueLength
 }
 
+/// Octets that fit in one notification to [central]: what the link carries, bounded by what an
+/// attribute value may hold. The same bound `DeviceMtu` reports, so a payload sized against `getMtu`
+/// is exactly the one this accepts.
+func notificationPayloadLimit(for central: CBCentral) -> Int {
+  min(central.maximumUpdateValueLength, maxAttributeValueLength)
+}
+
 /// Upper bound on notifications parked *per central* while the CoreBluetooth transmit queue is full.
 /// Without it a producer that outruns the link would grow the queue forever.
 ///
@@ -202,8 +209,10 @@ struct DeviceMtu {
   /// iOS only ever reports a payload length, `CBCentral.maximumUpdateValueLength`, so the ATT_MTU is
   /// reconstructed from it rather than read directly.
   init(maxNotificationPayload: Int) {
-    self.maxNotificationPayload = maxNotificationPayload
     self.mtu = maxNotificationPayload + attNotificationHeaderSize
+    // Bounded by what an attribute value may hold, which is the `min` Android reports too. The link
+    // can carry more above an ATT_MTU of 515, but no attribute that long can be notified.
+    self.maxNotificationPayload = min(maxNotificationPayload, maxAttributeValueLength)
   }
 }
 
@@ -973,7 +982,7 @@ class GattServerManager: NSObject {
     // `updateValue` documents that a value exceeding `maximumUpdateValueLength` "will be truncated to
     // fit", and a notification has no continuation mechanism — unlike a read, which the central can
     // finish with a Read Blob request — so transmitting it would silently lose the tail.
-    let maxPayload = central.maximumUpdateValueLength
+    let maxPayload = notificationPayloadLimit(for: central)
     guard value.count <= maxPayload else {
       throw GattServerError.payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count)
     }
@@ -1062,7 +1071,7 @@ class GattServerManager: NSObject {
     let central = connectedCentrals[entry.deviceId] ?? entry.central
     // Re-checked as well as at enqueue time: the link budget can shrink while an entry waits for the
     // transmit queue, and the payload must never reach CoreBluetooth if it cannot be carried intact.
-    let maxPayload = central.maximumUpdateValueLength
+    let maxPayload = notificationPayloadLimit(for: central)
     guard entry.value.count <= maxPayload else {
       entry.completion(GattServerError.payloadExceedsMtu(
         maxPayload: maxPayload, payloadSize: entry.value.count
@@ -1481,6 +1490,31 @@ class GattServerManager: NSObject {
     return assembled
   }
 
+  /// What a batch of write fragments resolves to, and the ATT error to answer it with when it resolves
+  /// to nothing.
+  enum WriteBatchOutcome: Equatable {
+    case invalidOffset
+    case exceedsAttributeLength
+    case assembled([CharacteristicAddress: Data])
+  }
+
+  /// Held apart from the delegate method so both refusals can be exercised: `CBATTRequest` has no
+  /// public initialiser, so nothing reachable from a test can enter that callback.
+  func resolveWriteBatch(
+    _ fragments: [WriteFragment],
+    current: [CharacteristicAddress: Data]
+  ) -> WriteBatchOutcome {
+    guard let assembled = assembleWriteBatch(fragments, current: current) else {
+      return .invalidOffset
+    }
+    // Checked on the assembled result rather than on each fragment: every fragment is within what a PDU
+    // carries, and it is only their placement that can push an attribute past what one may hold.
+    if assembled.contains(where: { exceedsAttributeLength($0.value.count) }) {
+      return .exceedsAttributeLength
+    }
+    return .assembled(assembled)
+  }
+
   private func nextRequestId() -> Int {
     requestCounter += 1
     return requestCounter
@@ -1887,17 +1921,16 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     let fragments = zip(requests, addresses).map {
       WriteFragment(address: $1, offset: $0.offset, value: $0.value ?? Data())
     }
-    guard let assembled = assembleWriteBatch(fragments, current: characteristicValues) else {
+    let assembled: [CharacteristicAddress: Data]
+    switch resolveWriteBatch(fragments, current: characteristicValues) {
+    case .invalidOffset:
       peripheral.respond(to: first, withResult: .invalidOffset)
       return
-    }
-    // Checked on the assembled result rather than on each fragment: every fragment is within what a PDU
-    // carries, and it is only their placement that can push an attribute past what one may hold. A batch
-    // that would is refused whole, which is the same rule the offset check above follows and what
-    // Android answers the same input with.
-    if assembled.contains(where: { exceedsAttributeLength($0.value.count) }) {
+    case .exceedsAttributeLength:
       peripheral.respond(to: first, withResult: .invalidAttributeValueLength)
       return
+    case .assembled(let values):
+      assembled = values
     }
 
     // A delegated characteristic's value is JavaScript's to commit with `updateCharacteristicValue` once

@@ -85,6 +85,23 @@ describe('a container of the wrong shape', () => {
     expect(nativeModuleMock.startAdvertising).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * Both natives read these as `as? Boolean ?: default`, so a wrong type is absent rather than an
+   * error there — `connectable: 'false'` advertised a connectable peripheral and resolved.
+   */
+  it.each([
+    ['connectable', { connectable: 'false' }],
+    ['includeTxPowerLevel', { includeTxPowerLevel: 'yes' }],
+    ['localName', { localName: 42 }],
+    ['android.includeDeviceName', { android: { includeDeviceName: 'true' } }],
+    ['android.setAdapterName', { android: { setAdapterName: 1 } }],
+  ])('rejects advertising %s of the wrong type', async (field, config) => {
+    await expect(startAdvertising(config as never)).rejects.toThrow(
+      new RegExp(`Invalid advertising ${field.replace('.', '\\.')}`),
+    );
+    expect(nativeModuleMock.startAdvertising).not.toHaveBeenCalled();
+  });
+
   it('still rejects an android block of the wrong type', async () => {
     await expect(startAdvertising({ android: 42 as never })).rejects.toThrow(
       /Invalid advertising android options/,

@@ -1549,6 +1549,12 @@ class GattServerManager(
         advertising.set(true)
         scheduleAdvertisingTimeout(options.timeoutMs)
         finishAdvertise(null)
+        // The test above is a read, not a claim, and `stopAdvertising` runs on another thread: a stop
+        // between the two left these writes re-arming an advertisement already off the air.
+        if (!current()) {
+          advertising.set(false)
+          cancelAdvertisingTimeout()
+        }
       }
       override fun onStartFailure(errorCode: Int) {
         if (!current()) return
@@ -2108,7 +2114,9 @@ class GattServerManager(
       queue.inFlight = null
       queue.waiting.addFirst(entry)
     }
-    timeoutHandler.postDelayed({ pumpNotifications(deviceId) }, NOTIFICATION_BUSY_RETRY_MS)
+    // Not the main looper: the retry re-enters `notifyValue`, a binder call that holds
+    // [attributeValueLock] before Tiramisu, and a stalled central retries it every 50 ms for 35 s.
+    lifecycleHandler().postDelayed({ pumpNotifications(deviceId) }, NOTIFICATION_BUSY_RETRY_MS)
     return true
   }
 
@@ -2125,7 +2133,9 @@ class GattServerManager(
     queue: NotificationQueue,
     entry: QueuedNotification,
   ) {
-    timeoutHandler.postDelayed({
+    // Off the main looper for the same reason as [reparkBusyNotification]: this ends by pumping the
+    // queue, which re-enters the binder.
+    lifecycleHandler().postDelayed({
       if (!takeQueued(queue, entry)) return@postDelayed
       Log.w(TAG, "No onNotificationSent for $deviceId within $NOTIFICATION_TIMEOUT_MS ms; failing the send")
       entry.onResult(

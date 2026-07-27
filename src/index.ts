@@ -223,6 +223,20 @@ function assertArrayOrAbsent(value: unknown, field: string): void {
 }
 
 /**
+ * Rejects a value of the wrong primitive type where an optional one belongs.
+ *
+ * Both natives read these as `as? Boolean ?: default` / `as? String`, so a wrong type is not an error
+ * there — it is simply absent, and the call resolves having quietly done something else. `connectable`
+ * is the one that matters most: a truthy `'false'` advertises a connectable peripheral for an app that
+ * asked for a beacon, and iOS never reaches the `ERR_UNSUPPORTED` it documents for it.
+ */
+function assertTypeOrAbsent(value: unknown, field: string, expected: 'boolean' | 'string'): void {
+  if (value !== undefined && typeof value !== expected) {
+    throw new Error(`Invalid ${field} ${JSON.stringify(value)}. Expected a ${expected}.`);
+  }
+}
+
+/**
  * A whole number the native side will receive in a parameter declared as an integer.
  *
  * Every such argument is validated here rather than only where it happens to be used, because the
@@ -692,6 +706,19 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
     assertNoUnknownKeys(config.android, ANDROID_ADVERTISE_KEYS, 'advertising android');
   }
   assertArrayOrAbsent(config.serviceUuids, 'advertising serviceUuids');
+  assertTypeOrAbsent(config.localName, 'advertising localName', 'string');
+  assertTypeOrAbsent(config.connectable, 'advertising connectable', 'boolean');
+  assertTypeOrAbsent(config.includeTxPowerLevel, 'advertising includeTxPowerLevel', 'boolean');
+  assertTypeOrAbsent(
+    config.android?.includeDeviceName,
+    'advertising android.includeDeviceName',
+    'boolean',
+  );
+  assertTypeOrAbsent(
+    config.android?.setAdapterName,
+    'advertising android.setAdapterName',
+    'boolean',
+  );
   const serviceUuids = config.serviceUuids?.map((uuid) => normalizeUuid(uuid, 'service'));
   if (config.mode !== undefined) {
     assertOneOf(config.mode, ADVERTISING_MODES, 'advertising mode');

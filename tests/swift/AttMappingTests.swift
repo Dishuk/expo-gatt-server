@@ -184,4 +184,20 @@ final class AttMappingTests: XCTestCase {
                      payload)
     }
   }
+
+  /// `min(mtu - 3, 512)` is what `getMtu` documents and what Android reports; the second bound only
+  /// binds above an ATT_MTU of 515, which is where the two platforms used to disagree.
+  func testThePayloadIsBoundedByWhatAnAttributeMayHold() {
+    let link = DeviceMtu(maxNotificationPayload: 514)
+
+    XCTAssertEqual(link.maxNotificationPayload, maxAttributeValueLength)
+    XCTAssertEqual(link.maxNotificationPayload, 512)
+    // The ATT_MTU itself is the link's, not the bounded one — only the payload budget is capped.
+    XCTAssertEqual(link.mtu, 517)
+  }
+
+  func testThePayloadIsUntouchedBelowTheAttributeBound() {
+    XCTAssertEqual(DeviceMtu(maxNotificationPayload: 512).maxNotificationPayload, 512)
+    XCTAssertEqual(DeviceMtu(maxNotificationPayload: 244).maxNotificationPayload, 244)
+  }
 }

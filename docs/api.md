@@ -649,11 +649,13 @@ server exists. On iOS "not connected" means "not known", which is a weaker state
 | Platform | `mtu` | `maxNotificationPayload` |
 |----------|-------|--------------------------|
 | Android | Exact, from `BluetoothGattServerCallback.onMtuChanged` | Derived as `min(mtu - 3, 512)` |
-| iOS | Derived as `maximumUpdateValueLength + 3` | Exact, from `CBCentral.maximumUpdateValueLength` |
+| iOS | Derived as `maximumUpdateValueLength + 3` | `min(maximumUpdateValueLength, 512)` |
 
 CoreBluetooth exposes only a payload length, never an MTU, so on iOS `mtu` is reconstructed by
 adding the three header octets back. Apple does not document that identity, so prefer
-`maxNotificationPayload` on iOS where the figure is exact.
+`maxNotificationPayload` on iOS, which is measured rather than inferred. Both platforms apply the
+512-octet attribute bound to it, so the same link reports the same budget either side; that bound only
+binds above an ATT_MTU of 515.
 
 ---
 
