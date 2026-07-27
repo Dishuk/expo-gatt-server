@@ -12,7 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > **This release reworks the public API, and a large number of the changes are breaking.** Every one is
 > marked **Breaking** below. The most likely to break an existing integration:
 >
-> - `GATT_FAILURE` and the `MTU_SMALL` error code are **removed**
+> - the `GATT_FAILURE` constant and the `MTU_SMALL` error code are **removed** — `GATT_FAILURE` was an
+>   exported symbol, `MTU_SMALL` only ever a rejection `code` string
+> - `createServer` and `startAdvertising` now **reject** when a stop was issued while they were in
+>   flight, where both used to resolve. This is the ordinary React shape — an unawaited `createServer`
+>   in an effect and a `stopServer` in its teardown — so a call that was silently discarded on unmount
+>   is now an unhandled rejection unless it is caught
+> - the package entry point moves from `./src/index.ts` to the compiled `./build/index.js`, so a deep
+>   import of `expo-gatt-server/src/...` no longer resolves
 > - event payloads now report every UUID as the lowercase 128-bit form, so a `===` against a short or
 >   uppercase spelling that used to match on one platform no longer does
 > - `sendNotification` rejects instead of resolving when nothing is subscribed, when the characteristic
@@ -299,8 +306,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waiting for JavaScript to answer the request, not whether the central asked for an acknowledgement. It
   was previously hardcoded per platform and meant neither. It is `true` only for a characteristic
   configured with `delegate.write` whose write carries a response; every other write is acknowledged
-  before the event is emitted. `CharacteristicReadRequestEvent.requestId` and the write event's
-  `requestId` are likewise real request identifiers now, rather than fixed values
+  before the event is emitted. The write event's `requestId` is likewise a real request identifier now,
+  rather than the hardcoded `0` both platforms sent; the read event already carried a real one
 - **Breaking:** a byte outside `0`–`255` anywhere in a `number[]` argument throws instead of being
   silently truncated or clamped into a different value. Affects characteristic and descriptor `value`,
   `sendNotification`, `sendResponse`, `manufacturerData` and `serviceData`

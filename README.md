@@ -141,12 +141,16 @@ expo-gatt-server/
 ├── ios/
 │   ├── ExpoGattServer.podspec     # CocoaPods spec (iOS 15.1+)
 │   ├── ExpoGattServerModule.swift # Expo module definition
+│   ├── GattConfigurationParsing.swift # Configuration decoding, host-testable
 │   └── GattServerManager.swift    # CoreBluetooth peripheral manager
 ├── android/
 │   ├── build.gradle               # Android build config (API 24+)
 │   └── src/main/java/expo/modules/gattserver/
+│       ├── AttOperations.kt         # ATT property, permission and error maps
 │       ├── ExpoGattServerModule.kt  # Expo module definition
+│       ├── GattConfiguration.kt     # Configuration parsing, host-testable
 │       └── GattServerManager.kt     # BluetoothGatt server manager
+├── tests/                         # Host-side Swift and Kotlin suites
 ├── plugin/src/                    # Expo config plugin (built to plugin/build/)
 ├── example/                       # Runnable harness app for local development
 ├── docs/                          # Documentation

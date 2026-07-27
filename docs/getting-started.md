@@ -384,7 +384,13 @@ import {
 } from 'expo-gatt-server';
 
 addCharacteristicWriteRequestListener(async (event) => {
-  if (!event.responseNeeded) return;
+  // A delegated characteristic keeps its value yours to commit, whether or not this event is the one
+  // that answers. iOS delivers a long write touching several delegated characteristics as one batch,
+  // marking exactly one event `responseNeeded` — returning early on the rest would drop their values.
+  if (!event.responseNeeded) {
+    await updateCharacteristicValue(event.serviceUuid, event.characteristicUuid, event.value);
+    return;
+  }
 
   if (event.value.length !== 1) {
     await sendResponse(

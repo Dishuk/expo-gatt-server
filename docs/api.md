@@ -166,7 +166,7 @@ callback".
 | `ERR_NO_CONTEXT` | Android only: no React context is available, so the permission could not be checked |
 | `ERR_UNSUPPORTED` | iOS only: the configuration asks for a property, permission or descriptor CoreBluetooth cannot express -- see the type tables below |
 | `ERR_BLUETOOTH` | Bluetooth is off, or the device has no BLE support. Check [`getBluetoothState`](#getbluetoothstate) to tell which |
-| `ERR_NO_SERVER` | [`stopServer`](#stopserver) ran, or Bluetooth went off, before the database finished publishing |
+| `ERR_NO_SERVER` | [`stopServer`](#stopserver) ran before the database finished publishing. Bluetooth going off during publication reports `ERR_BLUETOOTH` instead, on both platforms |
 | `ERR_CREATE_SERVER` | A service failed to publish, the configuration was malformed, or the platform never acknowledged a registration within 30 s — a bound that exists only so a round that cannot finish is reported instead of leaving this promise, and every parked `startAdvertising`, pending for the life of the process. Registration is local bookkeeping that takes milliseconds, so nothing healthy approaches it; call `createServer` again to retry |
 
 A failed registration leaves **no** usable database: `isServerRunning` stays `false` and
@@ -523,7 +523,7 @@ Answer a pending read or write request -- one delivered by
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `deviceId` | `string` | Requesting device identifier, from the event |
-| `requestId` | `number` | Request ID from the event. Must be a whole number `0`--`9007199254740991`; `NaN`, an infinity or a fraction is rejected rather than narrowed |
+| `requestId` | `number` | Request ID from the event. Must be a whole number `0`--`9007199254740991`; `NaN`, an infinity or a fraction is rejected rather than narrowed. Both platforms narrow further, to `2147483647`, so an id above that rejects natively -- unreachable with an id the module issued |
 | `status` | `number` | `GATT_SUCCESS` or an `ATT_ERROR_*` code. Must be an integer `0`--`255`, since an ATT error code is a single octet |
 | `offset` | `number` | The offset within the attribute at which `value` begins. Must be an integer `0`--`65535` |
 | `value` | `number[]` | Response byte array, starting at `offset`. Not transmitted for a write -- an `ATT_WRITE_RSP` carries no value -- so pass `[]` |
@@ -547,8 +547,10 @@ await sendResponse(deviceId, requestId, GATT_SUCCESS, event.offset, wholeValue.s
 after `createServer`'s `requestTimeoutMs`; `REQUEST_DEVICE_MISMATCH` if the request belongs to a
 different device than `deviceId`; `ERR_RESPONSE_OFFSET` if `offset` is past the offset the request
 asked for -- which would leave the requested bytes missing from the response;
-`ERR_DEVICE_DISCONNECTED` if the central went away (**Android only**); `ERR_BLUETOOTH` if Bluetooth is
-off (**Android only**); and `ERR_RESPONSE` if the Bluetooth stack does not accept the response
+`ERR_DEVICE_DISCONNECTED` if the central went away (**Android only**); `ERR_BLUETOOTH` if Bluetooth
+went off in the window between the server being dropped and the pending requests being discarded
+(**Android only** -- outside that race the lookup below reports `REQUEST_NOT_FOUND` instead); and
+`ERR_RESPONSE` if the Bluetooth stack does not accept the response
 (**Android only** -- `CBPeripheralManager.respond(to:withResult:)` returns `Void` and reports nothing,
 so iOS resolves whether or not the response reached the central). A `status`, `offset` or byte value
 outside its range is rejected as a plain `Error` before either platform sees it.
@@ -559,7 +561,12 @@ rather than the reason the database went away. That holds on both platforms: iOS
 server too, since `stopServer` answers and discards every pending request, leaving nothing the lookup
 could have found.
 
-A rejected call leaves the request still answerable, rather than consuming it -- so a mistake here
+`ERR_RESPONSE` is the exception to the paragraph below: the entry is claimed before the response is
+handed to the stack, because an expiry already dispatched would otherwise answer the request a second
+time. A response the stack refuses therefore leaves the request unanswerable -- the lesser fault, since
+the stack that refused it is gone anyway.
+
+Every other rejected call leaves the request still answerable, rather than consuming it -- so a mistake here
 does not strand the central until its own ATT transaction times out.
 
 `value` is **not** size-checked against the MTU. An `ATT_READ_RSP` carries at most `ATT_MTU - 1`
@@ -1829,6 +1836,7 @@ meaning.
 |----------|-------|-------------|
 | `ATT_TRANSACTION_TIMEOUT_MS` | `30000` | The ATT transaction timeout (Core Specification, Vol 3, Part F, Section 3.3.3). The exclusive upper bound on `CreateServerOptions.requestTimeoutMs` |
 | `DEFAULT_REQUEST_TIMEOUT_MS` | `10000` | The default `CreateServerOptions.requestTimeoutMs` |
+| `MAX_ATTRIBUTE_VALUE_LENGTH` | `512` | The longest value an attribute may hold (Core Specification, Vol 3, Part F, Section 3.2.9). Bounds a configured `value`, anything `updateCharacteristicValue` writes, and what a queued write may assemble to |
 | `CLIENT_CHARACTERISTIC_CONFIGURATION_UUID` | `'00002902-0000-1000-8000-00805f9b34fb'` | The CCCD UUID, in the 128-bit form both platforms compare against. The module publishes and answers this descriptor itself, so declaring it in `descriptors` is rejected; the constant is exported for recognising it |
 
 ## Error Codes
