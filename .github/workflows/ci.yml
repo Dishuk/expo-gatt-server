@@ -41,9 +41,14 @@ jobs:
       # `npm publish` otherwise.
       - run: npm run build
       - run: npm run build:plugin
+      # `--ignore-scripts`, so this reads what the two build steps above produced rather than rebuilding
+      # it: `npm pack` runs `prepack` and `prepare`, so without it the outputs are regenerated moments
+      # before being listed and a build that does not happen at publish time would still look present.
+      # Stdout goes to a file that must parse as JSON, which a lifecycle script logging into it would
+      # break — another reason not to run them here.
       - name: Check the tarball contents
         run: |
-          npm pack --dry-run --json > pack.json
+          npm pack --dry-run --ignore-scripts --json > pack.json
           node --input-type=module -e '
             import { readFileSync } from "node:fs";
             const files = JSON.parse(readFileSync("pack.json", "utf8"))[0].files.map((f) => f.path);
@@ -152,6 +157,12 @@ jobs:
           if [ ! -d "$candidate" ]; then
             echo "The known-good Xcode (26.5) is not installed on this runner image." >&2
             echo "Installed: $(ls -d /Applications/Xcode_*.app 2>/dev/null | tr '\n' ' ')" >&2
+            echo "GitHub rotates versions off its images, so this is expected to happen eventually" >&2
+            echo "and it blocks every pull request until someone acts, since the failure has nothing" >&2
+            echo "to do with the change under test. To fix it: run this build locally under each" >&2
+            echo "installed version listed above, and move the pin to the lowest one that compiles" >&2
+            echo "Expo's packages — see the toolchain note above ci.yml's ios-integration job for why" >&2
+            echo "an unverified fallback is not added here instead." >&2
             exit 1
           fi
           sudo xcode-select -s "$candidate"
