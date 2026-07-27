@@ -9,7 +9,7 @@ An Expo module that turns your React Native app into a BLE GATT server (peripher
 | [Expo](https://expo.dev/) | SDK 57 | Framework and module system -- the version this package is developed and tested against |
 | [React Native](https://reactnative.dev/) | as bundled with your Expo SDK | Runtime |
 | [Node.js](https://nodejs.org/) | >= 18 | Build tooling |
-| Xcode | >= 15 | iOS builds (iOS 15.1+ deployment target, Swift 5.9) |
+| Xcode | 26.5 | iOS builds (iOS 15.1+ deployment target, Swift 5.9). Bounded at both ends by Expo SDK 57 rather than by this package: its prebuilt artefacts need Swift 6.2, and later compilers do not yet build them -- see the `ios-integration` job in `.github/workflows/ci.yml` |
 | Android Studio | any | Android builds (API 24+ / Android 7.0, compileSdk 35) |
 
 **A development build is required.** The package ships native code, so it cannot run in Expo Go. Use

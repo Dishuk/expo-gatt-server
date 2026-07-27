@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > - a mistyped property or permission name throws instead of being ignored
 > - Android no longer renames the device's Bluetooth adapter, no longer declares
 >   `ACCESS_FINE_LOCATION` at all, and no longer declares `android.hardware.bluetooth_le` as required
+> - the `expo` peer dependency narrows from `*` to `>=57.0.0`, so an app on SDK 51–56 no longer
+>   resolves this package, and `expo-modules-core` becomes a peer dependency it must provide
 
 ### Added
 
@@ -97,9 +99,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bluetoothPeripheralBackgroundMode` to add `bluetooth-peripheral` to `UIBackgroundModes`, and
   `requireBluetoothLeHardware` to declare `android.hardware.bluetooth_le` required — the manifest
   merger ORs `android:required`, so this is how an app that genuinely needs BLE overrides the
-  `required="false"` the module declares to keep its consumers on Google Play. Every property defaults
-  to the previous behaviour, and an omitted `bluetoothAlwaysPermission` leaves an existing
-  `ios.infoPlist` value alone
+  `required="false"` the module declares to keep its consumers on Google Play. An omitted
+  `bluetoothAlwaysPermission` leaves an existing `ios.infoPlist` value alone, and otherwise fills in a
+  generic description where the module previously wrote none. `requireBluetoothLeHardware` defaults to
+  `false`, which is a change from the `required="true"` the module's own manifest used to declare — see
+  the manifest entry below. Every property only ever raises a declaration, so none of them can be turned
+  back off by setting it to `false`: a project already prebuilt with one needs `expo prebuild --clean`
 - `isSupported`, and lazy failure everywhere else. The native module is now resolved with
   `requireOptionalNativeModule`, so **importing the package no longer throws** on web or in Expo Go —
   `requireNativeModule` threw at import time, which took down any bundle that reached the import even
@@ -211,7 +216,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The published package no longer ships sourcemaps.** `files` ships only `build`, so every emitted map
   pointed at `../src/index.ts`, a path no consumer's install contains — which sends a debugger to a
   missing file rather than to the shipped output. `plugin/build` already emitted none.
-- **The `expo` peer range names the SDK this is built against, and `expo-modules-core` is declared.**
+- **Breaking: the `expo` peer range names the SDK this is built against, and `expo-modules-core` is
+  declared.**
   `expo: "*"` claimed support for every SDK ever published, none of which is exercised by anything;
   it is now `>=57.0.0`, which is what the development dependency, the guides and CI all agree on. And
   `src/index.ts` imports `Platform` and `EventSubscription` from `expo-modules-core`, which ships in
@@ -312,9 +318,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   separately from subscriptions. A read/write-only central is therefore reported, where previously it was
   invisible. Its disconnection generally still is not: CoreBluetooth reports none, so the module infers
   one from the loss of the last subscription or from Bluetooth leaving `poweredOn`
-- `sendNotification` resolves when the platform reports the notification as delivered, and queues
-  sends behind one still in flight instead of letting the platform drop them. A device may have 64 sends
-  waiting before `ERR_NOTIFY_QUEUE_FULL`
+- `sendNotification` queues sends behind one still in flight instead of letting the platform drop
+  them, and a device may have 64 sends waiting before `ERR_NOTIFY_QUEUE_FULL`. What the promise reports
+  differs by platform and the difference cannot be removed — Android resolves it from
+  `onNotificationSent`, iOS once CoreBluetooth accepts the payload for transmission, because the
+  peripheral role has no delivery callback at all. See the entry under **Fixed** below
 - `sendNotification` rejects with `ERR_NO_SUBSCRIBER` instead of resolving when nothing is
   subscribed to the characteristic
 - **Breaking:** `sendNotification` no longer changes the value a read of the characteristic returns.

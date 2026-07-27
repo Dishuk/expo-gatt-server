@@ -469,7 +469,7 @@ application-level acknowledgement out of it on either platform — have the cent
 | `PAYLOAD_EXCEEDS_MTU` | `value` is longer than the link can carry in one notification. Checked **before** anything is transmitted, and re-checked if the MTU shrinks while the send is queued -- nothing is sent and the payload is not truncated. Size payloads against [`getMtu`](#getmtu)`.maxNotificationPayload` |
 | `ERR_CONFIRM_UNSUPPORTED` | The characteristic does not declare the property `confirm` asks for |
 | `ERR_NO_SUBSCRIBER` | The device has not enabled the transmission on the characteristic |
-| `ERR_NOTIFY_QUEUE_FULL` | 64 sends are already waiting for the same device (iOS: for the peripheral manager's transmit queue). Await earlier sends first |
+| `ERR_NOTIFY_QUEUE_FULL` | 64 sends are already waiting for the same device. Await earlier sends first |
 | `ERR_DEVICE_DISCONNECTED` | `deviceId` names no connected central, or it went away before a queued notification was delivered |
 | `ERR_CHARACTERISTIC_NOT_FOUND` | The pair of UUIDs names nothing in the published GATT database. An unknown `serviceUuid` and an unknown `characteristicUuid` share this code |
 | `ERR_NOTIFY` | The stack refused the send, or reported it as undelivered |
@@ -612,8 +612,10 @@ Read the current ATT MTU for a connected device, so payloads can be sized before
 
 The unit is the **ATT MTU in octets** -- the same thing the Bluetooth Core Specification and the
 Android platform call "MTU". `maxNotificationPayload` is the number to size a `sendNotification`
-payload against; it is `mtu - 3`, the maximum Attribute Value length of an `ATT_HANDLE_VALUE_NTF`
-PDU.
+payload against; it is the smaller of `mtu - 3` -- the maximum Attribute Value length of an
+`ATT_HANDLE_VALUE_NTF` PDU -- and the 512-octet maximum length of an attribute value itself (Core
+Spec Vol 3, Part F, §3.2.9). The second bound only binds on a link that negotiated an ATT MTU above
+515, where `mtu - 3` alone would allow more than an attribute may hold.
 
 A device that has not negotiated an MTU reports the specification default of `23` rather than
 failing, because that default is what the link actually carries until a negotiation happens.
@@ -624,7 +626,7 @@ server exists. On iOS "not connected" means "not known", which is a weaker state
 
 | Platform | `mtu` | `maxNotificationPayload` |
 |----------|-------|--------------------------|
-| Android | Exact, from `BluetoothGattServerCallback.onMtuChanged` | Derived as `mtu - 3` |
+| Android | Exact, from `BluetoothGattServerCallback.onMtuChanged` | Derived as `min(mtu - 3, 512)` |
 | iOS | Derived as `maximumUpdateValueLength + 3` | Exact, from `CBCentral.maximumUpdateValueLength` |
 
 CoreBluetooth exposes only a payload length, never an MTU, so on iOS `mtu` is reconstructed by
@@ -1064,7 +1066,7 @@ the same fields as [`getMtu`](#getmtu).
 |-------|------|-------------|
 | `event.deviceId` | `string` | The device whose MTU changed |
 | `event.mtu` | `number` | ATT MTU in octets |
-| `event.maxNotificationPayload` | `number` | `mtu - 3`; size `sendNotification` payloads against this |
+| `event.maxNotificationPayload` | `number` | `min(mtu - 3, 512)`; size `sendNotification` payloads against this |
 
 Android delivers this from `BluetoothGattServerCallback.onMtuChanged`, as the change happens. iOS
 has no MTU callback at all, so the value is sampled whenever the central produces ATT activity -- a
@@ -1647,7 +1649,7 @@ interface DeviceMtu {
   deviceId: string;
   /** ATT MTU in octets, including the 3-octet ATT header. Defaults to 23 before negotiation. */
   mtu: number;
-  /** Octets that fit in one notification or indication: `mtu - 3`. */
+  /** Octets that fit in one notification or indication: `min(mtu - 3, 512)`. */
   maxNotificationPayload: number;
 }
 
@@ -1810,12 +1812,12 @@ report the same one of the faults. `sendNotification`'s order is
 | `ERR_ADVERTISE` | The platform refused the advertisement, or a pending `startAdvertising` was superseded by another one, by `stopAdvertising` or by `stopServer` |
 | `ERR_RESPONSE` | The Bluetooth stack did not accept a `sendResponse`, or its arguments were rejected by the native layer |
 | `ERR_DISCONNECT` | **Android only.** `disconnectDevice` failed for a reason the stack did not classify |
-| `PAYLOAD_EXCEEDS_MTU` | A `sendNotification` payload is longer than one notification can carry (`mtu - 3`). Checked before transmitting, so nothing was sent. The message says when the link is still at the default ATT MTU of 23 |
+| `PAYLOAD_EXCEEDS_MTU` | A `sendNotification` payload is longer than one notification can carry (`min(mtu - 3, 512)`). Checked before transmitting, so nothing was sent. The message says when the link is still at the default ATT MTU of 23 |
 | `REQUEST_NOT_FOUND` | The `requestId` does not match a pending read or write request. It was never delegated, has already been answered, or expired after `requestTimeoutMs` |
 | `REQUEST_DEVICE_MISMATCH` | The `requestId` is pending, but for a different device than the `deviceId` supplied |
 | `ERR_RESPONSE_OFFSET` | The `offset` given to `sendResponse` is past the offset the request asked for, so the requested bytes would be missing |
 | `ERR_NOTIFY` | The Bluetooth stack refused the notification, or reported it as undelivered. A bad address is `ERR_DEVICE_DISCONNECTED` or `ERR_CHARACTERISTIC_NOT_FOUND` instead |
-| `ERR_NOTIFY_QUEUE_FULL` | 64 notifications are already queued — for the device on Android, for the whole peripheral manager on iOS, whose transmit queue is not per-central. Await earlier sends before queueing more |
+| `ERR_NOTIFY_QUEUE_FULL` | 64 notifications are already queued for the device. Counted per central on both platforms, so one link that has stopped draining cannot refuse sends to another. Await earlier sends before queueing more |
 | `ERR_DEVICE_DISCONNECTED` | The device is not connected, or disconnected -- or on iOS unsubscribed -- before a queued notification could be delivered. Also raised by `getMtu`, `sendResponse` and Android's `disconnectDevice` |
 | `ERR_CHARACTERISTIC_NOT_FOUND` | The pair of UUIDs names nothing in the published GATT database. An unknown `serviceUuid` shares this code, since iOS cannot tell the two apart |
 | `ERR_UPDATE_VALUE` | An `updateCharacteristicValue` argument was rejected by the native layer |

@@ -411,10 +411,11 @@ export interface DeviceMtu {
    */
   mtu: number;
   /**
-   * Octets that fit in a single notification or indication — `mtu - 3`, the maximum Attribute Value
-   * length of an `ATT_HANDLE_VALUE_NTF` PDU (Core Spec Vol 3, Part F, §3.4.7.1). Size a
-   * `sendNotification` payload against this; anything larger is rejected with `PAYLOAD_EXCEEDS_MTU`
-   * rather than truncated.
+   * Octets that fit in a single notification or indication — the smaller of `mtu - 3`, the maximum
+   * Attribute Value length of an `ATT_HANDLE_VALUE_NTF` PDU (Core Spec Vol 3, Part F, §3.4.7.1), and
+   * the 512-octet maximum length of an attribute value itself (§3.2.9). The second bound only binds
+   * above an ATT MTU of 515. Size a `sendNotification` payload against this; anything larger is
+   * rejected with `PAYLOAD_EXCEEDS_MTU` rather than truncated.
    */
   maxNotificationPayload: number;
 }
