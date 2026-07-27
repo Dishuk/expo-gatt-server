@@ -684,6 +684,15 @@ class GattServerManager: NSObject {
     // against the promise of the other. Two *can* be issued back to back: `flushReadinessWaiters`
     // releases everyone parked in one turn, and the documented pattern of calling `startAdvertising`
     // before `createServer` resolves is exactly how more than one comes to be parked.
+    //
+    // It narrows the window rather than closing it, and closing it is not possible from here. Nothing
+    // documents `stopAdvertising()` as retracting a callback CoreBluetooth has already queued, so a
+    // result belonging to the displaced start can still arrive after the replacement's completion is
+    // installed and settle that one instead — reporting the displaced advertisement's outcome against
+    // the replacement's promise. The callback carries no identity to test, and counting outstanding
+    // starts to infer one would hang the replacement for good on any build where a stopped start
+    // produces no callback at all, which is a worse failure than the one it would fix. Await each
+    // `startAdvertising` before issuing the next and the case cannot arise.
     if displaced != nil {
       peripheralManager?.stopAdvertising()
     }

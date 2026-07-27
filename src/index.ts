@@ -708,6 +708,14 @@ export function stopAdvertising(): void {
  * Rejects with `ERR_NO_SUBSCRIBER` when the device has not enabled the transmission on the
  * characteristic. See `options.requireSubscription` to send anyway where the platform allows it.
  *
+ * **Queueing is per central on Android and shared on iOS**, because the platforms are. Android allows
+ * one notification in flight per device and the module keeps a queue for each, so a link that has gone
+ * quiet holds up only its own sends. CoreBluetooth has a single transmit queue for the peripheral and
+ * one `peripheralManagerIsReady(toUpdateSubscribers:)` to say it has drained, so a payload it will not
+ * take parks every later send behind it whichever central it was addressed to — for at most 35 s, after
+ * which the parked entry is abandoned and the queue moves on. The 64-entry bound is counted per central
+ * on both.
+ *
  * **Does not change the value a read returns.** Pushing a value to subscribers and setting the value
  * an ATT Read is answered from are separate operations; `updateCharacteristicValue` does the latter,
  * so call both when a value should be pushed *and* readable.

@@ -321,6 +321,17 @@ class ExpoGattServerModule : Module() {
       }
     }
 
+    // Synchronous, which is what makes the shared layer's ordering work: `stopServer` has to be the
+    // `Function` whose body runs on the JavaScript thread the moment it is called, so a stop issued
+    // after a `createServer` is known to have been issued after it. See `serverStopEpoch` in
+    // `src/index.ts`.
+    //
+    // The cost is that [GattServerManager.stop] runs there too, and it takes `serverLifecycleLock` and
+    // then makes binder calls — `setName`, `unregisterReceiver`, `close`. An adapter power cycle holding
+    // that lock inside `openGattServer` will therefore block the JavaScript thread until the Bluetooth
+    // process answers. Moving the teardown to the lifecycle looper would fix that and is not done here
+    // because it would also stop `stopServer` from being ordered against anything, which is the property
+    // the whole cancellation mechanism is built on.
     Function("stopServer") {
       manager?.stop()
       manager = null
