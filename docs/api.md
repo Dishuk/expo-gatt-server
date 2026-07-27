@@ -909,8 +909,13 @@ addCharacteristicWriteRequestListener(
 ): EventSubscription
 ```
 
-Fired when a central writes to a characteristic. The event is emitted for **every** write, whether or
-not JavaScript has to answer it.
+Fired when a central writes to a characteristic, whether or not JavaScript has to answer it.
+
+A write the ATT layer refuses raises no event, because nothing was written: an offset past the end of
+the attribute is answered `ATT_INVALID_OFFSET`, and a value that would assemble past
+`MAX_ATTRIBUTE_VALUE_LENGTH` is answered `ATT_INVALID_ATTRIBUTE_VALUE_LENGTH`, on both platforms. A
+Write Without Response cannot be answered at all, so a refused one is dropped with only a native log
+line.
 
 | Field | Type | Description |
 |-------|------|-------------|

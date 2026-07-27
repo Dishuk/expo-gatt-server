@@ -437,7 +437,7 @@ class GattServerManager(
      * central disagreeing about an execute the central saw refused, which is exactly what the
      * queued-write procedure's atomicity forbids.
      */
-    val deferredDescriptors: Map<BluetoothGattDescriptor, ByteArray> = emptyMap(),
+    val deferredDescriptors: Map<BluetoothGattDescriptor, DeferredWrite> = emptyMap(),
   ) {
     // Assigned once, immediately after construction, because the expiry has to name the entry it expires.
     // Volatile because it is armed on a binder thread and read from the main looper and the caller's.
@@ -486,6 +486,17 @@ class GattServerManager(
   private class NotificationQueue {
     val waiting = ArrayDeque<QueuedNotification>()
     var inFlight: QueuedNotification? = null
+
+    /**
+     * How many `onNotificationSent` callbacks are owed to sends this queue has stopped waiting for.
+     *
+     * `onNotificationSent` names only the device, so the entry in flight is the only thing that says
+     * which send it reports. Once a bound abandons an entry the stack still owes a callback for it, and
+     * an unattributed one then settled whichever entry had taken its place — reporting the successor's
+     * characteristic with the abandoned send's status, and resolving a send the stack had dropped. The
+     * owed ones are spent instead, as the iOS manager spends a discarded round's acknowledgement.
+     */
+    var callbacksOwedToAbandonedSends = 0
   }
 
   // "Each client has its own instantiation of the Client Characteristic Configuration" and reads and
@@ -1002,14 +1013,25 @@ class GattServerManager(
       // to: `onNotificationSent` reports the device but not the characteristic, and the queue holds
       // exactly one send per device.
       val queue = notificationQueues[deviceId]
+      var spentOwed = false
       val finished = queue?.let {
         synchronized(it) {
-          val entry = it.inFlight
-          it.inFlight = null
-          entry
+          // Spent before the entry in flight is consulted: this callback may belong to a send a bound
+          // already gave up on, and the queue has moved on to another one since.
+          if (it.callbacksOwedToAbandonedSends > 0) {
+            it.callbacksOwedToAbandonedSends -= 1
+            spentOwed = true
+            null
+          } else {
+            val entry = it.inFlight
+            it.inFlight = null
+            entry
+          }
         }
       }
-      if (finished != null) {
+      if (spentOwed) {
+        Log.w(TAG, "onNotificationSent: late callback for an abandoned send to device=$deviceId (status $status)")
+      } else if (finished != null) {
         listener?.onNotificationSent(deviceId, finished.characteristicUuid, status)
         val error = if (status != BluetoothGatt.GATT_SUCCESS) {
           GattServerException(
@@ -2219,7 +2241,19 @@ class GattServerManager(
     // Off the main looper for the same reason as [reparkBusyNotification]: this ends by pumping the
     // queue, which re-enters the binder.
     lifecycleHandler().postDelayed({
-      if (!takeQueued(queue, entry)) return@postDelayed
+      val abandoned = synchronized(queue) {
+        if (queue.inFlight === entry) {
+          queue.inFlight = null
+          // Only this branch records one: the stack accepted this send and still owes a callback for
+          // it. An entry still waiting was never handed over. See
+          // [NotificationQueue.callbacksOwedToAbandonedSends].
+          queue.callbacksOwedToAbandonedSends += 1
+          true
+        } else {
+          queue.waiting.remove(entry)
+        }
+      }
+      if (!abandoned) return@postDelayed
       Log.w(TAG, "No onNotificationSent for $deviceId within $NOTIFICATION_TIMEOUT_MS ms; failing the send")
       entry.onResult(
         GattServerException(
@@ -2343,7 +2377,7 @@ class GattServerManager(
     /** Values withheld until JavaScript accepts the execute; empty unless it is partially delegated. */
     val deferredValues: Map<BluetoothGattCharacteristic, DeferredWrite> = emptyMap(),
     /** Plain descriptor values withheld for the same reason, and on the same condition. */
-    val deferredDescriptors: Map<BluetoothGattDescriptor, ByteArray> = emptyMap(),
+    val deferredDescriptors: Map<BluetoothGattDescriptor, DeferredWrite> = emptyMap(),
   )
 
   /**
@@ -2512,7 +2546,14 @@ class GattServerManager(
         } else {
           emptyMap()
         },
-        deferredDescriptors = if (refusable) plainDescriptors else emptyMap(),
+        deferredDescriptors = if (refusable) {
+          plainDescriptors.mapValues { (descriptor, value) ->
+            @Suppress("DEPRECATION")
+            DeferredWrite(value, descriptor.value)
+          }
+        } else {
+          emptyMap()
+        },
       )
     }
 
@@ -2538,7 +2579,7 @@ class GattServerManager(
     isRead: Boolean,
     deferredValues: Map<BluetoothGattCharacteristic, DeferredWrite> = emptyMap(),
     clientConfigurations: List<Pair<BluetoothGattDescriptor, Int>> = emptyList(),
-    deferredDescriptors: Map<BluetoothGattDescriptor, ByteArray> = emptyMap(),
+    deferredDescriptors: Map<BluetoothGattDescriptor, DeferredWrite> = emptyMap(),
   ) {
     val key = RequestKey(deviceId, requestId)
     val pending =
@@ -2667,17 +2708,21 @@ class GattServerManager(
       emptyMap()
     }
     // The plain descriptors of the same execute, held back for the same reason and applied at the same
-    // moment. Unlike a characteristic there is nothing else that writes a descriptor between the
-    // assembly and here, so no baseline comparison is needed — but the revert below still has to undo
-    // them, since a response the stack refuses did not complete the execute either.
-    val previousDescriptorValues = LinkedHashMap<BluetoothGattDescriptor, ByteArray?>()
+    // moment — against the baseline each was assembled from, as the characteristics are. A delegated
+    // execute stays open for up to `requestTimeoutMs`, and an unqueued descriptor write or another
+    // device's execute can land in that window, so committing regardless reverted a newer value.
+    val committedDescriptors = LinkedHashMap<BluetoothGattDescriptor, DeferredWrite>()
     if (status == BluetoothGatt.GATT_SUCCESS) {
       synchronized(attributeValueLock) {
-        for ((descriptor, value) in pending.deferredDescriptors) {
+        for ((descriptor, write) in pending.deferredDescriptors) {
           @Suppress("DEPRECATION")
-          previousDescriptorValues[descriptor] = descriptor.value
+          if (!descriptor.value.contentEquals(write.baseline)) {
+            logDebug { "Deferred write to descriptor ${descriptor.uuid} was superseded, keeping the newer value" }
+            continue
+          }
           @Suppress("DEPRECATION")
-          descriptor.value = value
+          descriptor.value = write.value
+          committedDescriptors[descriptor] = write
         }
       }
     }
@@ -2688,9 +2733,12 @@ class GattServerManager(
       // The central never received the response, so the execute did not complete for it either.
       revertDeferredValues(committed)
       synchronized(attributeValueLock) {
-        for ((descriptor, previous) in previousDescriptorValues) {
+        for ((descriptor, write) in committedDescriptors) {
+          // Only where nothing has written it since, as [revertDeferredValues] undoes a characteristic.
           @Suppress("DEPRECATION")
-          descriptor.value = previous
+          if (!descriptor.value.contentEquals(write.value)) continue
+          @Suppress("DEPRECATION")
+          descriptor.value = write.baseline
         }
       }
       throw GattServerException(
