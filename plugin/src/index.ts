@@ -18,6 +18,12 @@ export type ExpoGattServerPluginProps = {
    * answering requests while the app is backgrounded. Defaults to `false`: the mode is App Store
    * reviewable and useless to a foreground-only app.
    *
+   * Only ever adds, the same way `requireBluetoothLeHardware` does — a mode another plugin or the app
+   * config declared is never taken back out. So turning this off does not undo a project that was
+   * prebuilt with it on: `npx expo prebuild --clean`, or removing the entry from `ios/`'s `Info.plist`,
+   * is what does. Left in an app that no longer advertises in the background, it is a capability App
+   * Store review will ask to have justified.
+   *
    * @platform ios
    */
   bluetoothPeripheralBackgroundMode?: boolean;
@@ -49,6 +55,27 @@ function assertValidProps(props: ExpoGattServerPluginProps): void {
     throw new Error(
       `expo-gatt-server config plugin: expected an options object, received ${JSON.stringify(props)}.`,
     );
+  }
+
+  // The same rule the module applies to `createServer`'s own configuration, for the same reason: every
+  // layer below reads the keys it knows and ignores the rest, so a misspelling is not an error anywhere
+  // — it is simply absent. `requireBluetoothLEHardware` is one capital away from the real name and is
+  // read by nothing, so the app prebuilds clean and ships `android:required="false"`, staying listed on
+  // Google Play for devices with no BLE radio. There is no config to inherit here that a stray key could
+  // legitimately belong to: Expo passes this object through verbatim from `app.json`.
+  const recognised = [
+    'bluetoothAlwaysPermission',
+    'bluetoothPeripheralBackgroundMode',
+    'requireBluetoothLeHardware',
+  ];
+  for (const key of Object.keys(props)) {
+    if (!recognised.includes(key)) {
+      throw new Error(
+        `expo-gatt-server config plugin: unknown option ${JSON.stringify(key)}. Recognised options ` +
+          `are ${recognised.map((option) => JSON.stringify(option)).join(', ')}. An unrecognised one ` +
+          'is read by nothing, so it would be silently ignored rather than applied.',
+      );
+    }
   }
 
   const {

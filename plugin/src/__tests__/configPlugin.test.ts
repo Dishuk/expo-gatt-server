@@ -233,4 +233,97 @@ describe('plugin prop validation', () => {
   it('rejects null with a message naming the plugin', () => {
     expect(() => apply(null)).toThrow(/expo-gatt-server config plugin: expected an options object/);
   });
+
+  /**
+   * A key no layer below reads is the same silent-drop failure `createServer` rejects an unknown option
+   * for. `requireBluetoothLEHardware` is one capital away from the real name, so the app prebuilds clean
+   * and ships `android:required="false"` — staying on Google Play for devices with no BLE radio.
+   */
+  it('rejects an option no layer below would read', () => {
+    expect(() => apply({ requireBluetoothLEHardware: true })).toThrow(
+      /unknown option "requireBluetoothLEHardware"/,
+    );
+    expect(() => apply({ nonsense: 1 })).toThrow(/unknown option "nonsense"/);
+  });
+});
+
+/**
+ * The helpers above are exercised directly, which leaves the two mods — the wiring that decides *what*
+ * they are called with — asserted by nothing. Swapping the iOS and Android mods, or defaulting
+ * `requireBluetoothLeHardware` to `true`, kept every other test in this file green while every app that
+ * prebuilt got the opposite of what it asked for.
+ */
+describe('the mods the plugin registers', () => {
+  // Built fresh per run: `withInfoPlist` and `withAndroidManifest` register by mutating the config they
+  // are given and chaining onto whatever mod is already there, so a shared object would run every
+  // previous test's props again on top of this one's.
+  const base = () => ({ name: 'harness', slug: 'harness' }) as never;
+
+  async function runIosMod(props: ExpoGattServerPluginProps, infoPlist: BluetoothInfoPlist) {
+    const config = withGattServer(base(), props) as {
+      mods?: {
+        ios?: { infoPlist?: (config: unknown) => Promise<{ modResults: BluetoothInfoPlist }> };
+      };
+    };
+    const mod = config.mods?.ios?.infoPlist;
+    if (!mod) {
+      throw new Error('the plugin registered no iOS infoPlist mod');
+    }
+    const result = await mod({ ...config, modResults: infoPlist, modRequest: {} });
+    return result.modResults;
+  }
+
+  async function runAndroidMod(props: ExpoGattServerPluginProps, root: Manifest) {
+    const config = withGattServer(base(), props) as {
+      mods?: {
+        android?: {
+          manifest?: (config: unknown) => Promise<{ modResults: { manifest: Manifest } }>;
+        };
+      };
+    };
+    const mod = config.mods?.android?.manifest;
+    if (!mod) {
+      throw new Error('the plugin registered no Android manifest mod');
+    }
+    const result = await mod({
+      ...config,
+      modResults: { manifest: root },
+      modRequest: {},
+    });
+    return result.modResults.manifest;
+  }
+
+  it('writes the usage description through the iOS mod', async () => {
+    const plist = await runIosMod({}, {});
+    expect(plist.NSBluetoothAlwaysUsageDescription).toEqual(expect.any(String));
+    expect(plist.UIBackgroundModes).toBeUndefined();
+  });
+
+  it('adds the background mode through the iOS mod only when asked', async () => {
+    const enabled = await runIosMod({ bluetoothPeripheralBackgroundMode: true }, {});
+    expect(enabled.UIBackgroundModes).toEqual(['bluetooth-peripheral']);
+
+    const disabled = await runIosMod({ bluetoothPeripheralBackgroundMode: false }, {});
+    expect(disabled.UIBackgroundModes).toBeUndefined();
+  });
+
+  /** The default the module's own manifest carries, so a consumer is not filtered off Google Play. */
+  it('declares the BLE feature as not required through the Android mod by default', async () => {
+    const root = await runAndroidMod({}, manifest());
+    expect(soleBleRequirement(root)).toBe('false');
+  });
+
+  it('raises the BLE feature through the Android mod when asked', async () => {
+    const root = await runAndroidMod({ requireBluetoothLeHardware: true }, manifest());
+    expect(soleBleRequirement(root)).toBe('true');
+  });
+
+  /** Each mod must reach its own platform's file, which a swap of the two would not survive. */
+  it('leaves the Android manifest alone from the iOS props and vice versa', async () => {
+    const root = await runAndroidMod({ bluetoothPeripheralBackgroundMode: true }, manifest());
+    expect(soleBleRequirement(root)).toBe('false');
+
+    const plist = await runIosMod({ requireBluetoothLeHardware: true }, {});
+    expect(plist.UIBackgroundModes).toBeUndefined();
+  });
 });
