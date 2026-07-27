@@ -315,6 +315,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `createServer` resolves only once every service is confirmed published, rather than as
   soon as the request was handed to the platform. A resolved promise now means the database really is
   there to advertise
+- **Breaking:** `startAdvertising` rejects a `localName`, `connectable`, `includeTxPowerLevel`,
+  `android.includeDeviceName` or `android.setAdapterName` of the wrong type instead of forwarding it.
+  Both natives read these as `as? Boolean ?: default`, so a wrong type was not an error there — it was
+  simply absent, and `connectable: 'false'` advertised a *connectable* peripheral while iOS never
+  reached the `ERR_UNSUPPORTED` it documents for it
 - **Breaking:** `sendNotification` rejects with `PAYLOAD_EXCEEDS_MTU` before transmitting anything when
   the payload exceeds what one notification can carry, and no longer sends a truncated payload. It is
   re-checked if the MTU shrinks while the send is queued. Conversely, `sendResponse` is no longer
@@ -383,6 +388,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`maxNotificationPayload` ignored the attribute bound on iOS.** It was reported straight from
+  `CBCentral.maximumUpdateValueLength` while Android reported `min(mtu - 3, 512)`, so above an ATT_MTU
+  of 515 the same link described a different budget on each platform, and iOS accepted a notification
+  Android refused with `PAYLOAD_EXCEEDS_MTU`. Both now apply the 512-octet bound, to the reported
+  figure and to the payload check, so a payload sized against `getMtu` is the one both accept.
+- **A stop racing `onStartSuccess` left `isAdvertising` true for good on Android.** The callback tested
+  whether it still owned the radio and then published its state in separate steps, so a
+  `stopAdvertising` arriving between the two — it runs on the JavaScript thread while the callback runs
+  on the main looper — was undone by the writes that followed it: the flag went back to `true`, the
+  airtime limit was re-armed for an advertisement already off the air, and any `setAdapterName` rename
+  stayed on the phone. The callback now re-tests after publishing and takes it back.
+- **The notification retry ran on the main thread on Android.** A stack reporting itself busy had the
+  queue re-enter `notifyValue` — a binder call holding the attribute lock before Tiramisu — every 50 ms
+  for up to 35 s on the UI thread, which is the work the module keeps a lifecycle thread to avoid. Both
+  retry paths now post there.
 - **A characteristic declaring one descriptor twice terminated the application on iOS.** Nothing
   rejected a repeated descriptor UUID: JavaScript checked service and characteristic UUIDs but not
   descriptors, and neither native parser checked at all. Android published the repeat — `getDescriptor`
