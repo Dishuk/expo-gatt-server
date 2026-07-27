@@ -422,10 +422,15 @@ export interface DeviceMtu {
 /**
  * The MTU for a connection changed, or was observed for the first time.
  *
- * Android delivers this from `onMtuChanged`, when a client requests a different MTU. iOS has no
- * equivalent callback, so the value is sampled whenever the central produces ATT activity and
- * emitted when it differs from the value last seen — a change therefore surfaces at the next
- * activity rather than the moment it happens, and the first event arrives with `onDeviceConnected`.
+ * Both platforms report the link's starting MTU with `onDeviceConnected`, so a consumer that sizes its
+ * payloads from this event alone is told the budget for every central. Android would otherwise say
+ * nothing at all for a central that never asks to exchange an MTU, since `onMtuChanged` fires only for
+ * a request that arrives.
+ *
+ * After that, Android delivers a genuine change from `onMtuChanged` as it happens. iOS has no
+ * equivalent callback, so the value is sampled whenever the central produces ATT activity and emitted
+ * when it differs from the value last seen — a change therefore surfaces at the next activity rather
+ * than the moment it happens.
  */
 export type MtuChangedEvent = DeviceMtu;
 

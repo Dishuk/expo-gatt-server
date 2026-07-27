@@ -690,6 +690,14 @@ class GattServerManager(
       null,
       Handler(thread.looper),
     )
+    // Reported once up front, because `ACTION_STATE_CHANGED` only ever announces a *change*: an adapter
+    // that stays as it is broadcasts nothing, so a consumer that renders from `onBluetoothStateChanged`
+    // alone sat on its initial value until the user happened to toggle Bluetooth. iOS has no such gap —
+    // `peripheralManagerDidUpdateState` fires for the first state as well as every later one — so the
+    // one listener that works there worked nowhere here. Delivered on the same looper as the broadcasts
+    // that follow it, so it cannot arrive after one.
+    val initial = currentBluetoothState(context)
+    Handler(thread.looper).post { onStateChange?.invoke(initial) }
   }
 
   private fun unregisterStateReceiver() {
@@ -729,6 +737,12 @@ class GattServerManager(
         BluetoothGattServer.STATE_CONNECTED -> {
           connectedDevices[id] = device
           listener?.onDeviceConnected(id, device.name)
+          // The link starts at the specification default, and `onMtuChanged` arrives only if the central
+          // asks to exchange — many never do. So a consumer sizing its payloads from
+          // `onMtuChanged` alone was never told anything at all for such a central, while on iOS the
+          // first sample always differs from an empty cache and the event always arrives. Reported here
+          // so the same listener works on both, and so what it carries is what `getMtu` would return.
+          listener?.onMtuChanged(id, DeviceMtu(deviceMtu[id] ?: DEFAULT_ATT_MTU))
         }
         BluetoothGattServer.STATE_DISCONNECTED -> {
           connectedDevices.remove(id)

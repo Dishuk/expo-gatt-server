@@ -970,6 +970,10 @@ export function addCharacteristicUnsubscribedListener(
 /**
  * Fires whenever the Bluetooth adapter state changes. Delivered only while a server exists,
  * since state monitoring is tied to the server lifecycle on both platforms.
+ *
+ * The state as it stands is reported once when the server is created, so a consumer that renders from
+ * this event alone starts from the truth rather than from a placeholder. Android otherwise said nothing
+ * until the user happened to toggle Bluetooth, because `ACTION_STATE_CHANGED` announces only changes.
  */
 export function addBluetoothStateChangedListener(
   listener: (event: BluetoothStateChangedEvent) => void,
