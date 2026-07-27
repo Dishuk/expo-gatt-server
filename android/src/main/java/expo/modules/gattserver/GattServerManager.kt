@@ -1532,7 +1532,17 @@ class GattServerManager(
     // with nothing left able to stop it. Stopped before the new start, so it also frees the controller
     // slot rather than counting towards ADVERTISE_FAILED_TOO_MANY_ADVERTISERS.
     displaced?.let { leAdvertiser.stopAdvertising(it) }
-    cancelAdvertisingTimeout()
+    // Only while this call still owns the radio. Two starts can be in `beginAdvertising` at once — the
+    // one released from `whenDatabasePublished` on the lifecycle thread and one the application issued
+    // straight afterwards on Expo's queue, which takes the synchronous path because the release is what
+    // published the database. The later one can already have installed its callback and armed its own
+    // limit by the time the earlier reaches here, and an unconditional cancel took that limit away: the
+    // platform then stopped its advertisement at `timeoutMs` with no callback, leaving `isAdvertising`
+    // reporting true and any `setAdapterName` rename on the phone for good. The same identity test the
+    // callback uses for `current()`.
+    if (advertiseCallback.get() === callback) {
+      cancelAdvertisingTimeout()
+    }
     try {
       leAdvertiser.startAdvertising(settings, advData.build(), scanResponse, callback)
     } catch (e: Exception) {
@@ -1545,12 +1555,16 @@ class GattServerManager(
         // is coming to say so. Left set, `isAdvertising` would report an advertisement that is not
         // running until the adapter-state receiver happened to clear it.
         advertising.set(false)
+        // Nothing reached the air, so the rename this start applied has nothing left to justify it — the
+        // same reason `onStartFailure` restores it. Without this, a start that threw because the adapter
+        // went off between the check above and the call left the phone named after the application for
+        // good, visible in Settings and to every peer.
+        //
+        // Inside the ownership test, because a start this one has already been displaced by owns both
+        // the radio and the name now: restoring unconditionally put the phone back to its original name
+        // while the advertisement that had just renamed it was still on the air.
+        restoreAdapterName()
       }
-      // Nothing reached the air, so the rename this start applied has nothing left to justify it — the
-      // same reason `onStartFailure` restores it. Without this, a start that threw because the adapter
-      // went off between the check above and the call left the phone named after the application for
-      // good, visible in Settings and to every peer.
-      restoreAdapterName()
       // Swallowed rather than reported when a stop settled this call first: settling it twice throws.
       if (!ours) {
         Log.w(TAG, "Advertising start failed after the call had already been settled", e)
