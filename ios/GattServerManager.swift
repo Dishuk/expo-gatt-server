@@ -9,6 +9,21 @@ let attNotificationHeaderSize = 3
 
 private let defaultAttMtuPayload = defaultAttMtu - attNotificationHeaderSize
 
+/// "The maximum length of an attribute value shall be 512 octets" — Core Spec Vol 3, Part F, §3.2.9.
+let maxAttributeValueLength = 512
+
+/// Whether an assembled attribute value is longer than an attribute is allowed to hold.
+///
+/// Asked separately from `spliced(_:offset:part:queued:)` rather than folded into it: that merges one
+/// fragment and knows nothing about the rest of the batch, and the offset it does bound is a different
+/// fault carrying a different ATT error. Only a queued write can build a value longer than one PDU, so
+/// it is the only way to reach this bound — an unqueued `ATT_WRITE_REQ` cannot carry more than the
+/// link's MTU allows, which is under the limit for every MTU the specification permits. Android answers
+/// the same input with the same error, through `exceedsAttributeLength` of its own.
+func exceedsAttributeLength(_ size: Int) -> Bool {
+  size > maxAttributeValueLength
+}
+
 /// Upper bound on notifications parked *per central* while the CoreBluetooth transmit queue is full.
 /// Without it a producer that outruns the link would grow the queue forever.
 ///
@@ -1669,6 +1684,14 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     }
     guard let assembled = assembleWriteBatch(fragments, current: characteristicValues) else {
       peripheral.respond(to: first, withResult: .invalidOffset)
+      return
+    }
+    // Checked on the assembled result rather than on each fragment: every fragment is within what a PDU
+    // carries, and it is only their placement that can push an attribute past what one may hold. A batch
+    // that would is refused whole, which is the same rule the offset check above follows and what
+    // Android answers the same input with.
+    if assembled.contains(where: { exceedsAttributeLength($0.value.count) }) {
+      peripheral.respond(to: first, withResult: .invalidAttributeValueLength)
       return
     }
 

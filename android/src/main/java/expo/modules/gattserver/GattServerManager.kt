@@ -2210,6 +2210,15 @@ class GattServerManager(
           Log.w(TAG, "onExecuteWrite: offset ${write.offset} past the end of a ${current.size}-byte value, rejecting")
           return@synchronized AssembledExecute(attError = BluetoothGatt.GATT_INVALID_OFFSET)
         }
+        // Checked on the assembled result rather than on each part: the parts are individually within
+        // what a PDU carries, and it is only their placement that can push the attribute past what one
+        // may hold. Left unchecked, a peer could commit a value longer than the specification allows —
+        // which the module then refused to notify for the rest of the server's life, since the
+        // notification bound is the same 512 octets, and carried across every adapter power cycle.
+        if (exceedsAttributeLength(merged.size)) {
+          Log.w(TAG, "onExecuteWrite: assembles to ${merged.size} octets, past the $MAX_ATTRIBUTE_VALUE_LENGTH-octet limit, rejecting")
+          return@synchronized AssembledExecute(attError = ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH)
+        }
         when (write) {
           is PreparedWrite.ToCharacteristic -> characteristicValues[write.characteristic] = merged
           is PreparedWrite.ToDescriptor -> descriptorValues[write.descriptor] = merged

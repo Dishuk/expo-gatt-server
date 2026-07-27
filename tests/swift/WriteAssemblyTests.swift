@@ -253,4 +253,30 @@ extension WriteAssemblyTests {
     XCTAssertEqual(assembled?[long], Data([10, 11, 12, 13, 5, 6]))
     XCTAssertEqual(assembled?[other], Data([7]))
   }
+
+  /// "The maximum length of an attribute value shall be 512 octets" — Core Spec Vol 3, Part F, §3.2.9.
+  ///
+  /// Mirrors `AttOperationsTest.an assembled value at the limit is accepted and one past it is not`.
+  func testTheAttributeLengthLimitIsTheSpecifiedOne() {
+    XCTAssertFalse(exceedsAttributeLength(512))
+    XCTAssertTrue(exceedsAttributeLength(513))
+  }
+
+  /// Assembly bounds the offset and not the result, so fragments that are each within what a PDU carries
+  /// can still build a value longer than an attribute may hold. The batch is refused whole for it.
+  func testFragmentsWithinRangeCanStillAssemblePastTheLimit() {
+    let manager = GattServerManager(requestTimeoutMs: 1000)
+    let address = CharacteristicAddress(
+      service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
+    )
+    let fragments = [
+      GattServerManager.WriteFragment(address: address, offset: 0, value: Data(repeating: 1, count: 500)),
+      GattServerManager.WriteFragment(address: address, offset: 500, value: Data(repeating: 2, count: 500)),
+    ]
+
+    let assembled = manager.assembleWriteBatch(fragments, current: [:])
+
+    XCTAssertEqual(assembled?[address]?.count, 1000)
+    XCTAssertTrue(exceedsAttributeLength(assembled?[address]?.count ?? 0))
+  }
 }

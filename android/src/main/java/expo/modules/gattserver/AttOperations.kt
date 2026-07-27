@@ -32,6 +32,20 @@ internal fun spliceAt(current: ByteArray, offset: Int, part: ByteArray): ByteArr
 }
 
 /**
+ * Whether an assembled attribute value is longer than an attribute is allowed to hold.
+ *
+ * "The maximum length of an attribute value shall be 512 octets" (Core Spec Vol 3, Part F, §3.2.9), and
+ * the specification answers a write that would exceed it with "Invalid Attribute Value Length".
+ *
+ * Asked separately from [spliceAt] rather than folded into it: that merges one part and knows nothing
+ * about the rest of the batch, and the offset it does bound is a different fault carrying a different
+ * ATT error. Only a queued write can build a value longer than one PDU, so it is the only way to reach
+ * this bound — an unqueued `ATT_WRITE_REQ` cannot carry more than the link's MTU allows, which is under
+ * the limit for every MTU the specification permits.
+ */
+internal fun exceedsAttributeLength(size: Int): Boolean = size > MAX_ATTRIBUTE_VALUE_LENGTH
+
+/**
  * The bytes a read of [value] from [offset] is answered with, or `null` for an offset past the end —
  * which the specification answers with "Invalid Offset" (Core Spec Vol 3, Part F, §3.4.1.1). An offset
  * exactly at the end is in range and reads as empty.

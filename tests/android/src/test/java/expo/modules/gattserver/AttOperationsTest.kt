@@ -68,6 +68,27 @@ class AttOperationsTest {
   }
 
   /**
+   * "The maximum length of an attribute value shall be 512 octets" — Core Spec Vol 3, Part F, §3.2.9.
+   *
+   * [spliceAt] bounds the offset and not the result, so nothing stopped a batch of in-range parts from
+   * assembling past the limit: two 500-octet parts at offsets 0 and 500 committed a 1000-octet value,
+   * which the module then refused to notify for as long as the server lived, because the notification
+   * bound is this same limit.
+   */
+  @Test
+  fun `an assembled value at the limit is accepted and one past it is not`() {
+    assertFalse(exceedsAttributeLength(512))
+    assertTrue(exceedsAttributeLength(513))
+  }
+
+  @Test
+  fun `parts within range can still assemble past the limit`() {
+    val assembled = spliceAt(ByteArray(500), 500, ByteArray(500))
+    assertNotNull(assembled)
+    assertTrue(exceedsAttributeLength(assembled!!.size))
+  }
+
+  /**
    * Folds a multi-part long write the way `assemblePreparedWrites` does. This is the case that used to
    * disagree with iOS: a write that stops short of the attribute's end must leave the remainder.
    */
