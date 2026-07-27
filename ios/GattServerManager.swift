@@ -345,6 +345,10 @@ class GattServerManager: NSObject {
   private var advertisingCompletion: ((Error?) -> Void)?
   private var advertisingTimeout: DispatchWorkItem?
 
+  /// The `timeoutMs` of the start now waiting for `peripheralManagerDidStartAdvertising`, held until the
+  /// advertisement is actually on the air. See `scheduleAdvertisingTimeout`.
+  private var pendingAdvertisingTimeoutMs = 0
+
   /// Bumped by every stop, so a start still waiting for the database can tell that the application asked
   /// for the opposite while it waited.
   private var advertisingGeneration = 0
@@ -694,8 +698,15 @@ class GattServerManager: NSObject {
       advertisementData[CBAdvertisementDataServiceUUIDsKey] = uuids.map { $0.advertisedForm }
     }
     cancelAdvertisingTimeout()
+    // Held rather than armed. The limit is one on how long the advertisement stays *on the air*, and
+    // `startAdvertising` only asks for it — `peripheralManagerDidStartAdvertising` is what reports it
+    // began, and it round-trips the controller. Arming here measured the wait for that callback as part
+    // of the limit, so a short `timeoutMs` expired before the advertisement had even started: the expiry
+    // runs `stopAdvertising`, which claims the completion still pending and *rejects* it with
+    // `ERR_ADVERTISE`. Android, which this emulates, reports `onStartSuccess` and then stops silently at
+    // the limit, so the same call resolved there and rejected here.
+    pendingAdvertisingTimeoutMs = timeoutMs
     peripheralManager?.startAdvertising(advertisementData)
-    scheduleAdvertisingTimeout(timeoutMs)
   }
 
   func stopAdvertising() {
@@ -703,6 +714,9 @@ class GattServerManager: NSObject {
     // still sees this stop rather than reaching the radio behind it.
     advertisingGeneration += 1
     cancelAdvertisingTimeout()
+    // Dropped with the start it belonged to, so a callback still owed for an advertisement this stop
+    // took off the air cannot arm a limit against the radio it no longer owns.
+    pendingAdvertisingTimeoutMs = 0
     peripheralManager?.stopAdvertising()
     claimAdvertisingCompletion()?(advertisingError("Advertising stopped"))
   }
@@ -1436,6 +1450,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     // lifetime. Claiming the completion is what stops a late callback settling it a second time, and
     // the expiry goes with the advertisement it belonged to rather than stopping a later one.
     cancelAdvertisingTimeout()
+    pendingAdvertisingTimeoutMs = 0
     claimAdvertisingCompletion()?(reason)
 
     // Every subscription dies with the database, so report each one as ended.
@@ -1469,6 +1484,12 @@ extension GattServerManager: CBPeripheralManagerDelegate {
   // compiles without so much as a warning — leaving this the only path that resolves a
   // `startAdvertising` promise unreachable, so every caller hung.
   func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
+    // Armed only now, and only for an advertisement that actually reached the air: the limit it emulates
+    // is one on airtime, and a start that failed has none to spend. See `beginAdvertising`.
+    if error == nil {
+      scheduleAdvertisingTimeout(pendingAdvertisingTimeoutMs)
+    }
+    pendingAdvertisingTimeoutMs = 0
     claimAdvertisingCompletion()?(error)
   }
 
