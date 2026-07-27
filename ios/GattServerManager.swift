@@ -619,6 +619,12 @@ class GattServerManager: NSObject {
     outstandingRegistration = nil
     servicesAwaitingRegistration = Set(serviceConfiguration.map { $0.uuid })
     guard !servicesAwaitingRegistration.isEmpty else {
+      // No `add(_:)` in this round will ever consume one, so anything owed is written off here rather
+      // than left standing to swallow the first genuine acknowledgement of a later round — which would
+      // hang that round for the whole publication bound and report a publication that succeeded as
+      // having failed. An empty database is reachable between two rounds that do register: it is how an
+      // advertise-only peripheral is built.
+      acknowledgementsOwedToDiscardedRounds = 0
       publication = .published
       cancelPublicationTimeout()
       completeOpen(nil)
