@@ -78,7 +78,8 @@ jobs:
             // exclude and emitting `build/__tests__`, which a prefix check would not have seen.
             // `ios/` ships as a whole `files` entry, which overrides `.gitignore` — so a local `Pods/`
             // or `build/` left in the tree is published, and the podspec globs `**/*.{h,m,swift}` into
-            // every consumer's pod target.
+            // the pod target of every consumer. No apostrophes in here: this block is a single-quoted
+            // shell string, and one closes it and hands the rest of the script to bash.
             const forbidden = files.filter(
               (f) =>
                 f.startsWith("src/") ||
