@@ -11,10 +11,7 @@ const CHARACTERISTIC = '00002a37-0000-1000-8000-00805f9b34fb';
 
 /**
  * A value of the wrong *shape* reaches the caller as the module's own error rather than as a
- * `TypeError` raised from inside it. Every case here used to surface as `.map is not a function` or
- * `Cannot convert undefined or null to object`, which names neither the field nor the fix — the
- * failure `assertNoUnknownKeys` and `assertValidDelegate` exist to prevent for keys and for values,
- * left unapplied to the containers holding them.
+ * `TypeError` raised from inside it — `.map is not a function` names neither the field nor the fix.
  */
 describe('a container of the wrong shape', () => {
   beforeEach(() => {
@@ -80,10 +77,7 @@ describe('a container of the wrong shape', () => {
     },
   );
 
-  /**
-   * `android: Platform.OS === 'android' ? { … } : null` is how the block comes to be null, and both
-   * natives read a missing one as "take the defaults" — so it is absent, not malformed.
-   */
+  /** `Platform.OS === 'android' ? { … } : null` is how the block comes to be null. */
   it('reads a null android block as absent', async () => {
     await expect(
       startAdvertising({ localName: 'x', android: null as never }),

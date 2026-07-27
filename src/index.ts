@@ -214,7 +214,7 @@ function assertValidAttributeValue(value: unknown, field: string): void {
 
 /**
  * Rejects a value written where a list belongs, which reaches the caller as `.map is not a function`
- * otherwise — naming neither the field nor the fix. Absent stays legal; each caller has its own default.
+ * otherwise. Absent stays legal; each caller has its own default.
  */
 function assertArrayOrAbsent(value: unknown, field: string): void {
   if (value !== undefined && !Array.isArray(value)) {
@@ -686,8 +686,8 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
   // the same way, and iOS — where `CBUUID` would otherwise advertise the full sixteen octets it was
   // built from — contracts it back in `beginAdvertising`. See `CBUUID.advertisedForm`.
   assertNoUnknownKeys(config, ADVERTISE_KEYS, 'advertising');
-  // `!= null`, so a block written as `Platform.OS === 'android' ? { … } : null` reads as absent rather
-  // than as a malformed object. Both natives already read a missing block as "take the defaults".
+  // `!= null`, so `Platform.OS === 'android' ? { … } : null` reads as absent, which is how both
+  // natives already read a missing block.
   if (config.android != null) {
     assertNoUnknownKeys(config.android, ANDROID_ADVERTISE_KEYS, 'advertising android');
   }

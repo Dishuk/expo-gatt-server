@@ -64,10 +64,8 @@ let defaultRequestTimeoutMs = 10_000
 /// process. Deliberately generous for that reason.
 let publicationTimeoutMs = 30_000
 
-/// Bounds the wait for `peripheralManagerDidStartAdvertising`, matching the limit Android applies to its
-/// own `AdvertiseCallback`. Apple documents that callback only as "the result of a startAdvertising:
-/// call" and promises nothing about one always arriving, so without a bound a start the stack never
-/// answers leaves `startAdvertising` awaiting a promise nothing can settle for the life of the process.
+/// Bounds the wait for `peripheralManagerDidStartAdvertising`, which Apple promises nothing about
+/// arriving, matching the limit Android applies to its own `AdvertiseCallback`.
 let advertisingStartTimeoutMs = 30_000
 
 enum GattServerError: Error {
@@ -351,9 +349,8 @@ class GattServerManager: NSObject {
   private var advertisingCompletion: ((Error?) -> Void)?
   private var advertisingTimeout: DispatchWorkItem?
 
-  /// Bounds the wait for the callback that settles [advertisingCompletion]. Cancelled by
-  /// `claimAdvertisingCompletion`, which every path that settles a start goes through, so it can only
-  /// ever be live for a start still waiting. See [advertisingStartTimeoutMs].
+  /// Cancelled by `claimAdvertisingCompletion`, which every path that settles a start goes through, so
+  /// it is only ever live for a start still waiting. See [advertisingStartTimeoutMs].
   private var advertisingStartTimeout: DispatchWorkItem?
 
   /// The `timeoutMs` of the start now waiting for `peripheralManagerDidStartAdvertising`, held until the
@@ -421,14 +418,11 @@ class GattServerManager: NSObject {
   private var registrationQueue: [CBMutableService] = []
   private var outstandingRegistration: CBUUID?
 
-  /// Whether a `didAdd` is still owed to a round that was discarded while waiting for one.
+  /// Whether a `didAdd` is still owed to a round discarded while waiting for one.
   ///
-  /// A round re-issues `add(_:)` for the same first service, so once the next round is waiting on that
-  /// UUID the two acknowledgements are identical — the UUID test below cannot tell them apart, and
-  /// crediting the stale one advances a round on a registration that never happened. One `add(_:)`
-  /// produces one `didAdd`, which is the only thing CoreBluetooth does promise, so the first
-  /// acknowledgement after such a discard is consumed rather than credited. Cleared by the round bound
-  /// as well, so an acknowledgement the stack never delivers cannot swallow a second round's.
+  /// The next round re-issues `add(_:)` for the same service, so the two acknowledgements are identical
+  /// and crediting the stale one advances a round on a registration that never happened. One `add(_:)`
+  /// produces one `didAdd` — the only thing CoreBluetooth promises — so the owed one is spent instead.
   private var acknowledgementOwedToDiscardedRound = false
 
   /// Whether this round's outcome already reached a caller through `openCompletion`. Cleared when a
@@ -606,8 +600,7 @@ class GattServerManager: NSObject {
     outstandingRegistration = nil
     servicesAwaitingRegistration = Set(serviceConfiguration.map { $0.uuid })
     guard !servicesAwaitingRegistration.isEmpty else {
-      // Nothing here will ever consume an owed acknowledgement, so it is dropped rather than left to
-      // swallow the first one of a later round.
+      // No `add(_:)` here to consume an owed acknowledgement, so it is dropped rather than left.
       acknowledgementOwedToDiscardedRound = false
       publication = .published
       cancelPublicationTimeout()
@@ -672,9 +665,8 @@ class GattServerManager: NSObject {
             self.publicationGeneration == generation,
             self.publication == .inProgress else { return }
       self.publicationTimeout = nil
-      // An acknowledgement owed to an earlier round has had this whole bound to arrive, so it is not
-      // coming. Dropped before this round records its own, or a stack that answers no `add(_:)` at all
-      // would have every round after the first swallow the one before it.
+      // Owed from an earlier round and not delivered within the whole bound: it is not coming, and
+      // leaving it set would make every later round swallow the one before it.
       self.acknowledgementOwedToDiscardedRound = false
       let error = GattServerError.publicationTimedOut(
         awaiting: self.servicesAwaitingRegistration.map { $0.normalizedString }.sorted(),
@@ -824,9 +816,7 @@ class GattServerManager: NSObject {
     // the limit, so the same call resolved there and rejected here.
     pendingAdvertisingTimeoutMs = timeoutMs
     peripheralManager?.startAdvertising(advertisementData)
-    // Armed after the call rather than before it, because the delegate runs on this queue and so cannot
-    // answer before the call returns. Every path that settles a start cancels it. See
-    // [advertisingStartTimeoutMs].
+    // After the call: the delegate runs on this queue, so it cannot answer before the call returns.
     armAdvertisingStartTimeout()
   }
 
@@ -854,11 +844,8 @@ class GattServerManager: NSObject {
     return advertisingCompletion
   }
 
-  /// Bounds the wait for `peripheralManagerDidStartAdvertising`. See [advertisingStartTimeoutMs].
-  ///
-  /// The expiry takes the radio back as well as settling the start, for the reason Android's does: the
-  /// stack may yet be about to advertise, and rejecting the promise while leaving an advertisement
-  /// running would be worse than the hang it replaces.
+  /// The expiry takes the radio back as well as settling the start, as Android's does: the stack may
+  /// yet advertise, and rejecting while leaving one running is worse than the hang it replaces.
   private func armAdvertisingStartTimeout() {
     cancelAdvertisingStartTimeout()
     let work = DispatchWorkItem { [weak self] in

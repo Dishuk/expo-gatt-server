@@ -425,7 +425,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indistinguishable from the current round's, satisfied it early, and left `createServer` resolving and
   `isServerRunning` reporting `true` for a database one service short; the real result was then
   discarded. Registration is now serialized, one outstanding `add(_:)` at a time, which is what makes an
-  unexpected acknowledgement recognisable — the structure Android already used.
+  unexpected acknowledgement recognisable — the structure Android already used. A round discarded while
+  an `add(_:)` was outstanding now also spends the acknowledgement it is still owed, since the next
+  round re-issues the same service and the two are otherwise identical.
 - **A round torn down mid-registration overwrote the teardown's outcome on Android.** `addNextService`
   releases the publication lock for the `addService` binder call, and a teardown landing in that window
   discards the round and settles its callers deliberately — `IDLE`, so a caller arriving before the
@@ -433,13 +435,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no completion and no parked caller left, emitted `onServerPublicationFailed` for what was an ordinary
   Bluetooth power-off, which the event documents itself as never reporting. Failing a round is now one
   round-aware step that does nothing at all once the round has been discarded.
-- **`startAdvertising` could park for the life of the process on Android.** Every other asynchronous
-  wait in the module was bounded on the stated grounds that a platform callback which never arrives
-  otherwise parks a promise forever; the advertising start was not, even though
-  `BluetoothLeAdvertiser` is the API most often reported to swallow its callback — an exhausted
-  advertiser slot, or a Bluetooth process restart with no `STATE_OFF`/`STATE_ON` pair. The start is now
-  bounded like the others, and the expiry takes the radio back as well as rejecting, so nothing is left
-  advertising with its promise already settled.
+- **`startAdvertising` could park for the life of the process.** Every other asynchronous wait in the
+  module was bounded on the stated grounds that a platform callback which never arrives otherwise parks
+  a promise forever; the advertising start was not, even though `BluetoothLeAdvertiser` is the API most
+  often reported to swallow its callback — an exhausted advertiser slot, or a Bluetooth process restart
+  with no `STATE_OFF`/`STATE_ON` pair. iOS had the same hole against
+  `peripheralManagerDidStartAdvertising`, which Apple documents only as returning "the result of a
+  startAdvertising: call" with nothing promising one arrives. Both platforms now bound the start at
+  30 s, and the expiry takes the radio back as well as rejecting, so nothing is left advertising with
+  its promise already settled.
 - **`createServer` lost its bound when Bluetooth reported `resetting` on iOS.** That state deliberately
   spares the waiting callers, because a further state update is expected — but it discards the round,
   and the round's timeout was the only limit those promises had. A stack that never returned to

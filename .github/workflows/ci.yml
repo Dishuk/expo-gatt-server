@@ -62,10 +62,8 @@ jobs:
               "app.plugin.js",
               "plugin/build/index.js",
               "expo-module.config.json",
-              // The two files autolinking resolves the native code through. Without the podspec
-              // `findPodspecFiles` returns nothing and links no pod at all, and without the Gradle
-              // script the Android side is never built — in both cases the install succeeds and the
-              // app throws `Cannot find native module ExpoGattServer` on first import.
+              // What autolinking resolves the native code through: without these the install
+              // succeeds and the app throws `Cannot find native module ExpoGattServer` on import.
               "ios/ExpoGattServer.podspec",
               "android/build.gradle",
               "ios/GattServerManager.swift",
@@ -74,9 +72,8 @@ jobs:
             const missing = required.filter((f) => !files.includes(f));
             if (missing.length) throw new Error("missing from the tarball: " + missing.join(", "));
             // Tests, the host-side harnesses and raw TypeScript have no business in a consumers
-            // install. `__tests__` is matched anywhere rather than only under `src/`: the realistic
-            // leak is a tsconfig losing its exclude and emitting `build/__tests__`, which no prefix
-            // check would have seen.
+            // install. `__tests__` is matched anywhere: the realistic leak is a tsconfig losing its
+            // exclude and emitting `build/__tests__`, which a prefix check would not have seen.
             const forbidden = files.filter(
               (f) =>
                 f.startsWith("src/") ||

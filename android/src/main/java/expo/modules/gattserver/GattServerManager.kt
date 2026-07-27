@@ -1097,10 +1097,9 @@ class GattServerManager(
     // would silently revert whenever the adapter was power-cycled — while iOS, which re-adds the very
     // instances it built, keeps them. Nothing in the API says a power cycle empties the database.
     val retained = currentCharacteristicValues()
-    // Claimed before anything is torn down, so an acknowledgement still owed by the round this one
-    // replaces is already stale. Claimed after the close, it was not: the outgoing round was still
-    // current with `gattServer` already null, so its `onServiceAdded` failed a round that was still
-    // current and rejected `createServer` with `ERR_NO_SERVER` over a database that then published.
+    // Claimed before anything is torn down, so an acknowledgement the outgoing round is still owed is
+    // already stale. Claimed after the close, it found that round current with `gattServer` null, and
+    // failed it — rejecting `createServer` with `ERR_NO_SERVER` over a database that then published.
     val round = synchronized(publicationLock) {
       publication = DatabasePublication.IN_PROGRESS
       pendingServices.clear()
@@ -1140,10 +1139,8 @@ class GattServerManager(
     val timeout = Runnable {
       if (publicationRound.get() != round) return@Runnable
       Log.e(TAG, "No onServiceAdded within $PUBLICATION_TIMEOUT_MS ms; reporting the round as failed")
-      // Through the round rather than an unconditional discard: the check above is only a log guard,
-      // and a bound that lost its round between the two used to increment past the round that had
-      // replaced it — orphaning a healthy registration and rejecting its caller. See
-      // [failPublicationRound], which re-tests and discards as one step.
+      // The check above is only a log guard. A bound that lost its round between the two used to
+      // discard the round that had replaced it; [failPublicationRound] re-tests and ends it as one step.
       failPublicationRound(
         round,
         GattServerException(
@@ -1613,8 +1610,7 @@ class GattServerManager(
       // that throw, so neither the completion nor the callback may be left installed for a later stop to
       // settle and stop a second time. compareAndSet, so a concurrent restart's own state is left alone.
       val ours = pendingAdvertiseResult.compareAndSet(onResult, null)
-      // The bound armed above outlives the completion it was watching otherwise, and settles nothing
-      // once that completion is gone — cancelled here so it does not sit on the looper for 30 s.
+      // Inert once the completion it watched is gone, but cancelled so it does not sit on the looper.
       if (ours) {
         cancelAdvertisingStartTimeout()
       }
