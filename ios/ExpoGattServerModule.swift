@@ -228,7 +228,7 @@ public class ExpoGattServerModule: Module {
         let serviceUuidStrings: [String]? = try parseTypedArray(
           config["serviceUuids"], field: "serviceUuids", elementDescription: "UUID strings"
         )
-        serviceUuids = try serviceUuidStrings?.map { try self.parseUuid($0, field: "service") }
+        serviceUuids = try serviceUuidStrings?.map { try parseUuid($0, field: "service") }
       } catch let error as GattServerError {
         promise.reject(error.code, error.message)
         return
@@ -298,8 +298,8 @@ public class ExpoGattServerModule: Module {
     ) in
       let data: Data
       do {
-        try self.validateUuid(serviceUuid, field: "service")
-        try self.validateUuid(characteristicUuid, field: "characteristic")
+        try validateUuid(serviceUuid, field: "service")
+        try validateUuid(characteristicUuid, field: "characteristic")
         data = try parseBytes(value, field: "notification")
       } catch {
         promise.reject("ERR_NOTIFY", error.localizedDescription)
@@ -408,8 +408,8 @@ public class ExpoGattServerModule: Module {
     ) in
       let data: Data
       do {
-        try self.validateUuid(serviceUuid, field: "service")
-        try self.validateUuid(characteristicUuid, field: "characteristic")
+        try validateUuid(serviceUuid, field: "service")
+        try validateUuid(characteristicUuid, field: "characteristic")
         data = try parseBytes(value, field: "characteristic")
         // The same bound a configured value gets: this is the other way an application sets an
         // attribute's value, and the specification bounds the attribute rather than the route to it.
@@ -487,42 +487,6 @@ public class ExpoGattServerModule: Module {
     }
   }
 
-  /// `CBUUID(string:)` raises an uncatchable Objective-C exception for anything other than a 16-bit,
-  /// 32-bit or hyphenated 128-bit string, so every string is checked before it reaches CoreBluetooth.
-  private func isValidUuid(_ string: String) -> Bool {
-    func isHex(_ characters: Substring) -> Bool {
-      !characters.isEmpty && characters.allSatisfy { $0.isASCII && $0.isHexDigit }
-    }
-
-    switch string.count {
-    case 4, 8:
-      return isHex(string[...])
-    case 36:
-      let groups = string.split(separator: "-", omittingEmptySubsequences: false)
-      let expectedLengths = [8, 4, 4, 4, 12]
-      guard groups.count == expectedLengths.count else { return false }
-      return zip(groups, expectedLengths).allSatisfy { $0.count == $1 && isHex($0) }
-    default:
-      return false
-    }
-  }
-
-  private func validateUuid(_ string: String, field: String) throws {
-    guard isValidUuid(string) else {
-      throw GattArgumentError(
-        message: "Invalid \(field) UUID \"\(string)\". Expected 4 hex digits (16-bit), " +
-          "8 hex digits (32-bit) or the hyphenated 8-4-4-4-12 form (128-bit)."
-      )
-    }
-  }
-
-  private func parseUuid(_ value: Any?, field: String) throws -> CBUUID {
-    guard let string = value as? String else {
-      throw GattArgumentError(message: "Missing or non-string \(field) UUID")
-    }
-    try validateUuid(string, field: field)
-    return CBUUID(string: string)
-  }
 
   /// Anything outside 0...255 would be silently corrupted by a clamping or truncating conversion.
   private func parseRequestTimeout(_ value: Any?) throws -> Int {
@@ -721,58 +685,7 @@ public class ExpoGattServerModule: Module {
     }
   }
 
-  /// Apple annotates `CBCharacteristicPropertyBroadcast` and
-  /// `CBCharacteristicPropertyExtendedProperties` as "Not allowed for local characteristics", so both are
-  /// refused here instead of being set and rejected at publication time.
-  private func parseProperties(_ list: [String]?) throws -> CBCharacteristicProperties {
-    var props: CBCharacteristicProperties = []
-    for str in list ?? [] {
-      switch str {
-      case "read": props.insert(.read)
-      case "write": props.insert(.write)
-      case "writeNoResponse": props.insert(.writeWithoutResponse)
-      case "notify": props.insert(.notify)
-      case "indicate": props.insert(.indicate)
-      case "signedWrite": props.insert(.authenticatedSignedWrites)
-      case "broadcast", "extendedProperties":
-        throw GattServerError.configurationUnsupported(
-          option: "characteristic property \"\(str)\"",
-          reason: "CoreBluetooth documents the matching CBCharacteristicProperties member as not " +
-            "allowed for local characteristics. Declare it for Android only."
-        )
-      default:
-        throw GattArgumentError(message: "Invalid characteristic property \"\(str)\".")
-      }
-    }
-    return props
-  }
 
-  /// `CBAttributePermissions` has exactly four members, so Android's MITM and signed variants have
-  /// nothing to map onto. Every near equivalent is *weaker* than what was asked for — an MITM variant
-  /// requires authenticated pairing rather than any encrypted link, a signed variant a signature over an
-  /// unencrypted one — so they are refused rather than approximated into a less protected attribute.
-  private func parsePermissions(_ list: [String]?) throws -> CBAttributePermissions {
-    var perms: CBAttributePermissions = []
-    for str in list ?? [] {
-      switch str {
-      case "readable": perms.insert(.readable)
-      case "writeable": perms.insert(.writeable)
-      case "readEncrypted": perms.insert(.readEncryptionRequired)
-      case "writeEncrypted": perms.insert(.writeEncryptionRequired)
-      case "readEncryptedMitm", "writeEncryptedMitm", "writeSigned", "writeSignedMitm":
-        throw GattServerError.configurationUnsupported(
-          option: "permission \"\(str)\"",
-          reason: "CBAttributePermissions offers only readable, writeable, " +
-            "readEncryptionRequired and writeEncryptionRequired, and approximating this one would " +
-            "publish a less protected attribute than was asked for. Use \"readEncrypted\" or " +
-            "\"writeEncrypted\" for a portable encrypted attribute."
-        )
-      default:
-        throw GattArgumentError(message: "Invalid permission \"\(str)\".")
-      }
-    }
-    return perms
-  }
 }
 
 extension ExpoGattServerModule: GattServerManagerDelegate {
