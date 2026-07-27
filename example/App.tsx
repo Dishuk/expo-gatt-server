@@ -40,6 +40,22 @@ const SERVICE_UUID = '180d';
 const CHARACTERISTIC_UUID = '2a37';
 const USER_DESCRIPTION_UUID = '2901';
 
+// iOS exposes no API for the local Bluetooth address, and advertises behind a random address that
+// rotates roughly every fifteen minutes, so a scanner cannot be pointed at this device by address.
+// A name it broadcasts itself is the only handle it can offer, and four hex digits are enough to
+// tell two phones running the harness apart. The width is not arbitrary: the advertisement holds 31
+// bytes, of which the flags take 3 and `180d` takes 4, leaving 24 for a name whose own header costs
+// 2 -- and the 17-character prefix plus four digits comes to 21, just inside it. A longer suffix
+// would push the name into the scan response, where it is answered only if the scanner asks.
+//
+// Regenerated per launch rather than persisted: it only has to be unique among the devices running
+// the harness at the same moment, and keeping it would mean a storage dependency the example has no
+// other use for.
+const DEVICE_SUFFIX = Math.floor(Math.random() * 0x10000)
+  .toString(16)
+  .padStart(4, '0');
+const ADVERTISED_NAME = `expo-gatt-server-${DEVICE_SUFFIX}`;
+
 const utf8 = (text: string): number[] => Array.from(new TextEncoder().encode(text));
 
 const SERVICES: GattServiceConfig[] = [
@@ -177,7 +193,7 @@ export default function App() {
         // `includeTxPowerLevel` is deliberately omitted: iOS cannot express it, so passing it at all —
         // even as `false` — makes the shared layer warn on every call in the harness the guides point at.
         startAdvertising({
-          localName: 'GattHarness',
+          localName: ADVERTISED_NAME,
           serviceUuids: [SERVICE_UUID],
           connectable: true,
         }),
@@ -201,7 +217,7 @@ export default function App() {
       action: async () => {
         append(
           `supported=${isSupported()} running=${await isServerRunning()} ` +
-            `advertising=${await isAdvertising()}`,
+            `advertising=${await isAdvertising()} name=${ADVERTISED_NAME}`,
         );
       },
     },
@@ -228,6 +244,12 @@ export default function App() {
           <Text style={styles.badgeLabel}>{deviceId ? 'connected' : 'no device'}</Text>
         </View>
       </View>
+      {/* Shown whether or not advertising has been started: the point of the name is to be read off
+          the screen and typed into a scanner's filter, which is something to do before the radio is
+          on rather than after. */}
+      <Text style={styles.advertisedName} numberOfLines={1}>
+        {ADVERTISED_NAME}
+      </Text>
       <Text style={styles.deviceId} numberOfLines={1}>
         {deviceId ?? '—'}
       </Text>
@@ -309,11 +331,17 @@ const styles = StyleSheet.create({
   badgeOn: { backgroundColor: '#d6f0dd' },
   badgeOff: { backgroundColor: '#e2e2e2' },
   badgeLabel: { fontSize: 11, fontWeight: '600', color: '#333' },
+  advertisedName: {
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    fontSize: 11,
+    color: '#111',
+    marginTop: 4,
+  },
   deviceId: {
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     fontSize: 11,
     color: '#666',
-    marginTop: 4,
+    marginTop: 2,
     marginBottom: 12,
   },
 
