@@ -68,10 +68,10 @@ describe('a native rejection reaches the caller unchanged', () => {
 });
 
 /**
- * A coded rejection therefore always came from the platform, which is what lets a consumer treat a
- * missing `code` as "fix the configuration" and a present one as "handle this at runtime".
+ * Only this direction holds. The converse does not: `serverStoppedError` and `advertisingCancelledError`
+ * are raised here with a code and never reach a platform, and a missing native module throws without one.
  */
-describe('a rejection raised in JavaScript carries no code and never reaches the platform', () => {
+describe('a validation failure carries no code and never reaches the platform', () => {
   const validationFailures: [string, () => Promise<unknown>][] = [
     ['createServer with a malformed service UUID', () => createServer([{ uuid: 'nope' } as never])],
     [

@@ -1828,11 +1828,16 @@ meaning.
 
 ## Error Codes
 
-Every rejection from this module carries a `code` property. Argument validation performed in the shared
-TypeScript layer -- malformed UUIDs, bytes outside `0`--`255`, out-of-range timeouts, offsets and
-statuses, unrecognised enum names -- throws a plain `Error` with a descriptive message and **no**
-`code`, since it never reaches a platform. So a rejection with a `code` always came from a platform, and
-one without it always means the arguments were wrong.
+Argument validation performed in the shared TypeScript layer -- malformed UUIDs, bytes outside
+`0`--`255`, out-of-range timeouts, offsets and statuses, unrecognised enum names -- throws a plain
+`Error` with a descriptive message and **no** `code`, since it never reaches a platform.
+
+The converse does not hold, so do not read `code` as proof of where a rejection came from. Two
+cancellations are raised by the shared layer with a `code` and never reach a platform:
+`createServer` rejects `ERR_NO_SERVER` and `startAdvertising` rejects `ERR_ADVERTISE` when a stop was
+issued while the call was in flight. A missing native module -- on web, or in Expo Go -- throws
+**without** a `code` for the reason described under `isSupported`. Branch on `code` to tell one failure
+from another, not to tell a platform failure from an argument one.
 
 **The same situation reports the same code on both platforms.** Where a code is marked as belonging to
 one platform below, it is because only that platform has the situation at all -- not because the other
