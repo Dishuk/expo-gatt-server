@@ -482,6 +482,13 @@ export async function createServer(
       // so a later create that already replaced this one — and resolved — would be torn down by a stop
       // meant to undo a call the application had abandoned. That create owns the server now, and cancels
       // itself the same way if it needs to.
+      //
+      // Counted as a stop of the advertisement as well, because it is one: both platforms stop
+      // advertising as part of stopping the server, which is why the public `stopServer` bumps both
+      // epochs. This path calls the native module directly and so bypassed that, leaving a
+      // `startAdvertising` issued after the application's stop — and still in flight when this one lands
+      // — to resolve as though it were on the air while this stop had just taken the radio from it.
+      advertisingStopEpoch += 1;
       ExpoGattServerModule?.stopServer();
     }
   }

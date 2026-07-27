@@ -161,4 +161,33 @@ describe('a stop issued while a create is in flight', () => {
 
     await expect(advertise).rejects.toThrow(/cancelled by a stopAdvertising/);
   });
+
+  /**
+   * The compensating stop takes the radio with the server, exactly as the application's own `stopServer`
+   * does. Calling the native module directly meant it did not count as a stop of the advertisement, so an
+   * advertising start issued after the application's stop resolved successfully — and was then taken off
+   * the air by this stop, with nothing left to reject and nothing anywhere reporting it.
+   */
+  it('counts its compensating stop as a stop of the advertisement too', async () => {
+    const releaseCreate = deferNativeCreate();
+    let releaseAdvertise: () => void = () => {};
+    nativeModuleMock.startAdvertising.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((resolve) => {
+          releaseAdvertise = () => resolve(undefined);
+        }),
+    );
+
+    const create = createServer(SERVICES);
+    stopServer();
+    // Issued after the stop, so it reads the stopped state as its own baseline and would otherwise be
+    // owed nothing by the create still unwinding behind it.
+    const advertise = startAdvertising({});
+    releaseCreate();
+
+    await expect(create).rejects.toThrow(/cancelled by a stopServer/);
+    releaseAdvertise();
+
+    await expect(advertise).rejects.toThrow(/cancelled by a stopAdvertising/);
+  });
 });
