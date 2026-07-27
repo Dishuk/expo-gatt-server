@@ -24,8 +24,8 @@
     "test": "expo-module test",
     "test:ios": "swift test",
     "test:android": "./scripts/test-android.sh",
-    "prepare": "expo-module build && expo-module build plugin",
-    "prepublishOnly": "expo-module prepublishOnly && expo-module build plugin"
+    "prepare": "node ./scripts/build-package.js",
+    "prepublishOnly": "node ./scripts/build-package.js --clean"
   },
   "keywords": [
     "expo",
