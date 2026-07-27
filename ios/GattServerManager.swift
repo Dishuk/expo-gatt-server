@@ -566,6 +566,15 @@ class GattServerManager: NSObject {
       return
     }
     armPublicationTimeout()
+    // Cleared before the round rather than trusted to have been cleared already. The module's own mirror
+    // of what is published is dropped on every path that reaches here, but that mirror is not
+    // CoreBluetooth's: Apple documents the local database as emptied when Bluetooth is powered *off*,
+    // and `resetting` — which this treats as a loss too — is documented only as the connection with the
+    // system service having been momentarily lost. If the database in fact survived that, every `add`
+    // below would come back "a service with the same UUID has already been added", failing the round and
+    // taking a working server down for good over a blip it was meant to recover from. Calling this on a
+    // database that really is empty costs nothing.
+    peripheral.removeAllServices()
     for service in serviceConfiguration {
       peripheral.add(service)
     }
