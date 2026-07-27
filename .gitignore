@@ -32,6 +32,10 @@ example/ios/
 example/android/
 example/.expo/
 
+# Working notes and scratch files kept beside the checkout, which belong to whoever wrote them
+# rather than to the package
+.local/
+
 # OS
 .DS_Store
 Thumbs.db
