@@ -261,3 +261,24 @@ The two platforms report different halves of the same figure exactly, and derive
 
 The [API reference](./api.md) states the consequence of each of these at the function or type it
 affects.
+
+## Known Limits
+
+Two behaviours are shared by both platforms and are not what the specification asks for. Neither is a
+race — they are where the current design stops.
+
+**A subscription does not survive a disconnect, even for a bonded central.** "The Client Characteristic
+Configuration descriptor value shall be persistent across connections for bonded devices" (Core Spec
+Vol 3, Part G, §3.3.3.3). This module discards the per-client bits when the central disconnects and
+never consults the bond state, so a bonded central that reconnects — and, having cached the ATT
+database, does not rewrite its CCCD — is treated as unsubscribed: no `onCharacteristicSubscribed`
+fires and `sendNotification` rejects `ERR_NO_SUBSCRIBER`. Pass `requireSubscription: false` to notify
+one anyway, or have the central rewrite its CCCD on connect.
+
+**A write batch in which every characteristic is delegated is not atomic.** The queued-write procedure
+is one operation: "if the execution of one of the requests would cause a failure […] none of the
+requests should be executed" (Core Spec Vol 3, Part F, §3.4.6.3). Values for characteristics that did
+*not* opt in are withheld until the batch is answered, and are reverted if it is refused. Delegated
+ones are yours to commit with `updateCharacteristicValue`, so a batch touching two delegated
+characteristics can have the second committed by your handler and the batch then refused by the first.
+Commit a delegated value only once you know how you will answer.
