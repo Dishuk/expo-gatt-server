@@ -135,11 +135,16 @@ func advertisementPayloadSize(localName: String?, serviceUuids: [CBUUID]) -> Int
 func assertAdvertisementFits(localName: String?, serviceUuids: [CBUUID]) throws {
   let size = advertisementPayloadSize(localName: localName, serviceUuids: serviceUuids)
   guard size > maxAdvertisementPayloadLength else { return }
+  let nameCost = (localName?.isEmpty == false) ? 2 + (localName?.utf8.count ?? 0) : 0
   throw GattArgumentError(
     message: "The advertisement needs \(size) bytes and an advertisement carries at most " +
       "\(maxAdvertisementPayloadLength), of which \(advertisingFlagsLength) are the connectable " +
       "flags. Shorten localName, or advertise fewer service UUIDs — a 16-bit UUID costs 2 bytes " +
-      "where a 128-bit one costs 16."
+      "where a 128-bit one costs 16." +
+      (nameCost > 0
+        ? " localName is \(nameCost) of those bytes: CoreBluetooth advertises it, where Android puts "
+          + "it in the scan response, so this configuration advertises on Android and not here."
+        : "")
   )
 }
 

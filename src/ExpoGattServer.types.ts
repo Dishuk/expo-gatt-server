@@ -293,6 +293,11 @@ export interface AdvertiseConfig {
    * writes an arbitrary Local Name into an advertisement, so Android advertises the device's own name
    * instead (`android.includeDeviceName`) unless the app opts in to renaming the adapter with
    * `android.setAdapterName`.
+   *
+   * **It competes with the advertisement's 31-byte budget on iOS and not on Android**, which is where
+   * one configuration stops behaving the same either side: CoreBluetooth puts the name in the
+   * advertisement, while Android puts it in the scan response. A name that pushes the payload over
+   * rejects with `ERR_ADVERTISE` on iOS and advertises on Android. See `docs/api.md`.
    */
   localName?: string;
   serviceUuids?: string[];
