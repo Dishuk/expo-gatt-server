@@ -1159,6 +1159,14 @@ class GattServerManager(
    * Only [DatabasePublication.FAILED]: `IDLE` is the adapter going down, which `onBluetoothStateChanged`
    * already reports, and a re-registration is coming for it. Only when nothing else carried the error,
    * so an ordinary rejected `createServer` does not also look like a second, separate fault.
+   *
+   * And only for a round that ended on its own. [stop] settles the same round through [finishOpen], with
+   * the same `ERR_NO_SERVER` it gives a create that never finished, so reporting it here announced a
+   * failure for every ordinary teardown: an unmount, an `OnDestroy`, and the `stop` that `createServer`
+   * issues before publishing a replacement. The event documents itself as the signal to call
+   * `createServer` again, so a listener following that advice rebuilt the server the application had
+   * just asked to be rid of. iOS never had this: there the report is reachable only from the two paths
+   * on which a publication round actually fails, and `stop` is not one of them.
    */
   private fun reportPublicationFailure(
     state: DatabasePublication,
@@ -1207,11 +1215,15 @@ class GattServerManager(
   /**
    * Ends the current registration round: [state] is what later readiness checks see, and both `open`'s
    * completion and everyone parked in [whenDatabasePublished] are settled with [error].
+   *
+   * [report] is what separates a round that failed from one the application ended on purpose. See
+   * [reportPublicationFailure].
    */
   private fun finishOpen(
     state: DatabasePublication,
     error: GattServerException?,
     onlyIf: DatabasePublication? = null,
+    report: Boolean = true,
   ) {
     // The round is over however it ended, so its bound goes with it.
     cancelPublicationTimeout()
@@ -1234,7 +1246,9 @@ class GattServerManager(
     if (!applied) return
     val completion = openCompletion.getAndSet(null)
     completion?.invoke(error)
-    reportPublicationFailure(state, error, reported = completion != null || parked.isNotEmpty())
+    if (report) {
+      reportPublicationFailure(state, error, reported = completion != null || parked.isNotEmpty())
+    }
     if (parked.isEmpty()) return
     // Released on the manager's own looper rather than on the binder thread that delivered the last
     // `onServiceAdded`: a released caller goes straight on to make binder calls of its own — the
@@ -2516,7 +2530,8 @@ class GattServerManager(
     discardPublicationRound()
     finishOpen(
       DatabasePublication.FAILED,
-      GattServerException("ERR_NO_SERVER", "Server was stopped before it finished opening")
+      GattServerException("ERR_NO_SERVER", "Server was stopped before it finished opening"),
+      report = false,
     )
     // Answered rather than dropped, and before `close()` takes the server and the device handles the
     // response needs with it. `stop` disconnects nobody, so these transactions are still live.
