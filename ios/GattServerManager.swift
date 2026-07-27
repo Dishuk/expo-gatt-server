@@ -64,6 +64,12 @@ let defaultRequestTimeoutMs = 10_000
 /// process. Deliberately generous for that reason.
 let publicationTimeoutMs = 30_000
 
+/// Bounds the wait for `peripheralManagerDidStartAdvertising`, matching the limit Android applies to its
+/// own `AdvertiseCallback`. Apple documents that callback only as "the result of a startAdvertising:
+/// call" and promises nothing about one always arriving, so without a bound a start the stack never
+/// answers leaves `startAdvertising` awaiting a promise nothing can settle for the life of the process.
+let advertisingStartTimeoutMs = 30_000
+
 enum GattServerError: Error {
   case payloadExceedsMtu(maxPayload: Int, payloadSize: Int)
   case requestNotFound(requestId: Int)
@@ -345,6 +351,11 @@ class GattServerManager: NSObject {
   private var advertisingCompletion: ((Error?) -> Void)?
   private var advertisingTimeout: DispatchWorkItem?
 
+  /// Bounds the wait for the callback that settles [advertisingCompletion]. Cancelled by
+  /// `claimAdvertisingCompletion`, which every path that settles a start goes through, so it can only
+  /// ever be live for a start still waiting. See [advertisingStartTimeoutMs].
+  private var advertisingStartTimeout: DispatchWorkItem?
+
   /// The `timeoutMs` of the start now waiting for `peripheralManagerDidStartAdvertising`, held until the
   /// advertisement is actually on the air. See `scheduleAdvertisingTimeout`.
   private var pendingAdvertisingTimeoutMs = 0
@@ -409,6 +420,16 @@ class GattServerManager: NSObject {
   /// serializes registration for the same reason, through a per-round callback object.
   private var registrationQueue: [CBMutableService] = []
   private var outstandingRegistration: CBUUID?
+
+  /// Whether a `didAdd` is still owed to a round that was discarded while waiting for one.
+  ///
+  /// A round re-issues `add(_:)` for the same first service, so once the next round is waiting on that
+  /// UUID the two acknowledgements are identical — the UUID test below cannot tell them apart, and
+  /// crediting the stale one advances a round on a registration that never happened. One `add(_:)`
+  /// produces one `didAdd`, which is the only thing CoreBluetooth does promise, so the first
+  /// acknowledgement after such a discard is consumed rather than credited. Cleared by the round bound
+  /// as well, so an acknowledgement the stack never delivers cannot swallow a second round's.
+  private var acknowledgementOwedToDiscardedRound = false
 
   /// Whether this round's outcome already reached a caller through `openCompletion`. Cleared when a
   /// round starts. `openCompletion` alone cannot answer that: the `didAdd` failure path settles it as
@@ -585,6 +606,9 @@ class GattServerManager: NSObject {
     outstandingRegistration = nil
     servicesAwaitingRegistration = Set(serviceConfiguration.map { $0.uuid })
     guard !servicesAwaitingRegistration.isEmpty else {
+      // Nothing here will ever consume an owed acknowledgement, so it is dropped rather than left to
+      // swallow the first one of a later round.
+      acknowledgementOwedToDiscardedRound = false
       publication = .published
       cancelPublicationTimeout()
       completeOpen(nil)
@@ -604,6 +628,13 @@ class GattServerManager: NSObject {
     addNextService(on: peripheral)
   }
 
+  /// Abandons the acknowledgement this round was waiting on, recording that one is still owed.
+  private func noteDiscardedRegistration() {
+    guard outstandingRegistration != nil else { return }
+    outstandingRegistration = nil
+    acknowledgementOwedToDiscardedRound = true
+  }
+
   /// Hands the next service of the round to `add(_:)`, one at a time. See [registrationQueue].
   private func addNextService(on peripheral: CBPeripheralManager) {
     guard publication == .inProgress, !registrationQueue.isEmpty else { return }
@@ -621,7 +652,7 @@ class GattServerManager: NSObject {
     registrationFailure = error
     publication = .failed
     registrationQueue.removeAll()
-    outstandingRegistration = nil
+    noteDiscardedRegistration()
     servicesAwaitingRegistration.removeAll()
     cancelPublicationTimeout()
     unpublishFailedRegistration()
@@ -641,6 +672,10 @@ class GattServerManager: NSObject {
             self.publicationGeneration == generation,
             self.publication == .inProgress else { return }
       self.publicationTimeout = nil
+      // An acknowledgement owed to an earlier round has had this whole bound to arrive, so it is not
+      // coming. Dropped before this round records its own, or a stack that answers no `add(_:)` at all
+      // would have every round after the first swallow the one before it.
+      self.acknowledgementOwedToDiscardedRound = false
       let error = GattServerError.publicationTimedOut(
         awaiting: self.servicesAwaitingRegistration.map { $0.normalizedString }.sorted(),
         timeoutMs: publicationTimeoutMs
@@ -789,6 +824,10 @@ class GattServerManager: NSObject {
     // the limit, so the same call resolved there and rejected here.
     pendingAdvertisingTimeoutMs = timeoutMs
     peripheralManager?.startAdvertising(advertisementData)
+    // Armed after the call rather than before it, because the delegate runs on this queue and so cannot
+    // answer before the call returns. Every path that settles a start cancels it. See
+    // [advertisingStartTimeoutMs].
+    armAdvertisingStartTimeout()
   }
 
   func stopAdvertising() {
@@ -808,8 +847,39 @@ class GattServerManager: NSObject {
   /// arrive for the same completion, and two of which would otherwise resolve and reject the same
   /// promise.
   private func claimAdvertisingCompletion() -> ((Error?) -> Void)? {
-    defer { advertisingCompletion = nil }
+    defer {
+      advertisingCompletion = nil
+      cancelAdvertisingStartTimeout()
+    }
     return advertisingCompletion
+  }
+
+  /// Bounds the wait for `peripheralManagerDidStartAdvertising`. See [advertisingStartTimeoutMs].
+  ///
+  /// The expiry takes the radio back as well as settling the start, for the reason Android's does: the
+  /// stack may yet be about to advertise, and rejecting the promise while leaving an advertisement
+  /// running would be worse than the hang it replaces.
+  private func armAdvertisingStartTimeout() {
+    cancelAdvertisingStartTimeout()
+    let work = DispatchWorkItem { [weak self] in
+      guard let self = self else { return }
+      self.advertisingStartTimeout = nil
+      self.pendingAdvertisingTimeoutMs = 0
+      self.peripheralManager?.stopAdvertising()
+      self.claimAdvertisingCompletion()?(advertisingError(
+        "The Bluetooth stack did not report the advertisement as started within " +
+          "\(advertisingStartTimeoutMs) ms. Nothing is advertising."
+      ))
+    }
+    advertisingStartTimeout = work
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + .milliseconds(advertisingStartTimeoutMs), execute: work
+    )
+  }
+
+  private func cancelAdvertisingStartTimeout() {
+    advertisingStartTimeout?.cancel()
+    advertisingStartTimeout = nil
   }
 
   /// Emulates `AdvertiseSettings.setTimeout`, which CoreBluetooth has no equivalent for. Android
@@ -1554,6 +1624,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     publication = .idle
     cancelPublicationTimeout()
     servicesAwaitingRegistration.removeAll()
+    noteDiscardedRegistration()
 
     // `peripheralManagerDidStartAdvertising:error:` is documented only as returning "the result of a
     // startAdvertising: call", with nothing promising one arrives when the state drops instead — so a
@@ -1612,6 +1683,12 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     // without this the late acknowledgement would publish it again and report a server that no longer
     // exists.
     guard publication == .inProgress else { return }
+    // The one this round is waiting on is indistinguishable from one a discarded round is still owed,
+    // so the owed one is spent here rather than credited. See [acknowledgementOwedToDiscardedRound].
+    if acknowledgementOwedToDiscardedRound {
+      acknowledgementOwedToDiscardedRound = false
+      return
+    }
     // Attributed to the round that asked for it, which on this platform means the service this round is
     // currently waiting on — CoreBluetooth hands back nothing else to test. An acknowledgement for
     // anything else belongs to a round that has since been discarded and says nothing about this one:

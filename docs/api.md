@@ -297,7 +297,7 @@ adding a second one, and settles the earlier call's promise with `ERR_ADVERTISE`
 | `ERR_NO_CONTEXT` | Android only: no React context, so the permission could not be checked |
 | `ERR_UNSUPPORTED` | iOS: `manufacturerData`, `serviceData` or `connectable: false` was supplied. Android: the adapter has no BLE advertising support, which no amount of retrying changes |
 | `ERR_BLUETOOTH` | Bluetooth is off, or the device has no BLE support |
-| `ERR_ADVERTISE` | The platform refused the advertisement -- data over the 31-byte budget, too many advertisers, already started, or `android.setAdapterName` without a `localName` |
+| `ERR_ADVERTISE` | The platform refused the advertisement -- data over the 31-byte budget, too many advertisers, already started, or `android.setAdapterName` without a `localName`. Also reported on both platforms when the stack neither started nor refused the advertisement within 30 s, a bound that exists so a start the platform never answers is reported rather than left pending for the life of the process; nothing is advertising afterwards |
 | `ERR_CREATE_SERVER` | The call was waiting for the database and the registration round hit its 30 s bound without the stack acknowledging every service. Unlike the others this one is worth retrying, since nothing retries a timed-out round by itself |
 
 An invalid `mode`, `txPowerLevel`, `timeoutMs`, `companyId` or byte value is rejected in the shared
