@@ -483,9 +483,11 @@ class GattServerManager(
     FAILED,
   }
 
-  // The state and the callers parked on it share one monitor, so a caller cannot be appended in the
-  // window just after the transition that would have released it. Nothing that can re-enter the module
-  // runs under it: every parked caller is invoked after it is released.
+  // The state, the callers parked on it and the round they belong to share one monitor, so a caller
+  // cannot be appended in the window just after the transition that would have released it, and a
+  // registration cannot advance a round that a teardown has already discarded. Every parked caller is
+  // invoked after it is released; `open`'s own completion and the publication-failed event are the only
+  // things that ever run under it, and neither re-enters the module.
   private val publicationLock = Any()
 
   /**
@@ -950,7 +952,7 @@ class GattServerManager(
         return
       }
       logDebug { "onServiceAdded: service=${service.uuid} registered" }
-      addNextService()
+      addNextService(round)
     }
 
     override fun onMtuChanged(device: BluetoothDevice?, mtu: Int) {
@@ -1059,7 +1061,7 @@ class GattServerManager(
     pendingServices.addAll(services)
     logDebug { "Server opened, registering ${services.size} service(s)" }
     armPublicationTimeout(round)
-    addNextService()
+    addNextService(round)
     return true
   }
 
@@ -1177,7 +1179,8 @@ class GattServerManager(
     listener?.onServerPublicationFailed(error.code, error.message ?: "The database was not published")
   }
 
-  private fun discardPublicationRound() {
+  /** Ends the current round under [publicationLock], so [addNextService] cannot act on a stale one. */
+  private fun discardPublicationRound() = synchronized(publicationLock) {
     publicationRound.incrementAndGet()
     pendingServices.clear()
   }
@@ -1185,29 +1188,45 @@ class GattServerManager(
   /**
    * Only ever called from [open] or from `onServiceAdded`, so at most one `addService` is ever in
    * flight — which is what the platform requires.
+   *
+   * [round] is re-checked here rather than trusted from the caller. `onServiceAdded` tests it and then
+   * calls this, and between the two a teardown on another thread can discard the round: the queue it
+   * cleared then reads as "every service registered", and this reported a database as `PUBLISHED` that
+   * had just been closed — `isServerRunning` said true, and a `startAdvertising` arriving next put a
+   * connectable advertisement on the air over an empty database and resolved successfully. The check,
+   * the poll and the decision the poll leads to are one step under [publicationLock] for that reason,
+   * with only the binder call left outside it.
    */
   @SuppressLint("MissingPermission")
-  private fun addNextService() {
-    val next = pendingServices.poll()
-    if (next == null) {
-      logDebug { "All services registered" }
-      finishOpen(DatabasePublication.PUBLISHED, null)
-      return
+  private fun addNextService(round: Int) {
+    val next = synchronized(publicationLock) {
+      if (publicationRound.get() != round) {
+        logDebug { "addNextService: round $round was discarded, leaving it to the one that replaced it" }
+        return
+      }
+      val polled = pendingServices.poll()
+      if (polled == null) {
+        logDebug { "All services registered" }
+        finishOpen(DatabasePublication.PUBLISHED, null)
+        return
+      }
+      val server = gattServer
+      if (server == null) {
+        discardPublicationRound()
+        finishOpen(DatabasePublication.FAILED, GattServerException(
+          "ERR_NO_SERVER", "The GATT server was closed before service ${polled.uuid} could be registered"
+        ))
+        return
+      }
+      polled to server
     }
-    val server = gattServer
-    if (server == null) {
-      discardPublicationRound()
-      finishOpen(DatabasePublication.FAILED, GattServerException(
-        "ERR_NO_SERVER", "The GATT server was closed before service ${next.uuid} could be registered"
-      ))
-      return
-    }
+    val (service, server) = next
     // A false return means the registration was never initiated, so no callback will arrive.
-    if (!server.addService(next)) {
-      Log.e(TAG, "addService: could not initiate registration of ${next.uuid}")
+    if (!server.addService(service)) {
+      Log.e(TAG, "addService: could not initiate registration of ${service.uuid}")
       discardPublicationRound()
       finishOpen(DatabasePublication.FAILED, GattServerException(
-        "ERR_CREATE_SERVER", "Could not initiate registration of service ${next.uuid}"
+        "ERR_CREATE_SERVER", "Could not initiate registration of service ${service.uuid}"
       ))
     }
   }
