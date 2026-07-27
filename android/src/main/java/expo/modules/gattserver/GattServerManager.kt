@@ -331,12 +331,8 @@ class GattServerManager(
   // that, a start and a stop both read the same completion and settle one Promise twice, which throws.
   private val advertiser = AtomicReference<BluetoothLeAdvertiser?>(null)
   private val advertiseCallback = AtomicReference<AdvertiseCallback?>(null)
-  // The completion carries the callback it belongs to rather than standing alone, because the two cannot
-  // be swapped in one step: the callback outlives the start — it is the only handle able to stop the
-  // advertisement — while the completion is spent as soon as the start resolves. Held apart, a displaced
-  // start's `AdvertiseCallback` settled whichever completion happened to be armed: `onStartFailure`
-  // rejected the promise of the start that displaced it, and `onStartSuccess` *resolved* one whose
-  // advertisement was never on the air, taking its start bound down with it.
+  // Carries the callback it belongs to: held apart, a displaced start's callback settled whichever
+  // completion happened to be armed, so `onStartSuccess` could resolve a start never on the air.
   private val pendingAdvertiseResult = AtomicReference<PendingAdvertiseStart?>(null)
 
   // Bumped by every stop, so a start still waiting for the database can tell that the application asked
@@ -397,10 +393,7 @@ class GattServerManager(
    */
   private data class RequestKey(val deviceId: String, val requestId: Int)
 
-  /**
-   * An advertising start still waiting for its `AdvertiseCallback`, carrying the callback that will
-   * report it so a settlement can be attributed to the start it belongs to. See [pendingAdvertiseResult].
-   */
+  /** A start still waiting for its `AdvertiseCallback`. See [pendingAdvertiseResult]. */
   private class PendingAdvertiseStart(
     val callback: AdvertiseCallback,
     val onResult: (GattServerException?) -> Unit,
@@ -701,12 +694,9 @@ class GattServerManager(
   }
 
   private fun handleAdapterOn(): Unit = synchronized(serverLifecycleLock) {
-    // Guarded for the reason `open` is: this runs on the lifecycle HandlerThread, from the state
-    // receiver, and that thread has no uncaught-exception handler — so a `setName` or `openGattServer`
-    // that raises on a revoked permission took the whole process down rather than the round. It also
-    // leaves state behind that nothing else recovers: `openServer` marks the publication IN_PROGRESS
-    // before it arms that round's bound, so a throw in between parks every later `startAdvertising`
-    // for good.
+    // Guarded for the reason `open` is: this runs on the lifecycle HandlerThread, which has no uncaught
+    // handler, and `openServer` marks the publication IN_PROGRESS before arming that round's bound — so
+    // a raising `setName` or `openGattServer` took the process down and parked every later start.
     try {
       // The later attempt [restoreAdapterName] logs about when it fails. `setName` cannot succeed while
       // the adapter is off, which is exactly when a teardown is most likely to run, so a rename that
@@ -727,8 +717,6 @@ class GattServerManager(
       }
     } catch (e: Exception) {
       Log.e(TAG, "Failed to reopen the GATT server after the adapter was re-enabled", e)
-      // Same settlement the failed-open branch above uses, so a round left IN_PROGRESS by the throw is
-      // ended rather than leaving `whenDatabasePublished` waiting on a round that will never report.
       finishOpen(
         DatabasePublication.FAILED,
         (e as? GattServerException)
@@ -1774,13 +1762,8 @@ class GattServerManager(
   }
 
   /**
-   * Settles the outstanding start only while it is still [callback]'s, for the `AdvertiseCallback` paths
-   * where a late report belongs to a start that has since been displaced. The unscoped overload is for
-   * the callers that legitimately end whatever start is outstanding — a stop, the adapter going down —
-   * and only these two know which start the outcome describes.
-   *
-   * A report that is no longer current settles nothing: the start that displaced this one is bounded by
-   * its own [armAdvertisingStartTimeout], so nothing is left hanging by declining to answer here.
+   * Settles the outstanding start only while it is still [callback]'s. A report from a displaced start
+   * settles nothing: the start that displaced it carries its own [armAdvertisingStartTimeout].
    */
   private fun finishAdvertise(callback: AdvertiseCallback, error: GattServerException?) {
     val start = pendingAdvertiseResult.get() ?: return
