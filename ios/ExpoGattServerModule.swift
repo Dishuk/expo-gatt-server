@@ -515,7 +515,12 @@ public class ExpoGattServerModule: Module {
     var result: [CharacteristicAddress: CharacteristicDelegation] = [:]
     for serviceConfig in services {
       let serviceUuid = try parseUuid(serviceConfig["uuid"], field: "service")
-      guard let charList = serviceConfig["characteristics"] as? [[String: Any]] else { continue }
+      let parsed: [[String: Any]]? = try parseTypedArray(
+        serviceConfig["characteristics"],
+        field: "characteristics",
+        elementDescription: "characteristic objects"
+      )
+      guard let charList = parsed else { continue }
       for charMap in charList {
         guard let delegateMap = charMap["delegate"] as? [String: Any] else { continue }
         let delegation = CharacteristicDelegation(
@@ -539,7 +544,10 @@ public class ExpoGattServerModule: Module {
 
     var characteristics: [CBMutableCharacteristic] = []
     var characteristicUuids: Set<CBUUID> = []
-    if let charList = map["characteristics"] as? [[String: Any]] {
+    let charList: [[String: Any]]? = try parseTypedArray(
+      map["characteristics"], field: "characteristics", elementDescription: "characteristic objects"
+    )
+    if let charList = charList {
       for charMap in charList {
         let characteristic = try parseCharacteristicConfig(
           charMap, service: uuid, initialValues: &initialValues
@@ -575,8 +583,14 @@ public class ExpoGattServerModule: Module {
     initialValues: inout [CharacteristicAddress: Data]
   ) throws -> CBMutableCharacteristic {
     let uuid = try parseUuid(map["uuid"], field: "characteristic")
-    let properties = try parseProperties(map["properties"] as? [String])
-    let permissions = try parsePermissions(map["permissions"] as? [String])
+    let propertyNames: [String]? = try parseTypedArray(
+      map["properties"], field: "properties", elementDescription: "property names"
+    )
+    let permissionNames: [String]? = try parseTypedArray(
+      map["permissions"], field: "permissions", elementDescription: "permission names"
+    )
+    let properties = try parseProperties(propertyNames)
+    let permissions = try parsePermissions(permissionNames)
 
     // A CBMutableCharacteristic created with a non-nil value is forced read-only by CoreBluetooth, and
     // adding it with any other properties or permissions raises "Characteristics with cached values
@@ -596,7 +610,10 @@ public class ExpoGattServerModule: Module {
       permissions: permissions
     )
 
-    if let descriptorList = map["descriptors"] as? [[String: Any]], !descriptorList.isEmpty {
+    let descriptorList: [[String: Any]]? = try parseTypedArray(
+      map["descriptors"], field: "descriptors", elementDescription: "descriptor objects"
+    )
+    if let descriptorList = descriptorList, !descriptorList.isEmpty {
       characteristic.descriptors = try descriptorList.map { try parseDescriptorConfig($0) }
     }
 

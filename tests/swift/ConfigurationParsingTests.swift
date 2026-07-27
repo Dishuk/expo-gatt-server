@@ -158,4 +158,55 @@ final class TimeoutParsingTests: XCTestCase {
     XCTAssertEqual(try parse(Double(attTransactionTimeoutMs - 1)), attTransactionTimeoutMs - 1)
     XCTAssertThrowsError(try parse(Double(attTransactionTimeoutMs)))
   }
+
+  // MARK: - Typed arrays
+
+  /// An absent key is not an empty array: the caller has to be able to tell "no descriptors" from
+  /// "descriptors I could not read", which is the whole point of this returning an optional.
+  func testAnAbsentArrayIsNil() throws {
+    let parsed: [String]? = try parseTypedArray(nil, field: "properties", elementDescription: "names")
+    XCTAssertNil(parsed)
+    let null: [String]? = try parseTypedArray(
+      NSNull(), field: "properties", elementDescription: "names"
+    )
+    XCTAssertNil(null)
+  }
+
+  func testAWellTypedArrayComesBackWhole() throws {
+    let parsed: [String]? = try parseTypedArray(
+      ["read", "write"], field: "properties", elementDescription: "names"
+    )
+    XCTAssertEqual(parsed, ["read", "write"])
+  }
+
+  /// The failure this exists for. `["readable", 1] as? [String]` is `nil`, and every caller read `nil`
+  /// as an absent key — so one bad element published an attribute with no permissions at all and
+  /// `createServer` resolved. Android throws for the same input.
+  func testOneBadElementIsReportedRatherThanDroppingTheArray() {
+    XCTAssertThrowsError(
+      try parseTypedArray(["readable", 1], field: "permissions", elementDescription: "names")
+        as [String]?
+    ) { error in
+      XCTAssertTrue(
+        "\(error)".contains("index 1"),
+        "the message should name the element that could not be read, got \(error)"
+      )
+    }
+  }
+
+  func testAValueThatIsNotAnArrayIsRejected() {
+    XCTAssertThrowsError(
+      try parseTypedArray("read", field: "properties", elementDescription: "names") as [String]?
+    )
+  }
+
+  /// The nested case: a service whose `characteristics` holds one non-object entry used to publish a
+  /// service with no characteristics at all, which a central discovers as an empty service.
+  func testAMalformedObjectEntryIsReported() {
+    XCTAssertThrowsError(
+      try parseTypedArray(
+        [["uuid": "2a37"], 5], field: "characteristics", elementDescription: "characteristic objects"
+      ) as [[String: Any]]?
+    )
+  }
 }

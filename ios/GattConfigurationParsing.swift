@@ -40,6 +40,41 @@ internal func parseTimeoutMs(
   return millis
 }
 
+/// Decodes an optional array whose elements must all be of one type, reporting the first that is not.
+///
+/// Written because `value as? [Element]` is all-or-nothing: one element of the wrong type makes the
+/// whole cast `nil`, and every caller here read `nil` as "the key was absent". So a single malformed
+/// entry published a service with *no* characteristics, a characteristic with *no* descriptors, or —
+/// worst — an attribute with no properties and no permissions, and `createServer` resolved as though
+/// the configuration had been honoured. That is the silent-drop failure the TypeScript layer rejects a
+/// misspelled property name to prevent, reappearing one layer down for a caller that reaches the native
+/// module directly, which is the case this parsing exists for at all.
+///
+/// Android refuses the same input rather than dropping it, so throwing is also what keeps one
+/// configuration meaning one thing on both platforms.
+internal func parseTypedArray<Element>(
+  _ value: Any?, field: String, elementDescription: String
+) throws -> [Element]? {
+  guard let value = value, !(value is NSNull) else { return nil }
+  guard let elements = value as? [Any] else {
+    throw GattArgumentError(
+      message: "Invalid \(field). Expected an array of \(elementDescription)."
+    )
+  }
+  var typed: [Element] = []
+  typed.reserveCapacity(elements.count)
+  for (index, element) in elements.enumerated() {
+    guard let item = element as? Element else {
+      throw GattArgumentError(
+        message: "Invalid \(field) entry at index \(index). Expected \(elementDescription), " +
+          "received \(element)."
+      )
+    }
+    typed.append(item)
+  }
+  return typed
+}
+
 /// Converts an already-typed array of byte values.
 ///
 /// Used for the arguments expo-modules-core decodes for us — a declared `[Int]` parameter goes through
