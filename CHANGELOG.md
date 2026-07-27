@@ -376,6 +376,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every ordinary teardown reported a publication failure on Android.** `stop` settles the current
+  registration round through the same `finishOpen` a genuine failure does, carrying the same
+  `ERR_NO_SERVER` — so once `createServer` had resolved, leaving no promise to carry it, every
+  `stopServer`, every `OnDestroy` and the stop `createServer` issues before publishing a replacement
+  emitted `onServerPublicationFailed`. The event documents itself as the signal to call `createServer`
+  again, so a listener following that advice rebuilt the server the application had just asked to be rid
+  of. iOS never had it: there the report is reachable only from the two paths on which a round actually
+  fails. A round the application ended on purpose is no longer reported.
+- **A cancelled `createServer` took a resolved advertisement off the air with nothing reporting it.**
+  The compensating stop the shared layer issues calls the native module directly, so it skipped the
+  advertising epoch that `stopServer` bumps — and both platforms stop advertising as part of stopping the
+  server. A `startAdvertising` issued after the application's own stop therefore resolved, and was then
+  taken off the air by the create still unwinding behind it, with no promise left to reject.
+- **One notification the Android stack refused as busy rejected the whole backlog, permanently.**
+  `ERROR_GATT_WRITE_REQUEST_BUSY` means the previous send is still in flight, not that anything is wrong
+  with the entry — but it was settled as a failure and the next entry offered immediately, into exactly
+  the state that produced it, so a single refusal swept every waiting promise. Nothing changed the
+  premise afterwards either, so that device's sends stayed dead until it disconnected. A busy refusal now
+  puts the entry back at the head of its queue and offers it again, bounded by the same 35 s an accepted
+  send gets.
+- **A stop racing the last service registration stranded every parked `startAdvertising` on Android.**
+  `finishOpen` takes the waiters out from under the lock and only then asks for a handler, and `Handler`
+  drops a message posted to a looper that has been asked to quit. A `stopServer` landing between the two
+  left this call with the waiters and no way to run them, while the stop's own `finishOpen` found the
+  list already empty — so the promises never settled either way. The release now falls back to the main
+  looper, which never quits.
+- **A registration acknowledged just as Bluetooth went off could publish a database that was closed.**
+  `onServiceAdded` tested the publication round and then called `addNextService`, which re-read nothing:
+  a teardown in between cleared the queue, which reads as "every service registered", so the round was
+  reported `PUBLISHED` with no server behind it. `isServerRunning` said `true`, and a `startAdvertising`
+  arriving next put a connectable advertisement on the air over an empty database and resolved. The
+  round check, the queue read and the decision it leads to are now one step under the publication lock.
+- **A queued write could commit an attribute value longer than the specification allows, on both
+  platforms.** Assembly bounded the offset of each part and nothing bounded the result, so parts each
+  within one PDU assembled past the 512-octet maximum (Core Spec Vol 3, Part F, §3.2.9). The module then
+  refused to notify for that characteristic for the rest of the server's life, since the notification
+  bound is the same 512, and carried the oversized value across every adapter power cycle. Such a batch
+  is now refused whole with "Invalid Attribute Value Length", which is what the specification answers.
+- **A momentary `resetting` could destroy a working iOS server for good.** The re-publication that
+  follows re-`add`s every service without taking the local database back first, on the inference that
+  `resetting` clears it — which Apple documents for the powered-off state, not for this one. If the
+  database in fact survived, every add came back "a service with the same UUID has already been added",
+  failing the round the blip was supposed to be recovered from. `removeAllServices` now precedes the
+  round, which costs nothing when the database really is empty.
+- **A short `AdvertiseConfig.timeoutMs` rejected `startAdvertising` on iOS instead of resolving it.** The
+  timer was armed when the start was *issued* rather than when the advertisement reached the air, so it
+  could expire while `peripheralManagerDidStartAdvertising` was still round-tripping the controller — and
+  its expiry runs `stopAdvertising`, which rejects the completion still pending with `ERR_ADVERTISE`.
+  Android, which this emulates, reports success and then stops silently at the limit.
+- **One malformed element emptied a whole configuration array on iOS.** `as? [[String: Any]]` is
+  all-or-nothing and every caller read `nil` as "the key was absent", so a single bad entry published a
+  service with no characteristics, a characteristic with no descriptors, or an attribute with no
+  properties and no permissions — and `createServer` resolved. That is the silent-drop failure the shared
+  layer rejects a misspelled property name to prevent, one layer down. Android refuses the same input.
+- **A superseded Android advertising start could cancel its replacement's limit and undo its rename.**
+  Two starts can be inside `beginAdvertising` at once — one released from the publication wait, one
+  issued straight afterwards on Expo's queue — and the earlier one cancelled the timeout and restored the
+  adapter name unconditionally. The later advertisement was then stopped by the platform at its limit
+  with no callback to say so, leaving `isAdvertising` reporting true and the phone named after the
+  application. Both now happen only while the call still owns the radio.
+- **`npm install` and `npm publish` never returned.** `expo-module build` appends `--watch` whenever
+  stdout is a terminal and `CI` is unset, which is exactly how npm runs a lifecycle script — so the
+  `prepare` and `prepublishOnly` scripts parked in a tsc watcher. Continuous integration never saw it,
+  because Actions sets `CI`. Both now go through `scripts/build-package.js`, which builds each target
+  non-interactively and, for publishing, cleans both outputs first so a renamed source file cannot leave
+  a stale module in the tarball.
+- **The config plugin accepted an option no layer below reads.** `requireBluetoothLEHardware` is one
+  capital away from the real name; it prebuilt clean and did nothing, leaving the app on Google Play for
+  devices with no BLE radio. Unknown options are now rejected, as `createServer`'s own configuration
+  already rejects them.
+- **Android reported neither the adapter state nor the link MTU until they changed.**
+  `ACTION_STATE_CHANGED` announces only changes, and `onMtuChanged` fires only for an exchange the
+  central asks for — so a consumer rendering from `onBluetoothStateChanged`, or sizing payloads from
+  `onMtuChanged`, was told nothing at all until the user toggled Bluetooth or a central happened to
+  negotiate. iOS reports both up front, so the one listener that worked there worked nowhere here. Both
+  are now reported when the server opens and when a central connects.
+
 - **Android crashed the process on a notification longer than 512 octets.** The payload was bounded by
   `ATT_MTU - 3` alone, which reaches 514 on a link that negotiated the maximum ATT_MTU of 517 — while an
   attribute value may hold only 512 (Core Spec Vol 3, Part F, §3.2.9), and
