@@ -213,6 +213,16 @@ function assertValidAttributeValue(value: unknown, field: string): void {
 }
 
 /**
+ * Rejects a value written where a list belongs, which reaches the caller as `.map is not a function`
+ * otherwise — naming neither the field nor the fix. Absent stays legal; each caller has its own default.
+ */
+function assertArrayOrAbsent(value: unknown, field: string): void {
+  if (value !== undefined && !Array.isArray(value)) {
+    throw new Error(`Invalid ${field} ${JSON.stringify(value)}. Expected an array.`);
+  }
+}
+
+/**
  * A whole number the native side will receive in a parameter declared as an integer.
  *
  * Every such argument is validated here rather than only where it happens to be used, because the
@@ -320,7 +330,15 @@ function assertValidDelegate(delegate: unknown, characteristicUuid: string): voi
  * peripheral, and `requestTimeoutMS` silently keeps the default. None of them reports a problem, and
  * `delegate` was the only object guarded against it.
  */
-function assertNoUnknownKeys(value: object, allowed: readonly string[], what: string): void {
+function assertNoUnknownKeys(value: unknown, allowed: readonly string[], what: string): void {
+  // Checked here rather than left to `Object.keys`, which reports a null as `Cannot convert undefined or
+  // null to object` — naming neither the option nor the fix, which is the whole point of this function.
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(
+      `Invalid ${what} options ${JSON.stringify(value)}. Expected an object with any of ` +
+        `${allowed.map((option) => JSON.stringify(option)).join(', ')}.`,
+    );
+  }
   for (const key of Object.keys(value)) {
     if (!allowed.includes(key)) {
       throw new Error(
@@ -375,6 +393,7 @@ function normalizeCharacteristic(
     assertValidAttributeValue(characteristic.value, 'characteristic');
   }
   assertValidDelegate(characteristic?.delegate, uuid);
+  assertArrayOrAbsent(characteristic.descriptors, 'characteristic descriptors');
   const descriptors = characteristic.descriptors?.map((descriptor) => {
     const descriptorUuid = normalizeUuid(descriptor?.uuid, 'descriptor');
     if (descriptorUuid === CLIENT_CHARACTERISTIC_CONFIGURATION_UUID) {
@@ -522,6 +541,7 @@ export async function createServer(
     if (service.type !== undefined) {
       assertOneOf(service.type, SERVICE_TYPES, 'service type');
     }
+    assertArrayOrAbsent(service?.characteristics, 'service characteristics');
     return {
       ...service,
       uuid,
@@ -666,9 +686,12 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
   // the same way, and iOS — where `CBUUID` would otherwise advertise the full sixteen octets it was
   // built from — contracts it back in `beginAdvertising`. See `CBUUID.advertisedForm`.
   assertNoUnknownKeys(config, ADVERTISE_KEYS, 'advertising');
-  if (config.android !== undefined) {
+  // `!= null`, so a block written as `Platform.OS === 'android' ? { … } : null` reads as absent rather
+  // than as a malformed object. Both natives already read a missing block as "take the defaults".
+  if (config.android != null) {
     assertNoUnknownKeys(config.android, ANDROID_ADVERTISE_KEYS, 'advertising android');
   }
+  assertArrayOrAbsent(config.serviceUuids, 'advertising serviceUuids');
   const serviceUuids = config.serviceUuids?.map((uuid) => normalizeUuid(uuid, 'service'));
   if (config.mode !== undefined) {
     assertOneOf(config.mode, ADVERTISING_MODES, 'advertising mode');
@@ -688,6 +711,7 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
       );
     }
   }
+  assertArrayOrAbsent(config.manufacturerData, 'advertising manufacturerData');
   for (const entry of config.manufacturerData ?? []) {
     // 16-bit field, so a wider value cannot be transmitted; Android only rejects negative ids.
     if (!Number.isInteger(entry?.companyId) || entry.companyId < 0 || entry.companyId > 0xffff) {
@@ -699,6 +723,7 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
     assertNoUnknownKeys(entry, MANUFACTURER_DATA_KEYS, 'manufacturer data');
     assertValidBytes(entry.data, 'manufacturer');
   }
+  assertArrayOrAbsent(config.serviceData, 'advertising serviceData');
   const serviceData = config.serviceData?.map((entry) => {
     const uuid = normalizeUuid(entry?.uuid, 'service data');
     assertNoUnknownKeys(entry, SERVICE_DATA_KEYS, 'service data');
