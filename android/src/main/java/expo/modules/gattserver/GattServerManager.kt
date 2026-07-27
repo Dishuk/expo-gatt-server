@@ -1256,7 +1256,17 @@ class GattServerManager(
     // those, since every later request on every connection queues behind it. Not the main thread
     // either, for the same reason the adapter broadcasts are not: this is the same binder work, and
     // enough of it to matter. See [lifecycleThread].
-    lifecycleHandler().post { parked.forEach { it(error) } }
+    val release = Runnable { parked.forEach { it(error) } }
+    // `post` returns false — dropping the message — once the looper it was taken from has been asked to
+    // quit, and the waiters were taken out of [readinessWaiters] before the handler was even obtained.
+    // A `stop` landing between the two therefore stranded them for good: this call had already emptied
+    // the list, so the `finishOpen` inside `stop` found nothing left to settle and the `startAdvertising`
+    // promises parked here never resolved either way. The main looper never quits, so the fallback
+    // always has somewhere to run; the direct call is only for the case where even that is refused.
+    if (!lifecycleHandler().post(release) && !timeoutHandler.post(release)) {
+      Log.w(TAG, "No looper accepted the release of ${parked.size} parked caller(s); running inline")
+      release.run()
+    }
   }
 
   /**
