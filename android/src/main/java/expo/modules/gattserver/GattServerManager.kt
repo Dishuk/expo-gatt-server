@@ -1097,6 +1097,15 @@ class GattServerManager(
     // would silently revert whenever the adapter was power-cycled — while iOS, which re-adds the very
     // instances it built, keeps them. Nothing in the API says a power cycle empties the database.
     val retained = currentCharacteristicValues()
+    // Claimed before anything is torn down, so an acknowledgement still owed by the round this one
+    // replaces is already stale. Claimed after the close, it was not: the outgoing round was still
+    // current with `gattServer` already null, so its `onServiceAdded` failed a round that was still
+    // current and rejected `createServer` with `ERR_NO_SERVER` over a database that then published.
+    val round = synchronized(publicationLock) {
+      publication = DatabasePublication.IN_PROGRESS
+      pendingServices.clear()
+      publicationRound.incrementAndGet()
+    }
     // A server this manager already holds is closed before another is opened over it. The lock
     // serialises the callers of this function but does not stop two of them arriving: `open` registers
     // the state receiver before it checks whether the adapter is usable, so an adapter that finishes
@@ -1108,9 +1117,6 @@ class GattServerManager(
       it.close()
       gattServer = null
     }
-    synchronized(publicationLock) { publication = DatabasePublication.IN_PROGRESS }
-    // Claimed before the server exists, so the callback it is handed can name the round it serves.
-    val round = publicationRound.incrementAndGet()
     val server = bluetoothManager?.openGattServer(context, gattServerCallback(round)) ?: return false
     gattServer = server
     server.clearServices()
@@ -1134,20 +1140,18 @@ class GattServerManager(
     val timeout = Runnable {
       if (publicationRound.get() != round) return@Runnable
       Log.e(TAG, "No onServiceAdded within $PUBLICATION_TIMEOUT_MS ms; reporting the round as failed")
-      discardPublicationRound()
-      // `onlyIf` rather than a check up here: the registration can complete between the two, and
-      // reading the state separately from writing it let a bound that had already lost the race
-      // overwrite `PUBLISHED` with `FAILED` — leaving `isServerRunning` false and every later
-      // `startAdvertising` rejecting `ERR_NO_SERVER` for a database that really was published.
-      finishOpen(
-        DatabasePublication.FAILED,
+      // Through the round rather than an unconditional discard: the check above is only a log guard,
+      // and a bound that lost its round between the two used to increment past the round that had
+      // replaced it — orphaning a healthy registration and rejecting its caller. See
+      // [failPublicationRound], which re-tests and discards as one step.
+      failPublicationRound(
+        round,
         GattServerException(
           "ERR_CREATE_SERVER",
           "The Bluetooth stack did not acknowledge a service registration within " +
             "$PUBLICATION_TIMEOUT_MS ms, so the database was not published. Call createServer again " +
             "to retry."
         ),
-        onlyIf = DatabasePublication.IN_PROGRESS,
       )
     }
     publicationTimeout.set(timeout)
@@ -1573,43 +1577,51 @@ class GattServerManager(
     // completion behind for the next stop to settle a second time. The callback is swapped first,
     // because it is what `current()` tests: swapping the completion first leaves a window in which a
     // failure belonging to the displaced advertisement settles the completion this call just installed.
-    val displaced = advertiseCallback.getAndSet(callback)
-    pendingAdvertiseResult.getAndSet(onResult)
-      ?.invoke(GattServerException("ERR_ADVERTISE", "Advertising restarted"))
-    // `BluetoothLeAdvertiser` keys its advertising sets on callback identity — `mLegacyAdvertisers` is a
-    // map from the `AdvertiseCallback` to the set it started — so a start with a fresh callback adds a
-    // second advertisement rather than replacing the first, and the displaced one keeps broadcasting
-    // with nothing left able to stop it. Stopped before the new start, so it also frees the controller
-    // slot rather than counting towards ADVERTISE_FAILED_TOO_MANY_ADVERTISERS.
-    displaced?.let { leAdvertiser.stopAdvertising(it) }
-    // Only while this call still owns the radio. Two starts can be in `beginAdvertising` at once — the
-    // one released from `whenDatabasePublished` on the lifecycle thread and one the application issued
-    // straight afterwards on Expo's queue, which takes the synchronous path because the release is what
-    // published the database. The later one can already have installed its callback and armed its own
-    // limit by the time the earlier reaches here, and an unconditional cancel took that limit away: the
-    // platform then stopped its advertisement at `timeoutMs` with no callback, leaving `isAdvertising`
-    // reporting true and any `setAdapterName` rename on the phone for good. The same identity test the
-    // callback uses for `current()`.
-    if (advertiseCallback.get() === callback) {
-      cancelAdvertisingTimeout()
-    }
-    // Armed before the call rather than after it: the callback is posted to the main looper and can be
-    // delivered before this thread returns from the binder, and an arm that ran afterwards would then
-    // install a bound for a start that had already been settled. `finishAdvertise` cancels it, and the
-    // expiry checks that the start it belongs to is still the outstanding one, so a bound left behind by
-    // either ordering is inert.
-    armAdvertisingStartTimeout(callback, onResult)
+    //
+    // Guarded from the swap rather than from the start alone: `stopAdvertising` below is a binder call
+    // that raises on a revoked BLUETOOTH_ADVERTISE, and a throw there escaped with this completion armed.
     try {
+      val displaced = advertiseCallback.getAndSet(callback)
+      pendingAdvertiseResult.getAndSet(onResult)
+        ?.invoke(GattServerException("ERR_ADVERTISE", "Advertising restarted"))
+      // `BluetoothLeAdvertiser` keys its advertising sets on callback identity — `mLegacyAdvertisers` is a
+      // map from the `AdvertiseCallback` to the set it started — so a start with a fresh callback adds a
+      // second advertisement rather than replacing the first, and the displaced one keeps broadcasting
+      // with nothing left able to stop it. Stopped before the new start, so it also frees the controller
+      // slot rather than counting towards ADVERTISE_FAILED_TOO_MANY_ADVERTISERS.
+      displaced?.let { leAdvertiser.stopAdvertising(it) }
+      // Only while this call still owns the radio. Two starts can be in `beginAdvertising` at once — the
+      // one released from `whenDatabasePublished` on the lifecycle thread and one the application issued
+      // straight afterwards on Expo's queue, which takes the synchronous path because the release is what
+      // published the database. The later one can already have installed its callback and armed its own
+      // limit by the time the earlier reaches here, and an unconditional cancel took that limit away: the
+      // platform then stopped its advertisement at `timeoutMs` with no callback, leaving `isAdvertising`
+      // reporting true and any `setAdapterName` rename on the phone for good. The same identity test the
+      // callback uses for `current()`.
+      if (advertiseCallback.get() === callback) {
+        cancelAdvertisingTimeout()
+      }
+      // Armed before the call rather than after it: the callback is posted to the main looper and can be
+      // delivered before this thread returns from the binder, and an arm that ran afterwards would then
+      // install a bound for a start that had already been settled. `finishAdvertise` cancels it, and the
+      // expiry checks that the start it belongs to is still the outstanding one, so a bound left behind by
+      // either ordering is inert.
+      armAdvertisingStartTimeout(callback, onResult)
       leAdvertiser.startAdvertising(settings, advData.build(), scanResponse, callback)
     } catch (e: Exception) {
       // `startAdvertising` rechecks the adapter state itself and throws if it went off. The caller reports
       // that throw, so neither the completion nor the callback may be left installed for a later stop to
       // settle and stop a second time. compareAndSet, so a concurrent restart's own state is left alone.
       val ours = pendingAdvertiseResult.compareAndSet(onResult, null)
+      // The bound armed above outlives the completion it was watching otherwise, and settles nothing
+      // once that completion is gone — cancelled here so it does not sit on the looper for 30 s.
+      if (ours) {
+        cancelAdvertisingStartTimeout()
+      }
       if (advertiseCallback.compareAndSet(callback, null)) {
-        // The superseded set was stopped just above, so nothing is on the air and no AdvertiseCallback
-        // is coming to say so. Left set, `isAdvertising` would report an advertisement that is not
-        // running until the adapter-state receiver happened to clear it.
+        // Nothing this call started is on the air and no AdvertiseCallback is coming to say so. Left
+        // set, `isAdvertising` would report an advertisement that is not running until the
+        // adapter-state receiver happened to clear it.
         advertising.set(false)
         // Nothing reached the air, so the rename this start applied has nothing left to justify it — the
         // same reason `onStartFailure` restores it. Without this, a start that threw because the adapter
