@@ -349,6 +349,13 @@ export interface DeviceDisconnectedEvent {
 
 export interface CharacteristicReadRequestEvent {
   deviceId: string;
+  /**
+   * **Unique per device, not globally.** Android carries the ATT transaction identifier through as it
+   * is, and the peer assigns that per connection — so two centrals connected at once both produce
+   * `1, 2, 3`. iOS numbers requests across the whole manager and so happens not to repeat, but nothing
+   * in the API promises that. Key any bookkeeping of your own on the pair with `deviceId`, the way the
+   * module keys its own pending requests.
+   */
   requestId: number;
   serviceUuid: string;
   characteristicUuid: string;
@@ -365,6 +372,7 @@ export interface CharacteristicReadRequestEvent {
  */
 export interface CharacteristicWriteRequestEvent {
   deviceId: string;
+  /** Unique per device, not globally — see `CharacteristicReadRequestEvent.requestId`. */
   requestId: number;
   serviceUuid: string;
   characteristicUuid: string;
@@ -478,8 +486,12 @@ export interface CharacteristicUnsubscribedEvent {
  *   `STATE_TURNING_ON` / `STATE_TURNING_OFF`, both of which the platform documents as not yet usable.
  * - `unsupported` — no BLE peripheral support. iOS `CBManagerState.unsupported`, Android: no
  *   `BluetoothAdapter`.
- * - `unauthorized` — the app may not use Bluetooth. iOS `CBManagerState.unauthorized`.
- * - `unknown` — not determined yet. iOS reports this until the first state callback arrives.
+ * - `unauthorized` — the app may not use Bluetooth. **iOS only** (`CBManagerState.unauthorized`);
+ *   Android has no adapter state for it and reports a missing grant as an `ERR_PERMISSION` rejection
+ *   from the call that needed it, so branch on both rather than on this state alone.
+ * - `unknown` — not determined yet. iOS reports this until the first state callback arrives, and
+ *   before `createServer` it can report nothing else, since `CBPeripheralManager.state` needs an
+ *   instantiated manager. Android reads the adapter directly and so answers properly at any time.
  *
  * `poweredOff` destroys the published GATT database on both platforms. The module re-publishes
  * services on the next transition to `poweredOn`, but advertising must be restarted by the consumer.
