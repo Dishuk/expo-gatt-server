@@ -34,9 +34,15 @@ export function applyBluetoothInfoPlist(
   }
 
   if (props.bluetoothPeripheralBackgroundMode) {
-    const modes = infoPlist.UIBackgroundModes ?? [];
+    // A string here is the plausible hand-edit, and spreading one produced a per-character array while
+    // `includes` matched substrings — so `'bluetooth-peripheral'` was left a string and the mode never
+    // became an entry. Normalised into a list instead, which is what the key has to hold.
+    const declared = infoPlist.UIBackgroundModes;
+    const modes = Array.isArray(declared) ? declared : declared == null ? [] : [declared];
     if (!modes.includes(PERIPHERAL_BACKGROUND_MODE)) {
       infoPlist.UIBackgroundModes = [...modes, PERIPHERAL_BACKGROUND_MODE];
+    } else if (!Array.isArray(declared)) {
+      infoPlist.UIBackgroundModes = modes;
     }
   }
 }

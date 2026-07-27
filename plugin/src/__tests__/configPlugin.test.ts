@@ -31,7 +31,10 @@ function feature(required?: string): Feature {
 }
 
 function bleEntries(root: Manifest): Feature[] {
-  return (root['uses-feature'] ?? []).filter((entry) => entry.$['android:name'] === BLE);
+  const declared = root['uses-feature'];
+  // Same normalisation the plugin does, so the malformed shapes it now tolerates can be asserted on.
+  const features = Array.isArray(declared) ? declared : declared == null ? [] : [declared];
+  return features.filter((entry) => entry?.$?.['android:name'] === BLE);
 }
 
 /** Asserts the feature is declared exactly once and reports how it is declared. */
@@ -110,6 +113,26 @@ describe('applyBluetoothLeFeature', () => {
     expect(root['uses-feature']).toContain(camera);
     expect(bleEntries(root)).toHaveLength(1);
   });
+
+  // What `xml2js` produces for `<uses-feature />`. Unguarded, `feature.$` threw a TypeError naming
+  // neither the plugin nor the manifest.
+  it('declares the feature alongside an attribute-less node rather than throwing', () => {
+    const root = manifest(['' as unknown as Feature]);
+
+    expect(() => applyBluetoothLeFeature(root, true)).not.toThrow();
+    expect(bleEntries(root)).toHaveLength(1);
+  });
+
+  it('normalises a lone node into the list rather than dropping it', () => {
+    const camera = { $: { 'android:name': 'android.hardware.camera' } } as unknown as Feature;
+    const root = manifest([]);
+    root['uses-feature'] = camera as unknown as Feature[];
+
+    applyBluetoothLeFeature(root, false);
+
+    expect(root['uses-feature']).toContain(camera);
+    expect(bleEntries(root)).toHaveLength(1);
+  });
 });
 
 describe('applyBluetoothInfoPlist', () => {
@@ -175,6 +198,26 @@ describe('applyBluetoothInfoPlist', () => {
     const plist: BluetoothInfoPlist = {};
 
     applyBluetoothInfoPlist(plist, { bluetoothPeripheralBackgroundMode: true });
+    applyBluetoothInfoPlist(plist, { bluetoothPeripheralBackgroundMode: true });
+
+    expect(plist.UIBackgroundModes).toEqual(['bluetooth-peripheral']);
+  });
+
+  // Spreading a string produced a per-character array, and `includes` matched substrings — so the one
+  // value that looks correct was the one the mode was never added to.
+  it('normalises a string into a list rather than spreading it per character', () => {
+    const plist: BluetoothInfoPlist = { UIBackgroundModes: 'audio' as unknown as string[] };
+
+    applyBluetoothInfoPlist(plist, { bluetoothPeripheralBackgroundMode: true });
+
+    expect(plist.UIBackgroundModes).toEqual(['audio', 'bluetooth-peripheral']);
+  });
+
+  it('promotes a string that already names the mode into a list', () => {
+    const plist: BluetoothInfoPlist = {
+      UIBackgroundModes: 'bluetooth-peripheral' as unknown as string[],
+    };
+
     applyBluetoothInfoPlist(plist, { bluetoothPeripheralBackgroundMode: true });
 
     expect(plist.UIBackgroundModes).toEqual(['bluetooth-peripheral']);
