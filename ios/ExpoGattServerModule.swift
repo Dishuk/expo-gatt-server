@@ -6,23 +6,19 @@ public class ExpoGattServerModule: Module {
   /// note on `GattServerManager`.
   private var manager: GattServerManager?
 
-  /// Counts `stopServer` calls, so a `createServer` still in flight can tell that the application asked
-  /// to tear down after it started.
+  /// Counts `stopServer` calls, so a `createServer` that has begun parsing can tell that the application
+  /// asked to tear down while it was still working.
   ///
-  /// `createServer` is an `AsyncFunction`, so its body runs on Expo's worker queue and only then hops to
-  /// the main queue; `stopServer` is a synchronous `Function` whose body runs on the JS thread and hops
-  /// directly. A `createServer(); stopServer();` pair — an effect that sets up and returns its teardown,
-  /// unmounted before the promise settles — can therefore reach the main queue in the opposite order:
-  /// the stop finds no manager and does nothing, then the create publishes the whole database. The
-  /// application believes it has no server while the services stay in the process-wide GATT database
-  /// with no handle left to remove them.
+  /// **This covers only the window it can see.** The epoch is read inside the `AsyncFunction` body, on
+  /// Expo's worker queue, which is already after the JavaScript call returned — so a `stopServer` issued
+  /// in the same tick has been counted before the baseline is taken, and the guard below passes. The
+  /// ordinary mount/unmount pair is therefore recovered in `src/index.ts`, which is single-threaded and
+  /// is the only place that knows which call the application made first; see `serverStopEpoch` there.
+  /// What this does catch is a stop landing between that read and the main-queue hop, where parsing a
+  /// large configuration leaves a real window.
   ///
-  /// This is the same hazard `advertisingStopEpoch` covers for advertising in `src/index.ts`, which
-  /// `createServer` was simply never given.
-  ///
-  /// Guarded by a lock rather than confined to the main queue, because the whole point is to be read
-  /// from the worker queue before the hop and written from the JS thread without one — the two threads
-  /// whose ordering is the thing being recovered.
+  /// Guarded by a lock rather than confined to the main queue, because it is read from the worker queue
+  /// before the hop and written from the JS thread without one.
   private let serverStopEpochLock = NSLock()
   private var serverStopEpochValue = 0
 
@@ -291,7 +287,7 @@ public class ExpoGattServerModule: Module {
       deviceId: String,
       serviceUuid: String,
       characteristicUuid: String,
-      value: [Int],
+      value: [Double],
       confirm: Bool,
       requireSubscription: Bool,
       promise: Promise
@@ -345,7 +341,7 @@ public class ExpoGattServerModule: Module {
       rawRequestId: Double,
       rawStatus: Double,
       rawOffset: Double,
-      value: [Int],
+      value: [Double],
       promise: Promise
     ) in
       let data: Data
@@ -403,7 +399,7 @@ public class ExpoGattServerModule: Module {
     AsyncFunction("updateCharacteristicValue") { (
       serviceUuid: String,
       characteristicUuid: String,
-      value: [Int],
+      value: [Double],
       promise: Promise
     ) in
       let data: Data
@@ -616,39 +612,6 @@ public class ExpoGattServerModule: Module {
     }
 
     return characteristic
-  }
-
-  /// Raises the security of the subscription itself to match the security declared on the value.
-  ///
-  /// A `CBAttributePermissions` member guards only a read or a write of the value; nothing in it reaches
-  /// the Client Characteristic Configuration descriptor, which CoreBluetooth owns and never exposes. The
-  /// only gate on subscribing is the separate property pair Apple documents as "only trusted devices can
-  /// enable notifications/indications of the characteristic value", so without this an unpaired central
-  /// could subscribe to a characteristic whose direct read it is refused and receive every later value in
-  /// cleartext — the same hole Android leaves in that descriptor's own write permission.
-  ///
-  /// Derived from the permissions rather than exposed as two more `CharacteristicProperty` names so that
-  /// one configuration means the same thing on both platforms and no consumer has to branch on the OS.
-  /// The plain `.notify`/`.indicate` member is kept alongside: it is what sets the corresponding bit of
-  /// the published characteristic declaration (Core Spec Vol 3, Part G, Table 3.5), which a central needs
-  /// to see before it will subscribe at all.
-  private func securedSubscription(
-    _ properties: CBCharacteristicProperties,
-    _ permissions: CBAttributePermissions
-  ) -> CBCharacteristicProperties {
-    guard permissions.contains(.readEncryptionRequired)
-      || permissions.contains(.writeEncryptionRequired) else {
-      return properties
-    }
-
-    var secured = properties
-    if properties.contains(.notify) {
-      secured.insert(.notifyEncryptionRequired)
-    }
-    if properties.contains(.indicate) {
-      secured.insert(.indicateEncryptionRequired)
-    }
-    return secured
   }
 
   /// `CBMutableDescriptor` is documented as supporting "only the `Characteristic User Description` and

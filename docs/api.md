@@ -146,6 +146,9 @@ since `startAdvertising` requires a published database. Anything that is *not* a
 including `undefined`: a `loadServices()` that returned nothing on a failure path used to publish an
 empty server and resolve as though the configuration had arrived.
 
+Each service's `characteristics` is required on the same terms, and `[]` declares a service with none
+of its own.
+
 Must be called before `startAdvertising`. Calling it again **replaces** the existing server: the
 previous one is stopped first, so an explicit `stopServer` in between is not required.
 

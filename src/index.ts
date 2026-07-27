@@ -555,11 +555,20 @@ export async function createServer(
     if (service.type !== undefined) {
       assertOneOf(service.type, SERVICE_TYPES, 'service type');
     }
-    assertArrayOrAbsent(service?.characteristics, 'service characteristics');
+    // Required for the reason `services` is, one level down: `?? []` turned a loader that returned
+    // `undefined` on its failure path into a service published with nothing in it, which a central
+    // discovers and finds empty. `[]` stays legal and has to be written.
+    if (!Array.isArray(service?.characteristics)) {
+      throw new Error(
+        `Invalid service characteristics ${JSON.stringify(service?.characteristics)} for service ` +
+          `${uuid}. Expected an array of characteristic configurations. Pass [] for a service that ` +
+          'declares none.',
+      );
+    }
     return {
       ...service,
       uuid,
-      characteristics: (service?.characteristics ?? []).map(normalizeCharacteristic),
+      characteristics: service.characteristics.map(normalizeCharacteristic),
     };
   });
   // Checked on the normalised UUIDs, so a service written as `180d` and another as its 128-bit

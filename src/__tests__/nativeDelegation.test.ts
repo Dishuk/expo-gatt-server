@@ -15,6 +15,10 @@ import {
   isAdvertising,
   isServerRunning,
   isSupported,
+  disconnectDevice,
+  getMtu,
+  sendResponse,
+  updateCharacteristicValue,
   sendNotification,
   startAdvertising,
   stopAdvertising,
@@ -224,5 +228,34 @@ describe('argument forwarding', () => {
       false,
       true,
     );
+  });
+  /**
+   * `sendResponse` takes three consecutive numbers, and nothing was asserting which was which:
+   * transposing `status` and `offset` here answered every delegated read with ATT status 0 at a garbage
+   * offset, and passed all 333 tests. Positional arguments of the same type need the order pinned, not
+   * only the values validated.
+   */
+  it('forwards the response arguments in the order the native module declares', async () => {
+    await sendResponse('AA:BB', 7, 0x0e, 3, [9]);
+
+    expect(nativeModuleMock.sendResponse).toHaveBeenCalledWith('AA:BB', 7, 0x0e, 3, [9]);
+  });
+
+  it('forwards the characteristic value arguments in declaration order', async () => {
+    await updateCharacteristicValue('180d', '2a37', [4, 5]);
+
+    expect(nativeModuleMock.updateCharacteristicValue).toHaveBeenCalledWith(
+      '0000180d-0000-1000-8000-00805f9b34fb',
+      '00002a37-0000-1000-8000-00805f9b34fb',
+      [4, 5],
+    );
+  });
+
+  it('forwards the device id to the single-argument calls', async () => {
+    await getMtu('AA:BB');
+    expect(nativeModuleMock.getMtu).toHaveBeenCalledWith('AA:BB');
+
+    await disconnectDevice('CC:DD');
+    expect(nativeModuleMock.disconnectDevice).toHaveBeenCalledWith('CC:DD');
   });
 });

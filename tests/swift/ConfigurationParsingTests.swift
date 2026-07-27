@@ -86,12 +86,17 @@ final class ConfigurationParsingTests: XCTestCase {
 
   // MARK: - The typed path
 
-  /// `parseBytes` serves declared `[Int]` parameters, which expo-modules-core converts through
-  /// `DynamicIntType` — genuinely `[Int]` on arrival, which is why those call sites were never broken.
+  /// `parseBytes` serves the declared `[Double]` parameters. Declaring them `[Int]` let
+  /// expo-modules-core narrow each element with `Int(double.rounded())`, which traps rather than
+  /// throws — so `NaN` and the infinities have to reject here, not merely be out of range.
   func testTypedParametersStillDecode() throws {
     XCTAssertEqual(try parseBytes([0, 255], field: "notification"), Data([0, 255]))
     XCTAssertThrowsError(try parseBytes([256], field: "notification"))
     XCTAssertThrowsError(try parseBytes([-1], field: "notification"))
+    XCTAssertThrowsError(try parseBytes([3.9], field: "notification"))
+    XCTAssertThrowsError(try parseBytes([.nan], field: "notification"))
+    XCTAssertThrowsError(try parseBytes([.infinity], field: "notification"))
+    XCTAssertThrowsError(try parseBytes([-.infinity], field: "notification"))
   }
 }
 

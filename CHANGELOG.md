@@ -24,8 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 >   "the central asked for an acknowledgement"
 > - a mistyped property or permission name throws instead of being ignored, as does an unknown key in
 >   any options object and a repeated descriptor UUID on one characteristic
-> - `createServer` requires `services` to be an array — pass `[]` for a database with no services of
->   its own, where `undefined` used to publish an empty one and resolve
+> - `createServer` requires `services` to be an array, and each service requires `characteristics` to
+>   be one — pass `[]` for a database with no services of its own, or a service that declares none,
+>   where `undefined` used to publish an empty one and resolve
 > - a characteristic or descriptor `value`, and anything `updateCharacteristicValue` writes, is bounded
 >   at `MAX_ATTRIBUTE_VALUE_LENGTH` (512) rather than published at any length
 > - Android no longer renames the device's Bluetooth adapter unless `android.setAdapterName` asks it
@@ -388,6 +389,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A discarded publication round could wedge every later one on iOS.** The credit that absorbs the
+  `didAdd` a discarded round is still owed was a flag, consulted only from inside a round — so an
+  acknowledgement arriving between rounds left it standing, and the next round's genuine one was
+  swallowed instead. The round then stalled for the whole 30 s bound and failed a healthy stack with
+  `ERR_CREATE_SERVER`. The bound's own attempt to clear the credit was undone by the failure path it
+  called one line later, which re-recorded it, so each Bluetooth power cycle cost another 30 s and the
+  server never published again. The credit is now a count, spent before the round state is consulted,
+  and a round that times out writes its own acknowledgement off rather than recording it as owed.
+- **`sendNotification`, `sendResponse` and `updateCharacteristicValue` crashed on a non-integer byte.**
+  Their byte arrays were declared `[Int]` / `List<Int>`, so expo-modules-core narrowed each element
+  before any of this module's code ran: on iOS `Int(double.rounded())` **traps** on `NaN` or an
+  infinity and took the process with it, and on Android the same conversion silently turned `NaN` into
+  `0x00` and truncated fractions, which also made the module's own byte check unreachable. All three
+  now take the elements as `Double` and narrow them where the failure can be reported — the change
+  already made for `sendResponse`'s three numbers.
+- **An unqueued write could commit a value longer than an attribute may hold on Android.** Only the
+  assembled queued write was bounded, on the reasoning that one PDU cannot carry more than the limit.
+  At the largest ATT_MTU the specification permits it carries 514 octets, two more than the 512 an
+  attribute may hold, so a central that negotiated it could store a value the module then refused to
+  notify for the rest of the server's life and carried across every adapter power cycle. Both write
+  paths now answer an oversized write with "Invalid Attribute Value Length".
+- **An overlapping advertising start could leave the newer one unbounded on Android.** The start bound
+  was installed without regard to which call owned the radio, so a start that had already been
+  displaced evicted the live one's limit on its way out. If the platform then never delivered an
+  `AdvertiseCallback` — the case the bound exists for — the live `startAdvertising` never settled. The
+  bound now carries the callback it belongs to and a displaced start cannot replace it. The same start
+  also restored the adapter name out from under the advertisement that had just applied it, which now
+  happens only inside the ownership claim, as it already did on the failure path.
+- **A caller could wait forever for a database on iOS.** Parking while the adapter was `unknown` or
+  already `resetting` armed no limit — only the transition *into* `resetting` did — and `createServer`
+  itself was unbounded until the first state callback, which CoreBluetooth does not promise to deliver.
+  Both now take the same bound, and an existing one is left in place rather than pushed out by each new
+  waiter.
 - **`maxNotificationPayload` ignored the attribute bound on iOS.** It was reported straight from
   `CBCentral.maximumUpdateValueLength` while Android reported `min(mtu - 3, 512)`, so above an ATT_MTU
   of 515 the same link described a different budget on each platform, and iOS accepted a notification
@@ -494,6 +528,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   peripheral advertising a database containing nothing, with no promise reporting the mistake. A
   non-array is now rejected. An *explicitly* empty array stays legal — it is how an advertise-only
   peripheral is built, `startAdvertising` requiring a published database.
+
+  A service's `characteristics` was left coerced the same way in the same release, one level down and
+  with the same consequence: a service published with nothing in it, which a central discovers and
+  finds empty. It is required on the same terms, `[]` declaring a service with no characteristics of
+  its own.
 - **A misspelled `sendNotification` option was ignored.** Every other options object was checked against
   its known keys, on the grounds that a key no layer below reads is silently absent rather than an
   error; `sendNotification`'s was not, so `requiresSubscription: false` — one letter out — left the send

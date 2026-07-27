@@ -113,3 +113,60 @@ final class AttributeConfigurationTests: XCTestCase {
     XCTAssertThrowsError(try parseUuid(nil, field: "service"))
   }
 }
+
+/// The derivation that decides whether an unpaired central may subscribe.
+///
+/// `CBAttributePermissions` guards only reads and writes of the value; the separate
+/// `notifyEncryptionRequired` / `indicateEncryptionRequired` pair is the only gate on subscribing. A
+/// transposed line here hands every later value to an unbonded peer in cleartext, which no other check
+/// in this package would notice.
+final class SubscriptionSecurityTests: XCTestCase {
+
+  func testAnUnsecuredAttributeKeepsItsPropertiesUnchanged() {
+    XCTAssertEqual(securedSubscription([.read, .notify], [.readable]), [.read, .notify])
+    XCTAssertEqual(securedSubscription([.write, .indicate], [.writeable]), [.write, .indicate])
+  }
+
+  func testAnEncryptedReadSecuresTheSubscription() {
+    XCTAssertEqual(
+      securedSubscription([.read, .notify], [.readEncryptionRequired]),
+      [.read, .notify, .notifyEncryptionRequired]
+    )
+    XCTAssertEqual(
+      securedSubscription([.read, .indicate], [.readEncryptionRequired]),
+      [.read, .indicate, .indicateEncryptionRequired]
+    )
+  }
+
+  /// An encrypted *write* secures the subscription too: the value is confidential either direction.
+  func testAnEncryptedWriteSecuresTheSubscription() {
+    XCTAssertEqual(
+      securedSubscription([.write, .notify], [.writeEncryptionRequired]),
+      [.write, .notify, .notifyEncryptionRequired]
+    )
+  }
+
+  func testBothSubscriptionKindsAreSecuredTogether() {
+    XCTAssertEqual(
+      securedSubscription([.notify, .indicate], [.readEncryptionRequired]),
+      [.notify, .indicate, .notifyEncryptionRequired, .indicateEncryptionRequired]
+    )
+  }
+
+  /// The plain member has to survive: it sets the bit of the characteristic declaration a central reads
+  /// before it will subscribe at all (Core Spec Vol 3, Part G, Table 3.5).
+  func testThePlainSubscriptionPropertyIsKeptAlongsideTheSecuredOne() {
+    let secured = securedSubscription([.notify], [.readEncryptionRequired])
+    XCTAssertTrue(secured.contains(.notify))
+    XCTAssertTrue(secured.contains(.notifyEncryptionRequired))
+  }
+
+  /// Nothing to secure: an encrypted attribute that declares neither subscription property must not
+  /// acquire one.
+  func testAnAttributeWithNoSubscriptionPropertyGainsNone() {
+    let secured = securedSubscription([.read, .write], [.readEncryptionRequired])
+    XCTAssertEqual(secured, [.read, .write])
+    XCTAssertFalse(secured.contains(.notifyEncryptionRequired))
+    XCTAssertFalse(secured.contains(.indicateEncryptionRequired))
+  }
+}

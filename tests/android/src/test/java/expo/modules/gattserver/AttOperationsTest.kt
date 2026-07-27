@@ -89,6 +89,18 @@ class AttOperationsTest {
   }
 
   /**
+   * A single PDU is not the bound it looks like, which is what the unqueued write path was written on
+   * the assumption of: at the largest ATT_MTU the specification permits, one `ATT_WRITE_REQ` carries two
+   * octets more than an attribute may hold, so that path needs the limit as much as the queued one.
+   */
+  @Test
+  fun `one write request at the largest permitted mtu can exceed the limit`() {
+    val largestWriteValue = 517 - 3
+    assertEquals(514, largestWriteValue)
+    assertTrue(exceedsAttributeLength(largestWriteValue))
+  }
+
+  /**
    * Folds a multi-part long write the way `assemblePreparedWrites` does. This is the case that used to
    * disagree with iOS: a write that stops short of the attribute's end must leave the remainder.
    */

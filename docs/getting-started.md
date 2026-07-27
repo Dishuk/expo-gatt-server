@@ -18,6 +18,11 @@ A step-by-step guide to adding BLE peripheral functionality to your Expo app.
 npx expo install expo-gatt-server
 ```
 
+Installing from a git URL instead of the registry needs lifecycle scripts enabled: the published
+tarball carries the compiled `build/` and `plugin/build/`, but a git checkout produces them in
+`prepare`. Under `--ignore-scripts` (or `ignore-scripts=true` in `.npmrc`) the install still succeeds
+and the package is then missing its entry point and its config plugin.
+
 Rebuild native projects after installing:
 
 ```bash

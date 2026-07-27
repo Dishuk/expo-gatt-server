@@ -243,7 +243,7 @@ class ExpoGattServerModule : Module() {
       deviceId: String,
       serviceUuid: String,
       characteristicUuid: String,
-      value: List<Int>,
+      value: List<Double>,
       confirm: Boolean,
       requireSubscription: Boolean,
       promise: Promise ->
@@ -281,7 +281,7 @@ class ExpoGattServerModule : Module() {
       rawRequestId: Double,
       rawStatus: Double,
       rawOffset: Double,
-      value: List<Int>,
+      value: List<Double>,
       promise: Promise ->
       val (requestId, status, offset) = try {
         Triple(
@@ -325,7 +325,7 @@ class ExpoGattServerModule : Module() {
     AsyncFunction("updateCharacteristicValue") {
       serviceUuid: String,
       characteristicUuid: String,
-      value: List<Int>,
+      value: List<Double>,
       promise: Promise ->
       val mgr = manager ?: run {
         promise.reject("ERR_NO_SERVER", "Server not created", null)

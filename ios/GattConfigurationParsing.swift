@@ -207,11 +207,13 @@ internal func parseTypedArray<Element>(
   return typed
 }
 
-/// Converts an already-typed array of byte values.
+/// Converts an array of byte values delivered as `Double`.
 ///
-/// Used for the arguments expo-modules-core decodes for us — a declared `[Int]` parameter goes through
-/// `DynamicIntType` and really is `[Int]` by the time it arrives.
-internal func parseBytes(_ value: [Int], field: String) throws -> Data {
+/// Declared `[Double]` rather than `[Int]` for the same reason the three `sendResponse` numbers are:
+/// expo-modules-core narrows a declared `Int` with `Int(double.rounded())`, which **traps** on `NaN` or
+/// an infinity, and that trap fires before any code here runs — so a single bad element killed the
+/// process instead of rejecting. `UInt8(exactly:)` refuses those, and fractions with them.
+internal func parseBytes(_ value: [Double], field: String) throws -> Data {
   var bytes: [UInt8] = []
   bytes.reserveCapacity(value.count)
   for (index, element) in value.enumerated() {
@@ -354,4 +356,37 @@ func parsePermissions(_ list: [String]?) throws -> CBAttributePermissions {
     }
   }
   return perms
+}
+
+/// Raises the security of the subscription itself to match the security declared on the value.
+///
+/// A `CBAttributePermissions` member guards only a read or a write of the value; nothing in it reaches
+/// the Client Characteristic Configuration descriptor, which CoreBluetooth owns and never exposes. The
+/// only gate on subscribing is the separate property pair Apple documents as "only trusted devices can
+/// enable notifications/indications of the characteristic value", so without this an unpaired central
+/// could subscribe to a characteristic whose direct read it is refused and receive every later value in
+/// cleartext — the same hole Android leaves in that descriptor's own write permission.
+///
+/// Derived from the permissions rather than exposed as two more `CharacteristicProperty` names so that
+/// one configuration means the same thing on both platforms and no consumer has to branch on the OS.
+/// The plain `.notify`/`.indicate` member is kept alongside: it is what sets the corresponding bit of
+/// the published characteristic declaration (Core Spec Vol 3, Part G, Table 3.5), which a central needs
+/// to see before it will subscribe at all.
+internal func securedSubscription(
+  _ properties: CBCharacteristicProperties,
+  _ permissions: CBAttributePermissions
+) -> CBCharacteristicProperties {
+  guard permissions.contains(.readEncryptionRequired)
+    || permissions.contains(.writeEncryptionRequired) else {
+    return properties
+  }
+
+  var secured = properties
+  if properties.contains(.notify) {
+    secured.insert(.notifyEncryptionRequired)
+  }
+  if properties.contains(.indicate) {
+    secured.insert(.indicateEncryptionRequired)
+  }
+  return secured
 }

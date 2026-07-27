@@ -49,7 +49,13 @@ internal fun parseUuid(value: Any?, field: String): UUID {
   return UUID.fromString(expanded)
 }
 
-/** Anything outside 0..255 would be silently truncated by [Int.toByte]. */
+/**
+ * Anything outside 0..255 would be silently truncated by [Int.toByte].
+ *
+ * Callers must declare the argument as `List<Double>`, not `List<Int>`: expo-modules-core narrows a
+ * declared `Int` with `asDouble().toInt()` before this runs, which turns `NaN` into `0` and truncates a
+ * fraction — the whole-number test below can never fail on a value that has already been through it.
+ */
 internal fun toByteArray(value: List<*>, field: String): ByteArray {
   val bytes = ByteArray(value.size)
   value.forEachIndexed { index, element ->

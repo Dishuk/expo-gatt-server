@@ -39,9 +39,11 @@ internal fun spliceAt(current: ByteArray, offset: Int, part: ByteArray): ByteArr
  *
  * Asked separately from [spliceAt] rather than folded into it: that merges one part and knows nothing
  * about the rest of the batch, and the offset it does bound is a different fault carrying a different
- * ATT error. Only a queued write can build a value longer than one PDU, so it is the only way to reach
- * this bound — an unqueued `ATT_WRITE_REQ` cannot carry more than the link's MTU allows, which is under
- * the limit for every MTU the specification permits.
+ * ATT error.
+ *
+ * Both write paths reach it. A queued write assembles past the limit from parts that each fit, and a
+ * single `ATT_WRITE_REQ` carries `ATT_MTU - 3` octets — 514 at the largest MTU the specification
+ * permits, two more than an attribute may hold.
  */
 internal fun exceedsAttributeLength(size: Int): Boolean = size > MAX_ATTRIBUTE_VALUE_LENGTH
 

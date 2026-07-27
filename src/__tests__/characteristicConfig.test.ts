@@ -204,8 +204,14 @@ describe('service configuration', () => {
     ).rejects.toThrow(/Invalid service type/);
   });
 
-  it('treats a missing characteristics array as empty rather than failing', async () => {
-    await expect(createServer([{ uuid: SERVICE } as GattServiceConfig])).resolves.toBeUndefined();
+  it('rejects a missing characteristics array', async () => {
+    await expect(createServer([{ uuid: SERVICE } as GattServiceConfig])).rejects.toThrow(
+      /Invalid service characteristics/,
+    );
+  });
+
+  it('accepts an explicitly empty characteristics array', async () => {
+    await expect(createServer([{ uuid: SERVICE, characteristics: [] }])).resolves.toBeUndefined();
     expect(publishedServices()[0].characteristics).toEqual([]);
   });
 

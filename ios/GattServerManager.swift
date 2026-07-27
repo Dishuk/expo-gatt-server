@@ -427,12 +427,17 @@ class GattServerManager: NSObject {
   private var registrationQueue: [CBMutableService] = []
   private var outstandingRegistration: CBUUID?
 
-  /// Whether a `didAdd` is still owed to a round discarded while waiting for one.
+  /// How many `didAdd` callbacks are still owed to rounds discarded while waiting for one.
   ///
   /// The next round re-issues `add(_:)` for the same service, so the two acknowledgements are identical
-  /// and crediting the stale one advances a round on a registration that never happened. One `add(_:)`
-  /// produces one `didAdd` — the only thing CoreBluetooth promises — so the owed one is spent instead.
-  private var acknowledgementOwedToDiscardedRound = false
+  /// and crediting a stale one advances a round on a registration that never happened. One `add(_:)`
+  /// produces one `didAdd` — the only thing CoreBluetooth promises — so the owed ones are spent instead.
+  ///
+  /// A count rather than a flag, and spent before the round state is consulted: a stale acknowledgement
+  /// arrives whenever CoreBluetooth chooses, including between rounds, and two rounds can be discarded
+  /// back to back. Either case overran a single flag consulted only inside a round, leaving the credit
+  /// to swallow a later round's genuine acknowledgement.
+  private var acknowledgementsOwedToDiscardedRounds = 0
 
   /// Whether this round's outcome already reached a caller through `openCompletion`. Cleared when a
   /// round starts. `openCompletion` alone cannot answer that: the `didAdd` failure path settles it as
@@ -529,6 +534,9 @@ class GattServerManager: NSObject {
     characteristicValues = initialValues
     openCompletion = completion
     peripheralManager = CBPeripheralManager(delegate: self, queue: .main)
+    // Nothing has bounded this caller yet: the round's own limit is armed by the first `poweredOn`,
+    // and `peripheralManagerDidUpdateState` is not promised to fire at all.
+    armWaiterTimeout(reason: .bluetoothUnavailable(state: .unknown))
   }
 
   var bluetoothState: CBManagerState {
@@ -557,9 +565,11 @@ class GattServerManager: NSObject {
         completion(GattServerError.databaseNotPublished)
       case .idle, .inProgress:
         readinessWaiters.append(completion)
+        armWaiterTimeout(reason: .databaseNotPublished)
       }
     case .unknown, .resetting:
       readinessWaiters.append(completion)
+      armWaiterTimeout(reason: .bluetoothUnavailable(state: peripheral.state))
     default:
       completion(GattServerError.bluetoothUnavailable(state: peripheral.state))
     }
@@ -609,8 +619,6 @@ class GattServerManager: NSObject {
     outstandingRegistration = nil
     servicesAwaitingRegistration = Set(serviceConfiguration.map { $0.uuid })
     guard !servicesAwaitingRegistration.isEmpty else {
-      // No `add(_:)` here to consume an owed acknowledgement, so it is dropped rather than left.
-      acknowledgementOwedToDiscardedRound = false
       publication = .published
       cancelPublicationTimeout()
       completeOpen(nil)
@@ -634,7 +642,7 @@ class GattServerManager: NSObject {
   private func noteDiscardedRegistration() {
     guard outstandingRegistration != nil else { return }
     outstandingRegistration = nil
-    acknowledgementOwedToDiscardedRound = true
+    acknowledgementsOwedToDiscardedRounds += 1
   }
 
   /// Hands the next service of the round to `add(_:)`, one at a time. See [registrationQueue].
@@ -674,9 +682,10 @@ class GattServerManager: NSObject {
             self.publicationGeneration == generation,
             self.publication == .inProgress else { return }
       self.publicationTimeout = nil
-      // Owed from an earlier round and not delivered within the whole bound: it is not coming, and
-      // leaving it set would make every later round swallow the one before it.
-      self.acknowledgementOwedToDiscardedRound = false
+      // Written off rather than recorded as owed: this bound firing *is* the evidence that the
+      // acknowledgement is not coming, and `failPublicationRound` would otherwise credit it below and
+      // leave it to swallow a later round's genuine one.
+      self.outstandingRegistration = nil
       let error = GattServerError.publicationTimedOut(
         awaiting: self.servicesAwaitingRegistration.map { $0.normalizedString }.sorted(),
         timeoutMs: publicationTimeoutMs
@@ -710,7 +719,9 @@ class GattServerManager: NSObject {
   /// under way is a better bound than this one, and `armPublicationTimeout` cancels whatever is there.
   private func armWaiterTimeout(reason: GattServerError) {
     guard openCompletion != nil || !readinessWaiters.isEmpty else { return }
-    cancelPublicationTimeout()
+    // A round's own bound, or one an earlier waiter armed, already covers these callers; replacing it
+    // would let every new waiter push the deadline out again.
+    guard publicationTimeout == nil else { return }
     let generation = publicationGeneration
     let work = DispatchWorkItem { [weak self] in
       guard let self = self,
@@ -1328,6 +1339,7 @@ class GattServerManager: NSObject {
     registrationFailure = nil
     registrationQueue.removeAll()
     outstandingRegistration = nil
+    acknowledgementsOwedToDiscardedRounds = 0
     addedServices.removeAll()
     connectedCentrals.removeAll()
     centralPayloadLengths.removeAll()
@@ -1700,16 +1712,17 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     _ peripheral: CBPeripheralManager,
     didAdd service: CBService, error: Error?
   ) {
+    // Spent before the round state is consulted: a discarded round's acknowledgement arrives whenever
+    // CoreBluetooth chooses, and one landing between rounds would otherwise leave the credit standing.
+    // See [acknowledgementsOwedToDiscardedRounds].
+    if acknowledgementsOwedToDiscardedRounds > 0 {
+      acknowledgementsOwedToDiscardedRounds -= 1
+      return
+    }
     // Bluetooth dropping mid-registration discards the database while an add is still outstanding;
     // without this the late acknowledgement would publish it again and report a server that no longer
     // exists.
     guard publication == .inProgress else { return }
-    // The one this round is waiting on is indistinguishable from one a discarded round is still owed,
-    // so the owed one is spent here rather than credited. See [acknowledgementOwedToDiscardedRound].
-    if acknowledgementOwedToDiscardedRound {
-      acknowledgementOwedToDiscardedRound = false
-      return
-    }
     // Attributed to the round that asked for it, which on this platform means the service this round is
     // currently waiting on — CoreBluetooth hands back nothing else to test. An acknowledgement for
     // anything else belongs to a round that has since been discarded and says nothing about this one:

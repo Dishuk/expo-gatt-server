@@ -344,7 +344,11 @@ class GattServerManager(
   private val advertisingTimeout = AtomicReference<Runnable?>(null)
   // The bound on the *start*, as distinct from [advertisingTimeout], which bounds the airtime of an
   // advertisement that did start. See [ADVERTISING_START_TIMEOUT_MS].
-  private val advertisingStartTimeout = AtomicReference<Runnable?>(null)
+  //
+  // Carries the callback it belongs to, so a start that has since been displaced cannot evict the bound
+  // of the one that displaced it. Starts overlap, and the displaced one still runs to the end of
+  // `beginAdvertising`.
+  private val advertisingStartTimeout = AtomicReference<Pair<AdvertiseCallback, Runnable>?>(null)
   // Set from the caller's thread, read again during a teardown that may be on another.
   private val originalAdapterName = AtomicReference<String?>(null)
   private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
@@ -835,6 +839,20 @@ class GattServerManager(
         return
       }
 
+      // Bounded here rather than at the store below, because the limit is the specification's rule about
+      // the attribute and not about this module's cache: a delegated write must be refused too. The
+      // largest permitted ATT_MTU is 517, so an ATT_WRITE_REQ carries up to 514 octets — two past what an
+      // attribute may hold, which is why one PDU is not the bound it looks like.
+      if (exceedsAttributeLength(data.size)) {
+        Log.w(TAG, "onCharacteristicWriteRequest: ${data.size} octets, past the $MAX_ATTRIBUTE_VALUE_LENGTH-octet limit, rejecting")
+        if (responseNeeded) {
+          gattServer?.sendResponse(
+            device, requestId, ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH, offset, null
+          )
+        }
+        return
+      }
+
       // A write without a response cannot be answered at all, so it is never delegated even when the
       // characteristic opted in — there is nothing for JavaScript to reply to.
       val delegatesWrite = delegationFor(characteristic).write
@@ -879,6 +897,16 @@ class GattServerManager(
           PreparedWrite.ToDescriptor(descriptor, offset, value ?: ByteArray(0)),
           responseNeeded
         )
+        return
+      }
+
+      if (value != null && exceedsAttributeLength(value.size)) {
+        Log.w(TAG, "onDescriptorWriteRequest: ${value.size} octets, past the $MAX_ATTRIBUTE_VALUE_LENGTH-octet limit, rejecting")
+        if (responseNeeded) {
+          gattServer?.sendResponse(
+            device, requestId, ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LENGTH, offset, null
+          )
+        }
         return
       }
 
@@ -1557,7 +1585,10 @@ class GattServerManager(
         }
       }
       override fun onStartFailure(errorCode: Int) {
-        if (!current()) return
+        // Claimed rather than read: `restoreAdapterName` below must not run for a start a newer one has
+        // displaced, since that start owns the name now. A failed start is advertising nothing, so
+        // taking the callback back is what it was going to be anyway.
+        if (!advertiseCallback.compareAndSet(this, null)) return
         advertising.set(false)
         val msg = when (errorCode) {
           ADVERTISE_FAILED_DATA_TOO_LARGE ->
@@ -1654,16 +1685,21 @@ class GattServerManager(
       // running; a stop that took it first has already cleared the flag.
       if (advertiseCallback.compareAndSet(callback, null)) {
         advertising.set(false)
+        // The stop's own restore was a no-op if it ran before this call applied the rename, because
+        // there was no original name recorded yet to put back. Repeated here for that ordering; it
+        // no-ops when the stop did reach it, since nothing is recorded any more.
+        //
+        // Inside the ownership claim, for the reason the catch block above gives: this branch is also
+        // reached when a *newer start* displaced this one, and that start owns both the radio and the
+        // name. Restoring unconditionally put the phone back to its original name while the
+        // advertisement that had just renamed it was still on the air, with nothing left to restore it.
+        restoreAdapterName()
       }
       // That stop may have settled the *previous* completion, if it landed before this one was
       // installed, so this call is settled here rather than left pending for good.
       if (pendingAdvertiseResult.compareAndSet(onResult, null)) {
         onResult(advertisingStopped())
       }
-      // The stop's own restore was a no-op if it ran before this call applied the rename, because there
-      // was no original name recorded yet to put back. Repeated here for that ordering; it no-ops when
-      // the stop did reach it, since nothing is recorded any more.
-      restoreAdapterName()
     }
   }
 
@@ -1719,7 +1755,6 @@ class GattServerManager(
     callback: AdvertiseCallback,
     onResult: (GattServerException?) -> Unit,
   ) {
-    cancelAdvertisingStartTimeout()
     val expiry = Runnable {
       if (pendingAdvertiseResult.get() !== onResult) return@Runnable
       Log.e(
@@ -1741,12 +1776,25 @@ class GattServerManager(
         )
       )
     }
-    advertisingStartTimeout.set(expiry)
-    timeoutHandler.postDelayed(expiry, ADVERTISING_START_TIMEOUT_MS)
+    while (true) {
+      val current = advertisingStartTimeout.get()
+      // The installed bound belongs to a start that still owns the radio, which means this one has been
+      // displaced: replacing it would leave the live start with no bound at all, which is the hang
+      // ADVERTISING_START_TIMEOUT_MS exists to prevent. The displaced start is stopped by the tail of
+      // `beginAdvertising`, so it needs no bound of its own.
+      if (current != null && current.first !== callback && advertiseCallback.get() === current.first) {
+        return
+      }
+      if (advertisingStartTimeout.compareAndSet(current, callback to expiry)) {
+        current?.let { timeoutHandler.removeCallbacks(it.second) }
+        timeoutHandler.postDelayed(expiry, ADVERTISING_START_TIMEOUT_MS)
+        return
+      }
+    }
   }
 
   private fun cancelAdvertisingStartTimeout() {
-    advertisingStartTimeout.getAndSet(null)?.let { timeoutHandler.removeCallbacks(it) }
+    advertisingStartTimeout.getAndSet(null)?.let { timeoutHandler.removeCallbacks(it.second) }
   }
 
   /**
