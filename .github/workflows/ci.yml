@@ -45,17 +45,19 @@ jobs:
       # real errors while CI stayed green.
       - run: npx eslint . --max-warnings 0
         working-directory: example
-      # `--ignore-scripts`, so this reads what the two build steps above produced rather than rebuilding
-      # it: `npm pack` runs `prepack` and `prepare`, so without it the outputs are regenerated moments
-      # before being listed and a build that does not happen at publish time would still look present.
-      # Stdout goes to a file that must parse as JSON, which a lifecycle script logging into it would
-      # break — another reason not to run them here.
+      # Packed for real and read back out of the archive, rather than listed from `npm pack --json`:
+      # `--ignore-scripts` does not suppress `prepare` on npm 10, so that stdout carried the build's own
+      # logging into the file `JSON.parse` then read, and the one failure this exists to catch —
+      # `expo-module build plugin` skipping and exiting 0 — surfaced as a SyntaxError. The tarball is
+      # also what a consumer actually installs, so nothing here has to model what `npm publish` includes.
       - name: Check the tarball contents
         run: |
-          npm pack --dry-run --ignore-scripts --json > pack.json
+          rm -rf "$RUNNER_TEMP/pack" && mkdir -p "$RUNNER_TEMP/pack"
+          npm pack --pack-destination "$RUNNER_TEMP/pack"
+          tar -tzf "$RUNNER_TEMP/pack"/*.tgz | sed 's|^package/||' | grep -v '/$' > tarball-files.txt
           node --input-type=module -e '
             import { readFileSync } from "node:fs";
-            const files = JSON.parse(readFileSync("pack.json", "utf8"))[0].files.map((f) => f.path);
+            const files = readFileSync("tarball-files.txt", "utf8").split("\n").filter(Boolean);
             const required = [
               "build/index.js",
               "build/index.d.ts",
@@ -74,10 +76,15 @@ jobs:
             // Tests, the host-side harnesses and raw TypeScript have no business in a consumers
             // install. `__tests__` is matched anywhere: the realistic leak is a tsconfig losing its
             // exclude and emitting `build/__tests__`, which a prefix check would not have seen.
+            // `ios/` ships as a whole `files` entry, which overrides `.gitignore` — so a local `Pods/`
+            // or `build/` left in the tree is published, and the podspec globs `**/*.{h,m,swift}` into
+            // every consumer's pod target.
             const forbidden = files.filter(
               (f) =>
                 f.startsWith("src/") ||
                 f.startsWith("tests/") ||
+                f.startsWith("ios/build/") ||
+                f.startsWith("ios/Pods/") ||
                 f.split("/").includes("__tests__") ||
                 f === "Package.swift"
             );
