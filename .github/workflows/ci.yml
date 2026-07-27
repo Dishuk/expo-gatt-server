@@ -15,7 +15,7 @@ jobs:
     name: JavaScript
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -97,14 +97,14 @@ jobs:
     name: Swift (iOS peripheral logic)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: npm run test:ios
 
   android:
     name: Kotlin (Android peripheral logic)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -124,7 +124,7 @@ jobs:
     name: Android module builds against Expo
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -153,7 +153,7 @@ jobs:
     # with a `macos-26` image, so the runner is part of the pin, not an incidental choice.
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Expo's toolchain window is bounded at both ends, so neither the runner default nor the oldest
       # installed Xcode works.
       #
