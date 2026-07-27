@@ -12,6 +12,14 @@ config.resolver.blockList = [
   // On windows the path will resolve with `\`. We need to escape it with `\\` for the RegExp.
   new RegExp(path.resolve(__dirname, '..', 'node_modules', 'react').replace(/\\/g, '\\\\')),
   new RegExp(path.resolve(__dirname, '..', 'node_modules', 'react-native').replace(/\\/g, '\\\\')),
+  // Blocked for the same reason, and easy to miss: the module's own `build/index.js` imports
+  // `expo-modules-core`, which resolves upward to the parent's development copy while the app's code
+  // resolves its own. The two are pinned independently — the parent by a devDependency range, the app
+  // by whatever `expo` brings — so the moment they drift the example runs two module runtimes, with
+  // `Platform` and `requireNativeModule` coming from whichever was loaded first.
+  new RegExp(
+    path.resolve(__dirname, '..', 'node_modules', 'expo-modules-core').replace(/\\/g, '\\\\'),
+  ),
 ];
 
 config.resolver.nodeModulesPaths = [

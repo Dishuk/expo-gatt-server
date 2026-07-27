@@ -1,15 +1,20 @@
 import {
   GATT_SUCCESS,
+  addBluetoothStateChangedListener,
   addCharacteristicReadRequestListener,
   addCharacteristicSubscribedListener,
   addCharacteristicUnsubscribedListener,
   addCharacteristicWriteRequestListener,
   addDeviceConnectedListener,
   addDeviceDisconnectedListener,
+  addMtuChangedListener,
   addNotificationSentListener,
+  addServerPublicationFailedListener,
   createServer,
   disconnectDevice,
+  getBluetoothState,
   getConnectedDevices,
+  getMtu,
   isAdvertising,
   isServerRunning,
   isSupported,
@@ -135,6 +140,22 @@ export default function App() {
       addCharacteristicUnsubscribedListener((event) => {
         append(`onCharacteristicUnsubscribed ${event.deviceId} ${event.characteristicUuid}`);
       }),
+      addMtuChangedListener((event) => {
+        append(
+          `onMtuChanged ${event.deviceId} mtu=${event.mtu} ` +
+            `maxNotificationPayload=${event.maxNotificationPayload}`,
+        );
+      }),
+      addBluetoothStateChangedListener((event) => {
+        append(`onBluetoothStateChanged ${event.state}`);
+      }),
+      // The one event nothing else reports. Every transition to powered on re-publishes the database,
+      // and a re-publication that fails happens long after `createServer` resolved — so without this
+      // the harness would go on showing a server that is no longer there. Logged rather than acted on:
+      // recovering means calling `createServer` again, which is what the button already does.
+      addServerPublicationFailedListener((event) => {
+        append(`onServerPublicationFailed ${event.code}: ${event.message}`);
+      }),
     ];
 
     return () => {
@@ -219,6 +240,24 @@ export default function App() {
           `supported=${isSupported()} running=${await isServerRunning()} ` +
             `advertising=${await isAdvertising()} name=${ADVERTISED_NAME}`,
         );
+      },
+    },
+    {
+      label: 'getBluetoothState',
+      tone: 'query',
+      action: async () => {
+        append(`bluetoothState=${await getBluetoothState()}`);
+      },
+    },
+    {
+      label: 'getMtu',
+      tone: 'query',
+      action: async () => {
+        if (!deviceId) {
+          throw new Error('no connected device');
+        }
+        const mtu = await getMtu(deviceId);
+        append(`mtu=${mtu.mtu} maxNotificationPayload=${mtu.maxNotificationPayload}`);
       },
     },
     {
@@ -315,13 +354,17 @@ function Button({ label, tone, onPress }: Omit<Action, 'action'> & { onPress: ()
 
 // Android reports no safe area of its own, so the status bar is measured; iOS keeps a notch-safe inset.
 const TOP_INSET = Platform.OS === 'android' ? (StatusBar.currentHeight ?? 0) + 12 : 60;
+// Android draws edge to edge from SDK 57, so the navigation bar sits over the bottom of the layout —
+// which here is the event log this harness exists to read. `react-native-safe-area-context` would give
+// the exact inset; this keeps the example dependency-free and simply reserves the standard bar height.
+const BOTTOM_INSET = Platform.OS === 'android' ? 48 : 12;
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#eee',
     paddingTop: TOP_INSET,
-    paddingBottom: 12,
+    paddingBottom: BOTTOM_INSET,
     paddingHorizontal: 12,
   },
 
