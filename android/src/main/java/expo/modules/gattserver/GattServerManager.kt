@@ -133,6 +133,24 @@ const val DEFAULT_REQUEST_TIMEOUT_MS = 10_000
 private const val PUBLICATION_TIMEOUT_MS = 30_000L
 
 /**
+ * How long a `startAdvertising` may go without an `AdvertiseCallback` before the start is reported
+ * failed.
+ *
+ * The last unbounded wait in this file, and the one whose callback is most often reported missing:
+ * `BluetoothLeAdvertiser.startAdvertising` returns void, and neither `onStartSuccess` nor
+ * `onStartFailure` is guaranteed to follow it — an advertiser slot exhausted on an OEM stack, or a
+ * Bluetooth process restart that produces no `STATE_OFF`/`STATE_ON` pair, leaves nothing to settle the
+ * promise and nothing to notice. `isAdvertising` then reports false forever while the caller's `await`
+ * never returns, with no recovery short of the application calling `stopAdvertising` itself.
+ *
+ * Same value and same reasoning as [PUBLICATION_TIMEOUT_MS]: nothing healthy comes close to it, and it
+ * exists so a start that can never finish is *reported* rather than parked. Distinct from
+ * `AdvertiseSettings.setTimeout`, which limits how long an advertisement that did start stays on the
+ * air — see [GattServerManager.scheduleAdvertisingTimeout].
+ */
+private const val ADVERTISING_START_TIMEOUT_MS = 30_000L
+
+/**
  * How long a notification handed to the stack may go without an `onNotificationSent` before the module
  * gives up on it.
  *
@@ -324,6 +342,9 @@ class GattServerManager(
   // deliver the adapter state broadcast and the advertising callbacks.
   private val advertising = AtomicBoolean(false)
   private val advertisingTimeout = AtomicReference<Runnable?>(null)
+  // The bound on the *start*, as distinct from [advertisingTimeout], which bounds the airtime of an
+  // advertisement that did start. See [ADVERTISING_START_TIMEOUT_MS].
+  private val advertisingStartTimeout = AtomicReference<Runnable?>(null)
   // Set from the caller's thread, read again during a teardown that may be on another.
   private val originalAdapterName = AtomicReference<String?>(null)
   private val connectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
@@ -984,8 +1005,9 @@ class GattServerManager(
       }
       if (status != BluetoothGatt.GATT_SUCCESS) {
         Log.e(TAG, "onServiceAdded: service=${service.uuid} failed with status=$status")
-        discardPublicationRound()
-        finishOpen(DatabasePublication.FAILED, GattServerException(
+        // Through the round, so a callback delivered just as a teardown discarded the round leaves the
+        // outcome that teardown chose alone. See [failPublicationRound].
+        failPublicationRound(round, GattServerException(
           "ERR_CREATE_SERVER", "Failed to add service ${service.uuid} (status $status)"
         ))
         return
@@ -1225,6 +1247,34 @@ class GattServerManager(
   }
 
   /**
+   * Ends [round] as failed, and does nothing at all when [round] is no longer the one in flight.
+   *
+   * Discarding the round and recording the failure used to be two steps taken by callers that may have
+   * stopped owning the round in between. `addNextService` re-checks the round under [publicationLock]
+   * and then releases it for the `addService` binder call, which can take as long as the Bluetooth
+   * process needs; a teardown landing in that window discards the round, settles the caller and sets
+   * the publication state deliberately — [handleAdapterOff] chooses `IDLE` rather than `FAILED` so that
+   * a caller arriving before the re-registration parks instead of being refused. The stale round then
+   * wrote `FAILED` over it and, finding no completion and no parked caller left to tell, emitted
+   * `onServerPublicationFailed` for what was an ordinary Bluetooth power-off — the one case that event
+   * documents itself as never reporting.
+   *
+   * Both halves are taken together here, and `onlyIf` re-tests the state under the monitor for the
+   * narrower race where the teardown lands after the round check and before the transition.
+   */
+  private fun failPublicationRound(round: Int, error: GattServerException) {
+    synchronized(publicationLock) {
+      if (publicationRound.get() != round) {
+        logDebug { "failPublicationRound: round $round was discarded, leaving its outcome alone" }
+        return
+      }
+      publicationRound.incrementAndGet()
+      pendingServices.clear()
+    }
+    finishOpen(DatabasePublication.FAILED, error, onlyIf = DatabasePublication.IN_PROGRESS)
+  }
+
+  /**
    * Only ever called from [open] or from `onServiceAdded`, so at most one `addService` is ever in
    * flight — which is what the platform requires.
    *
@@ -1251,8 +1301,7 @@ class GattServerManager(
       }
       val server = gattServer
       if (server == null) {
-        discardPublicationRound()
-        finishOpen(DatabasePublication.FAILED, GattServerException(
+        failPublicationRound(round, GattServerException(
           "ERR_NO_SERVER", "The GATT server was closed before service ${polled.uuid} could be registered"
         ))
         return
@@ -1260,11 +1309,12 @@ class GattServerManager(
       polled to server
     }
     val (service, server) = next
-    // A false return means the registration was never initiated, so no callback will arrive.
+    // A false return means the registration was never initiated, so no callback will arrive. Reported
+    // through the round rather than directly: this call released `publicationLock` before entering the
+    // binder, so the round may have been torn down while it was in there. See [failPublicationRound].
     if (!server.addService(service)) {
       Log.e(TAG, "addService: could not initiate registration of ${service.uuid}")
-      discardPublicationRound()
-      finishOpen(DatabasePublication.FAILED, GattServerException(
+      failPublicationRound(round, GattServerException(
         "ERR_CREATE_SERVER", "Could not initiate registration of service ${service.uuid}"
       ))
     }
@@ -1543,6 +1593,12 @@ class GattServerManager(
     if (advertiseCallback.get() === callback) {
       cancelAdvertisingTimeout()
     }
+    // Armed before the call rather than after it: the callback is posted to the main looper and can be
+    // delivered before this thread returns from the binder, and an arm that ran afterwards would then
+    // install a bound for a start that had already been settled. `finishAdvertise` cancels it, and the
+    // expiry checks that the start it belongs to is still the outstanding one, so a bound left behind by
+    // either ordering is inert.
+    armAdvertisingStartTimeout(callback, onResult)
     try {
       leAdvertiser.startAdvertising(settings, advData.build(), scanResponse, callback)
     } catch (e: Exception) {
@@ -1627,7 +1683,56 @@ class GattServerManager(
    * going down, the server being stopped — is not reported as an advertising failure.
    */
   private fun finishAdvertise(error: GattServerException?) {
+    cancelAdvertisingStartTimeout()
     pendingAdvertiseResult.getAndSet(null)?.invoke(error)
+  }
+
+  /**
+   * Bounds the wait for [callback]'s `onStartSuccess` or `onStartFailure`. See
+   * [ADVERTISING_START_TIMEOUT_MS].
+   *
+   * The expiry settles the start *and* takes the radio back, because the two cannot be separated here:
+   * the platform may still be about to start advertising, and rejecting the promise while leaving an
+   * advertisement running — with the only handle able to stop it discarded — would be worse than the
+   * hang this replaces. Stopping a callback that never started is documented as harmless.
+   *
+   * Identity-checked against the outstanding start rather than trusted to have been cancelled, on the
+   * same grounds as `AdvertiseCallback.current`: starts overlap, and a bound belonging to one that has
+   * since been displaced must not settle the one that displaced it.
+   */
+  @SuppressLint("MissingPermission")
+  private fun armAdvertisingStartTimeout(
+    callback: AdvertiseCallback,
+    onResult: (GattServerException?) -> Unit,
+  ) {
+    cancelAdvertisingStartTimeout()
+    val expiry = Runnable {
+      if (pendingAdvertiseResult.get() !== onResult) return@Runnable
+      Log.e(
+        TAG,
+        "No AdvertiseCallback within $ADVERTISING_START_TIMEOUT_MS ms; reporting the start as failed"
+      )
+      if (advertiseCallback.compareAndSet(callback, null)) {
+        advertising.set(false)
+        advertiser.get()?.stopAdvertising(callback)
+        // Nothing is known to have reached the air, so a rename this start applied has nothing left to
+        // justify it — the same reason `onStartFailure` restores it.
+        restoreAdapterName()
+      }
+      finishAdvertise(
+        GattServerException(
+          "ERR_ADVERTISE",
+          "The Bluetooth stack did not report the advertisement as started or failed within " +
+            "$ADVERTISING_START_TIMEOUT_MS ms. Nothing is advertising."
+        )
+      )
+    }
+    advertisingStartTimeout.set(expiry)
+    timeoutHandler.postDelayed(expiry, ADVERTISING_START_TIMEOUT_MS)
+  }
+
+  private fun cancelAdvertisingStartTimeout() {
+    advertisingStartTimeout.getAndSet(null)?.let { timeoutHandler.removeCallbacks(it) }
   }
 
   /**

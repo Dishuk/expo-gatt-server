@@ -24,6 +24,14 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      # Both build outputs are published but not committed, so a break in either only ever surfaces at
+      # `npm publish` otherwise.
+      #
+      # Built *before* the example is type-checked, because that is what the example now reads: the
+      # emitted declarations, exactly as a consumer installing the package gets them. Nothing else in
+      # this build type-checks `build/index.d.ts` at all.
+      - run: npm run build
+      - run: npm run build:plugin
       # The example is the only consumer-facing usage of the public API, and `expo prebuild` in the
       # integration jobs does not typecheck it — so until this ran, the app the guides point readers at
       # could break against the API it demonstrates and still ship green.
@@ -37,10 +45,6 @@ jobs:
       # real errors while CI stayed green.
       - run: npx eslint . --max-warnings 0
         working-directory: example
-      # Both build outputs are published but not committed, so a break in either only ever surfaces at
-      # `npm publish` otherwise.
-      - run: npm run build
-      - run: npm run build:plugin
       # `--ignore-scripts`, so this reads what the two build steps above produced rather than rebuilding
       # it: `npm pack` runs `prepack` and `prepare`, so without it the outputs are regenerated moments
       # before being listed and a build that does not happen at publish time would still look present.

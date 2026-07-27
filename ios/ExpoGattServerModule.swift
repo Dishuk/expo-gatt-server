@@ -220,8 +220,15 @@ public class ExpoGattServerModule: Module {
       let serviceUuids: [CBUUID]?
       do {
         try self.rejectUnsupportedAdvertisingOptions(config)
-        serviceUuids = try (config["serviceUuids"] as? [String])?
-          .map { try self.parseUuid($0, field: "service") }
+        // `as? [String]` is all-or-nothing: one non-string made the whole cast `nil`, which reads here
+        // as "the key was absent" — so the advertisement went on the air carrying *no* service UUIDs
+        // and the promise resolved, leaving a central filtering on one unable to find the peripheral.
+        // The same silent-drop the other five configuration arrays were converted away from; this was
+        // the site that kept the old cast. Android already refuses the same input.
+        let serviceUuidStrings: [String]? = try parseTypedArray(
+          config["serviceUuids"], field: "serviceUuids", elementDescription: "UUID strings"
+        )
+        serviceUuids = try serviceUuidStrings?.map { try self.parseUuid($0, field: "service") }
       } catch let error as GattServerError {
         promise.reject(error.code, error.message)
         return
@@ -329,16 +336,35 @@ public class ExpoGattServerModule: Module {
       }
     }
 
+    // The three numbers are declared as `Double` and narrowed by `parseIntArgument`, not declared as
+    // `Int` and narrowed by expo-modules-core: its `Int(double.rounded())` traps on `NaN` or an
+    // infinity, and that trap fires before any code here runs — so `sendResponse(dev, NaN, …)` killed
+    // the process instead of rejecting. See `parseIntArgument`.
     AsyncFunction("sendResponse") { (
       deviceId: String,
-      requestId: Int,
-      status: Int,
-      offset: Int,
+      rawRequestId: Double,
+      rawStatus: Double,
+      rawOffset: Double,
       value: [Int],
       promise: Promise
     ) in
       let data: Data
+      let requestId: Int
+      let status: Int
+      let offset: Int
       do {
+        requestId = try parseIntArgument(
+          rawRequestId, field: "response request id", min: 0, max: Int(Int32.max),
+          explanation: "A request id is the whole number the matching request event carried."
+        )
+        status = try parseIntArgument(
+          rawStatus, field: "response status", min: 0, max: 0xFF,
+          explanation: "An ATT error code is a single byte."
+        )
+        offset = try parseIntArgument(
+          rawOffset, field: "response offset", min: 0, max: 0xFFFF,
+          explanation: "An ATT offset is an unsigned 16-bit value."
+        )
         data = try parseBytes(value, field: "response")
       } catch {
         promise.reject("ERR_RESPONSE", error.localizedDescription)
@@ -385,6 +411,9 @@ public class ExpoGattServerModule: Module {
         try self.validateUuid(serviceUuid, field: "service")
         try self.validateUuid(characteristicUuid, field: "characteristic")
         data = try parseBytes(value, field: "characteristic")
+        // The same bound a configured value gets: this is the other way an application sets an
+        // attribute's value, and the specification bounds the attribute rather than the route to it.
+        try assertAttributeValueLength(data, field: "characteristic")
       } catch {
         promise.reject("ERR_UPDATE_VALUE", error.localizedDescription)
         return
@@ -599,7 +628,7 @@ public class ExpoGattServerModule: Module {
     //
     // `[]` is a configured value, not an absent one: it declares a present but zero-length attribute,
     // which Android caches and auto-answers reads from.
-    if let bytes = try parseByteArray(map["value"], field: "characteristic") {
+    if let bytes = try parseAttributeValue(map["value"], field: "characteristic") {
       initialValues[CharacteristicAddress(service: service, characteristic: uuid)] = bytes
     }
 
@@ -614,7 +643,12 @@ public class ExpoGattServerModule: Module {
       map["descriptors"], field: "descriptors", elementDescription: "descriptor objects"
     )
     if let descriptorList = descriptorList, !descriptorList.isEmpty {
-      characteristic.descriptors = try descriptorList.map { try parseDescriptorConfig($0) }
+      // Checked *before* the assignment, which is the only place it can be: the setter raises an
+      // uncatchable Objective-C exception for a repeat. JavaScript rejects it too; repeated here
+      // because the native module is reachable directly. See `assertUniqueDescriptorUuids`.
+      let descriptors = try descriptorList.map { try parseDescriptorConfig($0) }
+      try assertUniqueDescriptorUuids(descriptors.map(\.uuid), characteristic: uuid)
+      characteristic.descriptors = descriptors
     }
 
     return characteristic
@@ -660,7 +694,7 @@ public class ExpoGattServerModule: Module {
     let uuid = try parseUuid(map["uuid"], field: "descriptor")
     // An absent value publishes a zero-length descriptor, which is what Android's
     // `toByteArray(… ?: emptyList())` does.
-    let bytes = try parseByteArray(map["value"], field: "descriptor") ?? Data()
+    let bytes = try parseAttributeValue(map["value"], field: "descriptor") ?? Data()
 
     switch uuid {
     case CBUUID(string: CBUUIDCharacteristicUserDescriptionString):

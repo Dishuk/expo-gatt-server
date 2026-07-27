@@ -27,9 +27,12 @@ config.resolver.nodeModulesPaths = [
   path.resolve(__dirname, '../node_modules'),
 ];
 
-// `expo-gatt-server` is a `file:..` dependency, so npm symlinks it into
-// ./node_modules. Watch the parent folder so edits to the module source are
-// picked up by Fast Refresh.
+// `expo-gatt-server` is a `file:..` dependency, so npm symlinks it into ./node_modules. Watch the
+// parent folder so changes to the module are picked up by Fast Refresh.
+//
+// What is picked up is the *build output*: the package's `main` is `build/index.js` since it started
+// shipping compiled JavaScript, so editing `src/*.ts` changes nothing here until `npm run build` has
+// run in the parent. Run it in watch mode — `npx expo-module build` — to get the old feel back.
 config.watchFolders = [path.resolve(__dirname, '..')];
 
 config.transformer.getTransformOptions = async () => ({

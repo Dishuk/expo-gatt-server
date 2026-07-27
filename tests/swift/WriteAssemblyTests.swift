@@ -107,8 +107,19 @@ final class WriteAssemblyTests: XCTestCase {
     XCTAssertFalse(manager.isQueuedWriteBatch(offsets: [0]))
   }
 
-  func testMoreThanOneFragmentCanOnlyBeAQueuedWrite() {
+  /// A long write's parts carry advancing offsets, so more than one part always brings a non-zero one
+  /// with it. The decision rests on that offset, never on the count — see the case below.
+  func testAdvancingOffsetsNameAQueuedWrite() {
     XCTAssertTrue(manager.isQueuedWriteBatch(offsets: [0, 4]))
+  }
+
+  /// The regression this rule was rewritten for. Two Write Without Response commands to one
+  /// characteristic are coalesced into a single callback and both carry offset 0 — an `ATT_WRITE_CMD`
+  /// has no offset field to carry anything else. Counting the parts read that as a queued write, and
+  /// the queued splice then preserved the octets past each one, leaving a stale tail where Android
+  /// replaced the value outright.
+  func testTwoPartsAtOffsetZeroAreNotAQueuedWrite() {
+    XCTAssertFalse(manager.isQueuedWriteBatch(offsets: [0, 0]))
   }
 
   /// A single `ATT_WRITE_REQ` carries no offset field at all, so a non-zero one names a queued write
@@ -119,6 +130,25 @@ final class WriteAssemblyTests: XCTestCase {
 
   func testAnEmptyBatchIsNotAQueuedWrite() {
     XCTAssertFalse(manager.isQueuedWriteBatch(offsets: []))
+  }
+
+  /// The decision that drives both the assembly and the reporting, so the two can never disagree about
+  /// which procedure a batch was.
+  func testTheQueuedDecisionIsMadePerAttribute() {
+    let long = CharacteristicAddress(
+      service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
+    )
+    let streamed = CharacteristicAddress(
+      service: CBUUID(string: "180F"), characteristic: CBUUID(string: "2A19")
+    )
+    let queued = manager.queuedWriteAddresses([
+      GattServerManager.WriteFragment(address: long, offset: 0, value: Data([1])),
+      GattServerManager.WriteFragment(address: long, offset: 1, value: Data([2])),
+      GattServerManager.WriteFragment(address: streamed, offset: 0, value: Data([3])),
+      GattServerManager.WriteFragment(address: streamed, offset: 0, value: Data([4])),
+    ])
+
+    XCTAssertEqual(queued, [long])
   }
 
   // MARK: - The assembly loop
@@ -192,6 +222,30 @@ final class WriteAssemblyTests: XCTestCase {
     let result = assemble(current: data([1, 2, 3, 4]), fragments: [(offset: 0, bytes: [9])])
 
     XCTAssertEqual(result, data([9]))
+  }
+
+  /// Two Write Without Response commands to *one* characteristic, coalesced into a single callback.
+  /// Each replaces, so the attribute is left holding exactly the last one — the value Android leaves.
+  /// Read as a queued write, the first splice kept `[3, 4, 5]` behind the 3-byte write and the second
+  /// then kept `[5]` behind the 4-byte one, so a read afterwards served bytes no central had written.
+  func testCoalescedCommandsToOneAttributeReplaceRatherThanKeepingATail() {
+    let result = assemble(
+      current: data([1, 2, 3, 4, 5]),
+      fragments: [(offset: 0, bytes: [10, 11, 12]), (offset: 0, bytes: [20, 21])]
+    )
+
+    XCTAssertEqual(result, data([20, 21]))
+  }
+
+  /// The same shape where the later command is the longer one, so the bug would have been invisible:
+  /// a tail is only left behind when the value shrinks.
+  func testCoalescedCommandsAreOrderedLastWriteWins() {
+    let result = assemble(
+      current: data([1, 2]),
+      fragments: [(offset: 0, bytes: [10]), (offset: 0, bytes: [20, 21, 22])]
+    )
+
+    XCTAssertEqual(result, data([20, 21, 22]))
   }
 }
 

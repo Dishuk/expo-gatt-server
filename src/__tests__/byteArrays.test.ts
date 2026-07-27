@@ -1,5 +1,6 @@
 import {
   GATT_SUCCESS,
+  MAX_ATTRIBUTE_VALUE_LENGTH,
   createServer,
   sendNotification,
   sendResponse,
@@ -140,5 +141,49 @@ describe('every entry point taking raw bytes consults the check', () => {
     expect(nativeModuleMock.sendResponse).not.toHaveBeenCalled();
     expect(nativeModuleMock.updateCharacteristicValue).not.toHaveBeenCalled();
     expect(nativeModuleMock.startAdvertising).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The bound applies to the value an attribute is left *holding*, whoever set it. Both platforms
+   * already refused a client write past 512 octets and capped a notification at `min(mtu - 3, 512)`,
+   * but an application could still publish a longer attribute through its own configuration or through
+   * `updateCharacteristicValue` — one no central could be notified of, and that only a conformant Read
+   * Blob could retrieve in full.
+   */
+  describe('the attribute value length limit', () => {
+    const storesAnAttributeValue = byteConsumers.filter(([label]) =>
+      ['a characteristic value', 'a descriptor value', 'an updated characteristic value'].includes(
+        label,
+      ),
+    );
+
+    it('covers every entry point that stores one', () => {
+      expect(storesAnAttributeValue).toHaveLength(3);
+    });
+
+    it.each(storesAnAttributeValue)('%s accepts exactly 512 octets', async (_label, call) => {
+      await expect(call(new Array(MAX_ATTRIBUTE_VALUE_LENGTH).fill(0))).resolves.toBeUndefined();
+    });
+
+    it.each(storesAnAttributeValue)('%s rejects 513 octets', async (_label, call) => {
+      await expect(call(new Array(MAX_ATTRIBUTE_VALUE_LENGTH + 1).fill(0))).rejects.toThrow(
+        /may hold at most 512 octets/,
+      );
+    });
+
+    /**
+     * Deliberately unbounded here: a response continues a Read Blob and is not itself an attribute, and
+     * a notification is bounded by the *link* as well, which only the native side knows — it reports
+     * `PAYLOAD_EXCEEDS_MTU` against `min(mtu - 3, 512)`.
+     */
+    it.each(
+      byteConsumers.filter(([label]) =>
+        ['a notification value', 'a response value'].includes(label),
+      ),
+    )('%s is not bounded by the attribute limit in JavaScript', async (_label, call) => {
+      await expect(
+        call(new Array(MAX_ATTRIBUTE_VALUE_LENGTH + 1).fill(0)),
+      ).resolves.toBeUndefined();
+    });
   });
 });

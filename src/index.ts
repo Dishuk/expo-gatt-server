@@ -3,6 +3,7 @@ import { Platform, type EventSubscription } from 'expo-modules-core';
 import {
   ATT_TRANSACTION_TIMEOUT_MS,
   CLIENT_CHARACTERISTIC_CONFIGURATION_UUID,
+  MAX_ATTRIBUTE_VALUE_LENGTH,
 } from './ExpoGattServer.types';
 import type {
   GattServiceConfig,
@@ -84,6 +85,7 @@ export {
   ATT_ERROR_INSUFFICIENT_RESOURCES,
   ATT_TRANSACTION_TIMEOUT_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
+  MAX_ATTRIBUTE_VALUE_LENGTH,
   CLIENT_CHARACTERISTIC_CONFIGURATION_UUID,
 } from './ExpoGattServer.types';
 
@@ -185,6 +187,54 @@ function assertValidBytes(value: unknown, field: string): void {
           'Every element must be an integer between 0 and 255.',
       );
     }
+  }
+}
+
+/**
+ * The bytes of a value the module will hold as an attribute, which the specification bounds at
+ * `MAX_ATTRIBUTE_VALUE_LENGTH` however it came to be set.
+ *
+ * Both platforms already refuse a *client* write that assembles past that bound, and both cap a
+ * notification at `min(mtu - 3, 512)` — but neither bounded a value the application supplied itself, so
+ * a configured `value` or an `updateCharacteristicValue` could publish an attribute longer than any
+ * attribute may be: readable only through a conformant Read Blob, and impossible to notify. Every path
+ * that stores an attribute value goes through here so the one rule is applied once.
+ */
+function assertValidAttributeValue(value: unknown, field: string): void {
+  assertValidBytes(value, field);
+  const bytes = value as number[];
+  if (bytes.length > MAX_ATTRIBUTE_VALUE_LENGTH) {
+    throw new Error(
+      `Invalid ${field} value of ${bytes.length} bytes. An attribute value may hold at most ` +
+        `${MAX_ATTRIBUTE_VALUE_LENGTH} octets (Core Spec Vol 3, Part F, §3.2.9), and a longer one ` +
+        'could never be notified or read in a single response.',
+    );
+  }
+}
+
+/**
+ * A whole number the native side will receive in a parameter declared as an integer.
+ *
+ * Every such argument is validated here rather than only where it happens to be used, because the
+ * conversion is not forgiving and the two platforms fail differently: expo-modules-core turns a JS
+ * number into a native `Int` with `Int(double.rounded())` on iOS — which *traps* on `NaN` or an
+ * infinity, killing the process rather than rejecting the promise — and with `asDouble().toInt()` on
+ * Android, which maps `NaN` to 0 and truncates a fraction. So an unvalidated argument is a crash on one
+ * platform and a silently different value on the other. The natives re-check the same bounds, since the
+ * module is reachable directly.
+ */
+function assertValidInteger(
+  value: unknown,
+  field: string,
+  min: number,
+  max: number,
+  explanation: string,
+): void {
+  if (!Number.isInteger(value) || (value as number) < min || (value as number) > max) {
+    throw new Error(
+      `Invalid ${field} ${JSON.stringify(value)}. ${explanation} It must be an integer between ` +
+        `${min} and ${max}.`,
+    );
   }
 }
 
@@ -308,6 +358,7 @@ const ADVERTISE_KEYS = [
 const ANDROID_ADVERTISE_KEYS = ['includeDeviceName', 'setAdapterName'] as const;
 const MANUFACTURER_DATA_KEYS = ['companyId', 'data'] as const;
 const SERVICE_DATA_KEYS = ['uuid', 'data'] as const;
+const SEND_NOTIFICATION_KEYS = ['requireSubscription'] as const;
 
 function normalizeCharacteristic(
   characteristic: GattCharacteristicConfig,
@@ -321,7 +372,7 @@ function normalizeCharacteristic(
     'characteristic permission',
   );
   if (characteristic.value !== undefined) {
-    assertValidBytes(characteristic.value, 'characteristic');
+    assertValidAttributeValue(characteristic.value, 'characteristic');
   }
   assertValidDelegate(characteristic?.delegate, uuid);
   const descriptors = characteristic.descriptors?.map((descriptor) => {
@@ -336,7 +387,7 @@ function normalizeCharacteristic(
       );
     }
     assertNoUnknownKeys(descriptor, DESCRIPTOR_KEYS, 'descriptor');
-    assertValidBytes(descriptor?.value, 'descriptor');
+    assertValidAttributeValue(descriptor?.value, 'descriptor');
     if (descriptor.permissions !== undefined) {
       assertEachOneOf(descriptor.permissions, CHARACTERISTIC_PERMISSIONS, 'descriptor permission');
     }
@@ -346,7 +397,8 @@ function normalizeCharacteristic(
 }
 
 /**
- * Rejects a configuration in which a pair of UUIDs would name more than one attribute.
+ * Rejects a configuration in which one name would identify more than one attribute, at every level of
+ * the database.
  *
  * `sendNotification` and `updateCharacteristicValue` address an attribute by service and
  * characteristic UUID, and each platform resolves that pair to exactly one attribute — Android's
@@ -354,11 +406,22 @@ function normalizeCharacteristic(
  * leaves the two platforms answering the same call about different attributes. This is the same
  * shadowing that already rejects a manually declared Client Characteristic Configuration descriptor.
  *
+ * A repeated *descriptor* UUID within one characteristic belongs to the same rule and is far less
+ * forgiving: `CBMutableCharacteristic.descriptors` raises `NSInternalInconsistencyException` for a
+ * second User Description or Presentation Format descriptor, and an Objective-C exception cannot be
+ * caught from Swift — so the configuration that merely shadowed an attribute on Android terminated the
+ * application on iOS. Checking all three levels here is what makes that unreachable, rather than
+ * checking the two levels that happened to be reported.
+ *
  * The same characteristic UUID in *different* services stays legal: the specification permits it, and
- * the pair of UUIDs still names one attribute.
+ * the pair of UUIDs still names one attribute. The same descriptor UUID on *different* characteristics
+ * is legal for the same reason.
  */
 function assertUniqueUuids(
-  services: { uuid: string; characteristics: { uuid: string }[] }[],
+  services: {
+    uuid: string;
+    characteristics: { uuid: string; descriptors?: { uuid: string }[] }[];
+  }[],
 ): void {
   const serviceUuids = new Set<string>();
   for (const service of services) {
@@ -383,6 +446,20 @@ function assertUniqueUuids(
         );
       }
       characteristicUuids.add(characteristic.uuid);
+
+      const descriptorUuids = new Set<string>();
+      for (const descriptor of characteristic.descriptors ?? []) {
+        if (descriptorUuids.has(descriptor.uuid)) {
+          throw new Error(
+            `Duplicate descriptor UUID ${descriptor.uuid} on characteristic ` +
+              `${characteristic.uuid} in service ${service.uuid}. A characteristic may declare each ` +
+              'descriptor once: iOS refuses a second User Description or Presentation Format ' +
+              'descriptor outright, and on Android the repeat would shadow the first. The same ' +
+              'descriptor UUID on a different characteristic is fine.',
+          );
+        }
+        descriptorUuids.add(descriptor.uuid);
+      }
     }
   }
 }
@@ -428,7 +505,18 @@ export async function createServer(
   const epoch = serverStopEpoch;
   // Rebuilt rather than mutated, so the caller's own configuration object is left as they wrote it.
   assertNoUnknownKeys(options, CREATE_SERVER_KEYS, 'createServer');
-  const normalizedServices = (services ?? []).map((service) => {
+  // `services ?? []` silently turned a missing list into an empty database, so a `loadServices()` that
+  // returned `undefined` on a failure path published a server with nothing in it and resolved. An
+  // *explicitly* empty list stays legal — it is how an advertise-only peripheral is built, since
+  // `startAdvertising` requires a published database — but it now has to be written.
+  if (!Array.isArray(services)) {
+    throw new Error(
+      `Invalid services ${JSON.stringify(services)}. Expected an array of service configurations. ` +
+        'Pass [] to publish a database with no services of its own, which is what an advertise-only ' +
+        'peripheral wants.',
+    );
+  }
+  const normalizedServices = services.map((service) => {
     const uuid = normalizeUuid(service?.uuid, 'service');
     assertNoUnknownKeys(service, SERVICE_KEYS, 'service');
     if (service.type !== undefined) {
@@ -729,6 +817,16 @@ export async function sendNotification(
   options: SendNotificationOptions = {},
 ): Promise<void> {
   assertValidBytes(value, 'notification');
+  assertNoUnknownKeys(options, SEND_NOTIFICATION_KEYS, 'sendNotification');
+  if (
+    options.requireSubscription !== undefined &&
+    typeof options.requireSubscription !== 'boolean'
+  ) {
+    throw new Error(
+      `Invalid sendNotification option requireSubscription ` +
+        `${JSON.stringify(options.requireSubscription)}. Expected a boolean.`,
+    );
+  }
   return nativeModule().sendNotification(
     deviceId,
     normalizeUuid(serviceUuid, 'service'),
@@ -762,22 +860,29 @@ export async function sendResponse(
   offset: number,
   value: number[],
 ): Promise<void> {
+  // Every one of the three numbers is checked, not only the two whose misuse produces a wrong
+  // *answer*. `requestId` was the argument nothing validated, and it is the one that fails worst: on
+  // iOS `NaN` reaches `Int(double.rounded())` inside expo-modules-core and traps, killing the process
+  // before this module sees the call, while on Android the same value silently becomes request 0.
+  assertValidInteger(
+    requestId,
+    'response request id',
+    0,
+    Number.MAX_SAFE_INTEGER,
+    'A request id is the whole number the matching request event carried.',
+  );
   // Android narrows the status to a byte on its way into the Bluetooth stack, so a wider value would
   // be truncated into an unrelated ATT error rather than rejected.
-  if (!Number.isInteger(status) || status < 0 || status > 255) {
-    throw new Error(
-      `Invalid response status ${JSON.stringify(status)}. An ATT error code is a single byte, ` +
-        'so it must be an integer between 0 and 255.',
-    );
-  }
+  assertValidInteger(status, 'response status', 0, 255, 'An ATT error code is a single byte.');
   // A negative offset would be rebased into a slice beyond the value's end on both platforms rather
   // than reported.
-  if (!Number.isInteger(offset) || offset < 0 || offset > 0xffff) {
-    throw new Error(
-      `Invalid response offset ${JSON.stringify(offset)}. An ATT offset is an unsigned 16-bit ` +
-        'value, so it must be an integer between 0 and 65535.',
-    );
-  }
+  assertValidInteger(
+    offset,
+    'response offset',
+    0,
+    0xffff,
+    'An ATT offset is an unsigned 16-bit value.',
+  );
   assertValidBytes(value, 'response');
   return nativeModule().sendResponse(deviceId, requestId, status, offset, value);
 }
@@ -798,7 +903,7 @@ export async function updateCharacteristicValue(
   characteristicUuid: string,
   value: number[],
 ): Promise<void> {
-  assertValidBytes(value, 'characteristic');
+  assertValidAttributeValue(value, 'characteristic');
   return nativeModule().updateCharacteristicValue(
     normalizeUuid(serviceUuid, 'service'),
     normalizeUuid(characteristicUuid, 'characteristic'),

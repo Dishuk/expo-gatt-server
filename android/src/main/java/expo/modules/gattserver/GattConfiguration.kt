@@ -69,6 +69,71 @@ internal fun toByteArray(value: List<*>, field: String): ByteArray {
 }
 
 /**
+ * Decodes a whole number out of an argument expo-modules-core delivered as a [Double].
+ *
+ * The counterpart of iOS's `parseIntArgument`, and declared the same way for the same reason: a
+ * parameter declared as `Int` is produced by `asDouble().toInt()`, which turns `NaN` into `0` and
+ * truncates a fraction — so an unchecked argument silently named request 0, or a different request than
+ * iOS chose for the same call, with nothing reporting it. Android never crashed on it the way iOS did,
+ * but a wrong answer to a real request is its own failure, and one rule across both platforms is what
+ * keeps a call meaning one thing.
+ */
+internal fun parseIntArgument(
+  value: Double, field: String, min: Int, max: Int, explanation: String
+): Int {
+  if (!value.isFinite() || value != Math.rint(value) || value < min || value > max) {
+    throw IllegalArgumentException(
+      "Invalid $field $value. $explanation It must be an integer between $min and $max."
+    )
+  }
+  return value.toInt()
+}
+
+/**
+ * Decodes a value that will be *stored* as an attribute, which the specification bounds at
+ * [MAX_ATTRIBUTE_VALUE_LENGTH] however it came to be set — a configured `value` and
+ * `updateCharacteristicValue` alike, not only a write arriving from a central.
+ */
+internal fun parseAttributeValue(value: List<*>, field: String): ByteArray {
+  val bytes = toByteArray(value, field)
+  assertAttributeValueLength(bytes, field)
+  return bytes
+}
+
+/**
+ * The one bound, applied wherever an attribute value is set.
+ *
+ * [exceedsAttributeLength] already refused a *client* write that assembled past it and
+ * [mtuErrorFor] already capped a notification at `min(mtu - 3, 512)`, so the module refused to carry a
+ * value it would happily publish: an application could configure, or `updateCharacteristicValue` to, an
+ * attribute longer than any attribute may be — one no central could be notified of, retrievable only by
+ * a conformant Read Blob.
+ */
+internal fun assertAttributeValueLength(bytes: ByteArray, field: String) {
+  if (exceedsAttributeLength(bytes.size)) {
+    throw IllegalArgumentException(
+      "Invalid $field value of ${bytes.size} bytes. An attribute value may hold at most " +
+        "$MAX_ATTRIBUTE_VALUE_LENGTH octets (Core Spec Vol 3, Part F, §3.2.9), and a longer one " +
+        "could never be notified or read in a single response."
+    )
+  }
+}
+
+/**
+ * Reports an entry of a configuration array that is not an object, rather than skipping it.
+ *
+ * Every rule in this file throws for input it cannot honour, on the grounds that the native module is
+ * reachable directly — except these list elements, which were dropped with `?: continue`. So one
+ * malformed entry published a service with a characteristic missing, a characteristic with a descriptor
+ * missing, or an advertisement with no manufacturer data, and `createServer` resolved as though the
+ * whole configuration had been honoured. iOS reports the same input through `parseTypedArray`.
+ */
+internal fun asConfigMap(item: Any?, field: String, index: Int): Map<*, *> =
+  item as? Map<*, *> ?: throw IllegalArgumentException(
+    "Invalid $field entry at index $index. Expected an object, received $item."
+  )
+
+/**
  * Checked before `AdvertiseSettings.Builder.setTimeout` sees it, whose own message ("timeoutMillis
  * invalid") does not say which option was wrong.
  */
@@ -106,8 +171,8 @@ internal fun parseRequestTimeout(value: Any?): Int {
 
 internal fun parseManufacturerData(value: Any?): List<ManufacturerData> {
   val list = value as? List<*> ?: return emptyList()
-  return list.mapNotNull { item ->
-    val map = item as? Map<*, *> ?: return@mapNotNull null
+  return list.mapIndexed { index, item ->
+    val map = asConfigMap(item, "manufacturerData", index)
     val number = map["companyId"] as? Number
     val companyId = number?.toInt()
     // 16-bit field, so a wider value is not transmissible; `addManufacturerData` only rejects
@@ -127,8 +192,8 @@ internal fun parseManufacturerData(value: Any?): List<ManufacturerData> {
 
 internal fun parseServiceData(value: Any?): List<ServiceData> {
   val list = value as? List<*> ?: return emptyList()
-  return list.mapNotNull { item ->
-    val map = item as? Map<*, *> ?: return@mapNotNull null
+  return list.mapIndexed { index, item ->
+    val map = asConfigMap(item, "serviceData", index)
     val uuid = parseUuid(map["uuid"], "service data")
     val data = (map["data"] as? List<*>) ?: emptyList<Any>()
     ServiceData(uuid, toByteArray(data, "service data"))
@@ -143,8 +208,10 @@ internal fun parseDelegations(
   for (service in services) {
     val serviceUuid = parseUuid(service["uuid"], "service")
     val characteristics = (service["characteristics"] as? List<*>) ?: emptyList<Any>()
-    for (item in characteristics) {
-      val charMap = item as? Map<*, *> ?: continue
+    for ((index, item) in characteristics.withIndex()) {
+      val charMap = asConfigMap(item, "characteristics", index)
+      // Genuinely optional, unlike the entry itself: a characteristic with no `delegate` key answers
+      // its own requests, which is the default.
       val delegate = charMap["delegate"] as? Map<*, *> ?: continue
       val delegation = CharacteristicDelegation(
         read = delegate["read"] as? Boolean ?: false,
@@ -207,8 +274,8 @@ internal fun parseServiceConfig(map: Map<String, Any?>): BluetoothGattService {
 
   val characteristics = (map["characteristics"] as? List<*>) ?: emptyList<Any>()
   val seen = mutableSetOf<UUID>()
-  for (item in characteristics) {
-    val charMap = item as? Map<*, *> ?: continue
+  for ((index, item) in characteristics.withIndex()) {
+    val charMap = asConfigMap(item, "characteristics", index)
     val characteristic = parseCharacteristicConfig(charMap)
     if (!seen.add(characteristic.uuid)) {
       throw IllegalArgumentException(
@@ -239,12 +306,29 @@ internal fun parseCharacteristicConfig(map: Map<*, *>): BluetoothGattCharacteris
     characteristic.addDescriptor(BluetoothGattDescriptor(CCCD_UUID, cccdPermissions(permissions)))
   }
 
-  for (item in (map["descriptors"] as? List<*>) ?: emptyList<Any>()) {
-    val descriptorMap = item as? Map<*, *> ?: continue
-    characteristic.addDescriptor(parseDescriptorConfig(descriptorMap))
+  // The CCCD the module publishes itself counts: a configuration declaring one is already refused by
+  // `parseDescriptorConfig`, and seeding the set makes that one rule rather than two.
+  val declaredDescriptors = mutableSetOf<UUID>()
+  if (characteristic.descriptors.isNotEmpty()) {
+    declaredDescriptors += CCCD_UUID
+  }
+  for ((index, item) in ((map["descriptors"] as? List<*>) ?: emptyList<Any>()).withIndex()) {
+    val descriptorMap = asConfigMap(item, "descriptors", index)
+    val descriptor = parseDescriptorConfig(descriptorMap)
+    // `addDescriptor` accepts a repeat and `getDescriptor` then returns the first, leaving the second
+    // unreachable — the same shadowing a repeated characteristic UUID is refused for. iOS cannot even
+    // accept it: `CBMutableCharacteristic.descriptors` raises an uncatchable Objective-C exception, so
+    // the configuration Android quietly published terminated the application there.
+    if (!declaredDescriptors.add(descriptor.uuid)) {
+      throw IllegalArgumentException(
+        "Duplicate descriptor UUID ${descriptor.uuid} on characteristic $uuid. A characteristic may " +
+          "declare each descriptor once. The same descriptor UUID on a different characteristic is fine."
+      )
+    }
+    characteristic.addDescriptor(descriptor)
   }
 
-  val initialValue = (map["value"] as? List<*>)?.let { toByteArray(it, "characteristic") }
+  val initialValue = (map["value"] as? List<*>)?.let { parseAttributeValue(it, "characteristic") }
   if (initialValue != null) {
     @Suppress("DEPRECATION")
     characteristic.value = initialValue
@@ -307,7 +391,7 @@ internal fun parseDescriptorConfig(map: Map<*, *>): BluetoothGattDescriptor {
     ?: BluetoothGattDescriptor.PERMISSION_READ
   val descriptor = BluetoothGattDescriptor(uuid, permissions)
   @Suppress("DEPRECATION")
-  descriptor.value = toByteArray((map["value"] as? List<*>) ?: emptyList<Any>(), "descriptor")
+  descriptor.value = parseAttributeValue((map["value"] as? List<*>) ?: emptyList<Any>(), "descriptor")
   return descriptor
 }
 

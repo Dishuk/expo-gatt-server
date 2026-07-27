@@ -728,3 +728,212 @@ class UuidParsingTest {
     assertThrows(IllegalArgumentException::class.java) { parseUuid(null, "service") }
   }
 }
+
+/**
+ * The rules that bound an argument or a value rather than decode one, and the ones that decide whether
+ * a malformed entry is reported or dropped.
+ *
+ * Robolectric, because the value rules are asserted through the real attribute classes the server
+ * publishes rather than through the helpers in isolation.
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
+class ArgumentBoundsTest {
+  private val serviceUuid = "0000180d-0000-1000-8000-00805f9b34fb"
+  private val characteristicUuid = "00002a37-0000-1000-8000-00805f9b34fb"
+
+  private fun characteristic(
+    properties: List<String> = listOf("read"),
+    value: List<Int>? = null,
+    descriptors: List<Any?>? = null,
+  ): Map<String, Any?> = buildMap {
+    put("uuid", characteristicUuid)
+    put("properties", properties)
+    put("permissions", listOf("readable"))
+    if (value != null) put("value", value)
+    if (descriptors != null) put("descriptors", descriptors)
+  }
+
+  // MARK: - Integer arguments
+
+  /**
+   * Declared as `Double` and narrowed here rather than declared as `Int` and narrowed by
+   * expo-modules-core, whose `asDouble().toInt()` turns `NaN` into 0 and truncates a fraction that the
+   * iOS converter rounds — so the same `sendResponse` answered a different request on each platform,
+   * with nothing reporting it. (The same conversion *traps* on iOS, which is why the argument is
+   * declared this way on both sides rather than checked on one.)
+   */
+  @Test
+  fun `a non finite integer argument is rejected rather than becoming zero`() {
+    for (value in listOf(Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY)) {
+      assertThrows(IllegalArgumentException::class.java) {
+        parseIntArgument(value, "response request id", 0, Int.MAX_VALUE, "x")
+      }
+    }
+  }
+
+  @Test
+  fun `a fractional integer argument is rejected rather than truncated`() {
+    assertThrows(IllegalArgumentException::class.java) {
+      parseIntArgument(1.5, "response request id", 0, 10, "x")
+    }
+  }
+
+  @Test
+  fun `an integer argument accepts its bounds and refuses the values outside them`() {
+    assertEquals(0, parseIntArgument(0.0, "response status", 0, 255, "x"))
+    assertEquals(255, parseIntArgument(255.0, "response status", 0, 255, "x"))
+    assertThrows(IllegalArgumentException::class.java) {
+      parseIntArgument(256.0, "response status", 0, 255, "x")
+    }
+    assertThrows(IllegalArgumentException::class.java) {
+      parseIntArgument(-1.0, "response status", 0, 255, "x")
+    }
+  }
+
+  // MARK: - The attribute value length limit
+
+  /**
+   * "The maximum length of an attribute value shall be 512 octets" — Core Spec Vol 3, Part F, §3.2.9.
+   * A client write past it was already refused and a notification already capped at
+   * `min(mtu - 3, 512)`; the application's own routes to the same value were not, so the module would
+   * publish an attribute it then refused to notify.
+   */
+  @Test
+  fun `a configured characteristic value of exactly the limit is accepted`() {
+    val value = List(MAX_ATTRIBUTE_VALUE_LENGTH) { 0 }
+    val parsed = parseCharacteristicConfig(characteristic(value = value))
+    @Suppress("DEPRECATION")
+    assertEquals(MAX_ATTRIBUTE_VALUE_LENGTH, parsed.value!!.size)
+  }
+
+  @Test
+  fun `a configured characteristic value past the limit is rejected`() {
+    val error = assertThrows(IllegalArgumentException::class.java) {
+      parseCharacteristicConfig(characteristic(value = List(MAX_ATTRIBUTE_VALUE_LENGTH + 1) { 0 }))
+    }
+    assertTrue(error.message!!, error.message!!.contains("at most $MAX_ATTRIBUTE_VALUE_LENGTH octets"))
+  }
+
+  @Test
+  fun `a configured descriptor value past the limit is rejected`() {
+    assertThrows(IllegalArgumentException::class.java) {
+      parseCharacteristicConfig(
+        characteristic(
+          descriptors = listOf(
+            mapOf("uuid" to "2901", "value" to List(MAX_ATTRIBUTE_VALUE_LENGTH + 1) { 0 })
+          )
+        )
+      )
+    }
+  }
+
+  // MARK: - Descriptor uniqueness
+
+  /**
+   * `addDescriptor` accepts a repeat and `getDescriptor` returns the first, leaving the second
+   * unreachable — the shadowing a repeated characteristic UUID is already refused for. iOS cannot
+   * accept it at all: the equivalent assignment raises an uncatchable Objective-C exception, so the
+   * configuration this platform published quietly terminated the application there.
+   */
+  @Test
+  fun `a repeated descriptor uuid on one characteristic is rejected`() {
+    val descriptor = mapOf("uuid" to "2901", "value" to listOf(0x41))
+    val error = assertThrows(IllegalArgumentException::class.java) {
+      parseCharacteristicConfig(characteristic(descriptors = listOf(descriptor, descriptor)))
+    }
+    assertTrue(error.message!!, error.message!!.contains("Duplicate descriptor UUID"))
+  }
+
+  @Test
+  fun `the two spellings of one descriptor uuid are recognised as a repeat`() {
+    assertThrows(IllegalArgumentException::class.java) {
+      parseCharacteristicConfig(
+        characteristic(
+          descriptors = listOf(
+            mapOf("uuid" to "2901", "value" to listOf(0x41)),
+            mapOf("uuid" to "00002901-0000-1000-8000-00805F9B34FB", "value" to listOf(0x42)),
+          )
+        )
+      )
+    }
+  }
+
+  @Test
+  fun `distinct descriptor uuids on one characteristic are accepted`() {
+    val parsed = parseCharacteristicConfig(
+      characteristic(
+        descriptors = listOf(
+          mapOf("uuid" to "2901", "value" to listOf(0x41)),
+          mapOf("uuid" to "2904", "value" to listOf(0x42)),
+        )
+      )
+    )
+    assertEquals(2, parsed.descriptors.size)
+  }
+
+  /**
+   * The module publishes the CCCD itself for a subscribable characteristic, so a configuration that
+   * also declared one would shadow the per-client tracking that answers it. Already refused by name;
+   * asserted here because the uniqueness set is seeded with it and would otherwise be the thing that
+   * reports it, with a less useful message.
+   */
+  @Test
+  fun `a declared cccd is still rejected by name on a subscribable characteristic`() {
+    val error = assertThrows(IllegalArgumentException::class.java) {
+      parseCharacteristicConfig(
+        characteristic(
+          properties = listOf("notify"),
+          descriptors = listOf(mapOf("uuid" to "2902", "value" to listOf(0, 0))),
+        )
+      )
+    }
+    assertTrue(error.message!!, error.message!!.contains("Client Characteristic Configuration"))
+  }
+
+  // MARK: - Malformed configuration entries
+
+  /**
+   * Every other rule in the parser throws for input it cannot honour, on the grounds that the native
+   * module is reachable directly. These list elements were dropped instead, so one malformed entry
+   * published a service with a characteristic missing and `createServer` resolved as though it had
+   * not. iOS reports the same input through `parseTypedArray`.
+   */
+  @Test
+  fun `a malformed characteristic entry is reported rather than dropped`() {
+    val error = assertThrows(IllegalArgumentException::class.java) {
+      parseServiceConfig(
+        mapOf("uuid" to serviceUuid, "characteristics" to listOf(characteristic(), "2a38"))
+      )
+    }
+    assertTrue(error.message!!, error.message!!.contains("index 1"))
+  }
+
+  @Test
+  fun `a malformed descriptor entry is reported rather than dropped`() {
+    assertThrows(IllegalArgumentException::class.java) {
+      parseCharacteristicConfig(characteristic(descriptors = listOf("2901")))
+    }
+  }
+
+  @Test
+  fun `a malformed manufacturer data entry is reported rather than dropped`() {
+    assertThrows(IllegalArgumentException::class.java) {
+      parseManufacturerData(listOf(mapOf("companyId" to 0x004C, "data" to listOf(1)), 0x004C))
+    }
+  }
+
+  @Test
+  fun `a malformed service data entry is reported rather than dropped`() {
+    assertThrows(IllegalArgumentException::class.java) {
+      parseServiceData(listOf(mapOf("uuid" to "180d", "data" to listOf(1)), "180d"))
+    }
+  }
+
+  @Test
+  fun `a malformed characteristic entry is reported when delegations are parsed`() {
+    assertThrows(IllegalArgumentException::class.java) {
+      parseDelegations(listOf(mapOf("uuid" to serviceUuid, "characteristics" to listOf("2a37"))))
+    }
+  }
+}

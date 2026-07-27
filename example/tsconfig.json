@@ -1,10 +1,11 @@
 {
+  // No `paths` override for `expo-gatt-server`. The example exists to be the one consumer-facing use of
+  // the public API, and mapping it onto `../src` type-checked it against the *sources* — so the emitted
+  // `build/index.d.ts`, which is what `types` points at and what every consumer installs, was checked by
+  // nothing in this repository. `file:..` symlinks the package into `node_modules`, so ordinary
+  // resolution finds the built declarations. Run `npm run build` in the parent first; CI does.
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
-    "strict": true,
-    "paths": {
-      "expo-gatt-server": ["../src/index"],
-      "expo-gatt-server/*": ["../src/*"]
-    }
+    "strict": true
   }
 }

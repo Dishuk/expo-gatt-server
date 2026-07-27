@@ -1,3 +1,4 @@
+import CoreBluetooth
 import Foundation
 
 /// Configuration parsing that does not need ExpoModulesCore.
@@ -38,6 +39,132 @@ internal func parseTimeoutMs(
     )
   }
   return millis
+}
+
+/// Decodes a whole number out of an argument expo-modules-core delivered as a `Double`.
+///
+/// Every integer argument this module takes is *declared* as a `Double` and narrowed here, rather than
+/// declared as an `Int` and narrowed by expo-modules-core. Its `DynamicNumberType` converts with
+/// `Int(double.rounded())`, and `Int(_: Double)` **traps** on `NaN` or an infinity — an uncatchable
+/// fatal error that takes the process with it, raised before this module's code runs at all, so no
+/// amount of checking inside a function body could have prevented it. A `Double` parameter converts
+/// without narrowing, which puts the decision here where it can be reported.
+///
+/// It also removes a silent divergence: Android's converter turns the same `NaN` into `0` and truncates
+/// a fraction where iOS rounds it, so an unchecked argument named a *different* request on each
+/// platform. Both platforms now refuse it with the same message.
+internal func parseIntArgument(
+  _ value: Double, field: String, min: Int, max: Int, explanation: String
+) throws -> Int {
+  guard value.isFinite, value == value.rounded(), value >= Double(min), value <= Double(max) else {
+    throw GattArgumentError(
+      message: "Invalid \(field) \(value). \(explanation) It must be an integer between " +
+        "\(min) and \(max)."
+    )
+  }
+  return Int(value)
+}
+
+/// Decodes a value that will be *stored* as an attribute, which the specification bounds at
+/// `maxAttributeValueLength` however it came to be set — a configured `value` and
+/// `updateCharacteristicValue` alike, not only a write arriving from a central.
+internal func parseAttributeValue(_ value: Any?, field: String) throws -> Data? {
+  guard let bytes = try parseByteArray(value, field: field) else { return nil }
+  try assertAttributeValueLength(bytes, field: field)
+  return bytes
+}
+
+/// The one bound, applied wherever an attribute value is set. Kept separate from
+/// `parseAttributeValue` because the typed `[Int]` path — `updateCharacteristicValue` — has already
+/// been decoded by expo-modules-core and needs only the length rule.
+internal func assertAttributeValueLength(_ bytes: Data, field: String) throws {
+  guard bytes.count <= maxAttributeValueLength else {
+    throw GattArgumentError(
+      message: "Invalid \(field) value of \(bytes.count) bytes. An attribute value may hold at most " +
+        "\(maxAttributeValueLength) octets (Core Spec Vol 3, Part F, §3.2.9), and a longer one could " +
+        "never be notified or read in a single response."
+    )
+  }
+}
+
+/// The advertising payload a legacy advertisement can carry — Core Spec Vol 3, Part C, §11: an
+/// `AdvData` field is 31 octets. The scan response has its own 31, which CoreBluetooth does not let a
+/// peripheral populate.
+let maxAdvertisementPayloadLength = 31
+
+/// The AD structure the controller adds for a connectable advertisement: length, type `0x01`, and one
+/// octet of flags. A `CBPeripheralManager` advertisement is always connectable, so the room is always
+/// spent — the same three octets Android's `AdvertiseHelper` reserves before it decides an advertisement
+/// is too large.
+let advertisingFlagsLength = 3
+
+/// The octets an advertisement's AD structures would occupy.
+///
+/// Each structure costs a length octet and a type octet plus its payload; service UUIDs are grouped by
+/// width into one structure per width present (Core Spec Vol 3, Part C, §11 and the Supplement's §1.1).
+/// The widths come from `CBUUID.data`, which is what `advertisedForm` has already contracted where it
+/// could.
+func advertisementPayloadSize(localName: String?, serviceUuids: [CBUUID]) -> Int {
+  var size = advertisingFlagsLength
+  if let localName = localName, !localName.isEmpty {
+    size += 2 + localName.utf8.count
+  }
+  var octetsByWidth: [Int: Int] = [:]
+  for uuid in serviceUuids {
+    let width = uuid.data.count
+    octetsByWidth[width, default: 0] += width
+  }
+  for (_, octets) in octetsByWidth {
+    size += 2 + octets
+  }
+  return size
+}
+
+/// Refuses an advertisement that could not go on the air as asked.
+///
+/// CoreBluetooth reports no failure for one that does not fit: `startAdvertising` succeeds,
+/// `peripheralManagerDidStartAdvertising` reports `error == nil`, and the parts that did not fit are
+/// silently dropped — a truncated local name, and service UUIDs relocated into the Apple-proprietary
+/// scan-response overflow area, which only Apple hardware reads. A non-Apple central filtering on a
+/// service UUID then never discovers the peripheral, and nothing anywhere says why. Android's stack
+/// refuses the same advertisement with `ADVERTISE_FAILED_DATA_TOO_LARGE`, which the module reports as
+/// `ERR_ADVERTISE`, and `docs/api.md` documents that rejection for both platforms.
+///
+/// Checked before the call rather than after, because afterwards there is nothing left to check: the
+/// advertisement CoreBluetooth put on the air is not readable from the API.
+func assertAdvertisementFits(localName: String?, serviceUuids: [CBUUID]) throws {
+  let size = advertisementPayloadSize(localName: localName, serviceUuids: serviceUuids)
+  guard size > maxAdvertisementPayloadLength else { return }
+  throw GattArgumentError(
+    message: "The advertisement needs \(size) bytes and an advertisement carries at most " +
+      "\(maxAdvertisementPayloadLength), of which \(advertisingFlagsLength) are the connectable " +
+      "flags. Shorten localName, or advertise fewer service UUIDs — a 16-bit UUID costs 2 bytes " +
+      "where a 128-bit one costs 16."
+  )
+}
+
+/// Refuses a characteristic that declares one descriptor UUID more than once.
+///
+/// Lives here rather than beside the assignment it guards so that it can be exercised on the host:
+/// `ExpoGattServerModule.swift` imports ExpoModulesCore and has no host build, and this is a rule that
+/// must not be discovered to be wrong on a device. `CBMutableCharacteristic.descriptors` raises
+/// `NSInternalInconsistencyException` for a second User Description or Presentation Format descriptor,
+/// which Swift cannot catch — so the configuration that merely shadowed an attribute on Android
+/// terminated the application here.
+///
+/// Any repeat is refused, not only the two CoreBluetooth names, so one configuration means the same
+/// thing on both platforms.
+internal func assertUniqueDescriptorUuids(_ uuids: [CBUUID], characteristic: CBUUID) throws {
+  var seen: Set<CBUUID> = []
+  for uuid in uuids {
+    guard seen.insert(uuid).inserted else {
+      throw GattArgumentError(
+        message: "Duplicate descriptor UUID \(uuid.normalizedString) on characteristic " +
+          "\(characteristic.normalizedString). A characteristic may declare each descriptor once. " +
+          "The same descriptor UUID on a different characteristic is fine."
+      )
+    }
+  }
 }
 
 /// Decodes an optional array whose elements must all be of one type, reporting the first that is not.

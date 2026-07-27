@@ -209,11 +209,26 @@ describe('service configuration', () => {
     expect(publishedServices()[0].characteristics).toEqual([]);
   });
 
-  it('treats a missing services array as empty rather than failing', async () => {
-    await expect(
-      createServer(undefined as unknown as GattServiceConfig[]),
-    ).resolves.toBeUndefined();
+  /**
+   * The distinction the old `services ?? []` could not draw. An empty database is a legitimate thing to
+   * ask for — it is how an advertise-only peripheral is built, `startAdvertising` requiring a published
+   * database — but a *missing* list is a caller whose configuration did not arrive, and publishing an
+   * empty server for it resolved as though it had.
+   */
+  it('publishes an explicitly empty database', async () => {
+    await expect(createServer([])).resolves.toBeUndefined();
     expect(nativeModuleMock.createServer).toHaveBeenCalledWith([], {});
+  });
+
+  it.each([
+    ['undefined', undefined],
+    ['null', null],
+    ['a single service object', { uuid: SERVICE, characteristics: [] }],
+  ])('rejects %s in place of a services array', async (_label, services) => {
+    await expect(createServer(services as unknown as GattServiceConfig[])).rejects.toThrow(
+      /Invalid services/,
+    );
+    expect(nativeModuleMock.createServer).not.toHaveBeenCalled();
   });
 
   it('never reaches the native module with an invalid characteristic', async () => {
@@ -296,6 +311,62 @@ describe('duplicate UUIDs', () => {
       ]),
     ).rejects.toThrow();
     expect(nativeModuleMock.createServer).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The third level of the same rule, and the one that had to be caught here rather than reported by
+   * the platform: assigning two User Description or two Presentation Format descriptors to a
+   * `CBMutableCharacteristic` raises `NSInternalInconsistencyException`, which Swift cannot catch — so
+   * the configuration that merely shadowed an attribute on Android terminated the application on iOS.
+   */
+  const described = (uuid: string) => ({ uuid, value: [0x41] });
+
+  it.each([
+    ['the User Description descriptor', '2901'],
+    ['the Presentation Format descriptor', '2904'],
+    ['a vendor descriptor', '0000fe01-0000-1000-8000-00805f9b34fb'],
+  ])('rejects %s declared twice on one characteristic', async (_label, uuid) => {
+    await expect(
+      createServer([
+        {
+          uuid: SERVICE,
+          characteristics: [
+            { ...readable(CHARACTERISTIC), descriptors: [described(uuid), described(uuid)] },
+          ],
+        },
+      ]),
+    ).rejects.toThrow(/Duplicate descriptor UUID/);
+    expect(nativeModuleMock.createServer).not.toHaveBeenCalled();
+  });
+
+  it('recognises a short and a long descriptor spelling as the same UUID', async () => {
+    await expect(
+      createServer([
+        {
+          uuid: SERVICE,
+          characteristics: [
+            {
+              ...readable(CHARACTERISTIC),
+              descriptors: [described('2901'), described('00002901-0000-1000-8000-00805f9b34fb')],
+            },
+          ],
+        },
+      ]),
+    ).rejects.toThrow(/Duplicate descriptor UUID/);
+  });
+
+  it('accepts the same descriptor UUID on two different characteristics', async () => {
+    await expect(
+      createServer([
+        {
+          uuid: SERVICE,
+          characteristics: [
+            { ...readable(CHARACTERISTIC), descriptors: [described('2901')] },
+            { ...readable(OTHER_CHARACTERISTIC), descriptors: [described('2901')] },
+          ],
+        },
+      ]),
+    ).resolves.toBeUndefined();
   });
 });
 

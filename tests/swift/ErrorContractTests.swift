@@ -161,6 +161,48 @@ final class ErrorContractTests: XCTestCase {
     XCTAssertTrue(message.contains("cannot be overridden on iOS"), message)
   }
 
+  // MARK: - What a failed publication round reports
+
+  /// The two ways a round can end badly, and the code both of them owe every audience.
+  ///
+  /// `ServerPublicationFailedEvent` documents "the same code the equivalent `createServer` rejection
+  /// would carry, usually `ERR_CREATE_SERVER`", and Android emits exactly that. iOS used to hand the
+  /// completion `ERR_CREATE_SERVER` naming the service and the reason, and then hand the *event*
+  /// `ERR_NO_SERVER` with a message telling the reader to wait for `createServer` to resolve — one
+  /// fault, two codes, and a listener branching on the code taking a different path per platform.
+  ///
+  /// The fix was to carry one error through `failPublicationRound` to all three audiences, so what this
+  /// pins is that both errors it can be given report the code the event promises.
+  private static let publicationFailures: [GattServerError] = [
+    .serviceRegistrationFailed(uuid: "180d", reason: "why"),
+    .publicationTimedOut(awaiting: ["180d"], timeoutMs: 30_000),
+  ]
+
+  func testEveryWayAPublicationRoundFailsReportsTheCreateServerCode() {
+    for error in Self.publicationFailures {
+      XCTAssertEqual(error.code, "ERR_CREATE_SERVER", "\(error)")
+    }
+  }
+
+  /// The message reaches `onServerPublicationFailed` unchanged, so it has to say what failed rather than
+  /// what to do about it. `databaseNotPublished` — which this path used to report — is advice for a
+  /// caller who advertised too early, and named neither the service nor the reason.
+  func testARegistrationFailureNamesTheServiceAndTheReason() {
+    let message = GattServerError.serviceRegistrationFailed(uuid: "180d", reason: "why").message
+
+    XCTAssertTrue(message.contains("180d"), message)
+    XCTAssertTrue(message.contains("why"), message)
+  }
+
+  /// Pins the code that must *not* come back: `ERR_NO_SERVER` means "there is no database, so there is
+  /// nothing to do", which is the state a failed round leaves behind but not the fault it reports.
+  func testTheAdvertisingGuidanceCodeIsNotAPublicationFailure() {
+    XCTAssertEqual(GattServerError.databaseNotPublished.code, "ERR_NO_SERVER")
+    for error in Self.publicationFailures {
+      XCTAssertNotEqual(error.code, GattServerError.databaseNotPublished.code, "\(error)")
+    }
+  }
+
   // MARK: - Timing
 
   /// A module timeout at or above the ATT transaction timeout could never answer before the peer gives

@@ -96,6 +96,30 @@ describe('manufacturer company identifier', () => {
   });
 });
 
+/**
+ * The argument that had no bound at all, and the one whose absence cost most: a declared native `Int`
+ * is produced by `Int(double.rounded())` on iOS, which traps on a non-finite value and takes the
+ * process with it, and by `asDouble().toInt()` on Android, which turns the same `NaN` into request 0.
+ * So an unchecked request id was a crash on one platform and an answer to an unrelated request on the
+ * other — neither of them a rejected promise.
+ */
+describe('sendResponse request id', () => {
+  it.each([0, 1, 2_147_483_647])('accepts %d', async (requestId) => {
+    await expect(sendResponse('AA:BB', requestId, GATT_SUCCESS, 0, [])).resolves.toBeUndefined();
+  });
+
+  it.each([-1, 1.5, NaN, Infinity, -Infinity])('rejects %p', async (requestId) => {
+    await expect(sendResponse('AA:BB', requestId, GATT_SUCCESS, 0, [])).rejects.toThrow(
+      /Invalid response request id/,
+    );
+  });
+
+  it('never reaches the native module with a non-finite request id', async () => {
+    await expect(sendResponse('AA:BB', NaN, GATT_SUCCESS, 0, [])).rejects.toThrow();
+    expect(nativeModuleMock.sendResponse).not.toHaveBeenCalled();
+  });
+});
+
 describe('sendResponse status', () => {
   it.each([0, 1, 255])('accepts %d', async (status) => {
     await expect(sendResponse('AA:BB', 1, status, 0, [])).resolves.toBeUndefined();

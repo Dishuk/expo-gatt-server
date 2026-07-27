@@ -22,9 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > - `updateCharacteristicValue` returns a promise and rejects on an unknown characteristic
 > - `CharacteristicWriteRequestEvent.responseNeeded` now means "the module is waiting for you", not
 >   "the central asked for an acknowledgement"
-> - a mistyped property or permission name throws instead of being ignored
-> - Android no longer renames the device's Bluetooth adapter, no longer declares
->   `ACCESS_FINE_LOCATION` at all, and no longer declares `android.hardware.bluetooth_le` as required
+> - a mistyped property or permission name throws instead of being ignored, as does an unknown key in
+>   any options object and a repeated descriptor UUID on one characteristic
+> - `createServer` requires `services` to be an array — pass `[]` for a database with no services of
+>   its own, where `undefined` used to publish an empty one and resolve
+> - a characteristic or descriptor `value`, and anything `updateCharacteristicValue` writes, is bounded
+>   at `MAX_ATTRIBUTE_VALUE_LENGTH` (512) rather than published at any length
+> - Android no longer renames the device's Bluetooth adapter unless `android.setAdapterName` asks it
+>   to, no longer declares `ACCESS_FINE_LOCATION` at all, and no longer declares
+>   `android.hardware.bluetooth_le` as required
 > - the `expo` peer dependency narrows from `*` to `>=57.0.0`, so an app on SDK 51–56 no longer
 >   resolves this package, and `expo-modules-core` becomes a peer dependency it must provide
 
@@ -136,7 +142,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `getMtu`, the `onMtuChanged` event with `addMtuChangedListener`, and the types `DeviceMtu` and
   `MtuChangedEvent`. The link budget was previously invisible from JavaScript, so a payload could only
   be sized by trial and rejection. `mtu` is the ATT MTU in octets and `maxNotificationPayload` is
-  `mtu - 3`, the figure to size a `sendNotification` against. Android reports the ATT MTU exactly and
+  `min(mtu - 3, 512)` — the ATT notification header costs three octets, and no attribute value may
+  exceed 512 — which is the figure to size a `sendNotification` against. Android reports the ATT MTU exactly and
   the module derives the payload; iOS exposes only `CBCentral.maximumUpdateValueLength`, so there the
   payload is exact and the MTU is derived. iOS has no MTU callback at all, so the value is sampled at
   the central's next ATT activity and the first event arrives with `onDeviceConnected`
@@ -376,6 +383,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A characteristic declaring one descriptor twice terminated the application on iOS.** Nothing
+  rejected a repeated descriptor UUID: JavaScript checked service and characteristic UUIDs but not
+  descriptors, and neither native parser checked at all. Android published the repeat — `getDescriptor`
+  returns the first, so the second was merely unreachable — while on iOS assigning it to
+  `CBMutableCharacteristic.descriptors` raises `NSInternalInconsistencyException` ("Cannot have more than
+  one User Description descriptor per characteristic"), and an Objective-C exception cannot be caught
+  from Swift, so the process died during `createServer` rather than the promise rejecting. The
+  duplicate-UUID rule now covers all three levels of the database on both platforms and in the shared
+  layer. Two spellings of one UUID count as the repeat they are; the same descriptor UUID on a
+  *different* characteristic stays legal.
+- **`sendResponse` could crash the application on iOS through its `requestId`.** `status` and `offset`
+  were range-checked and `requestId` was not, and it is the argument that failed worst: a declared
+  native `Int` is produced by expo-modules-core with `Int(double.rounded())`, which **traps** on `NaN`
+  or an infinity — an uncatchable fatal error raised before any of this module's code ran — while
+  Android's converter turned the same value into request `0` and truncated a fraction that iOS rounded,
+  so one call answered a different request on each platform. Every integer argument crossing the bridge
+  is now declared as a double and narrowed by one rule, in JavaScript and again natively.
+- **iOS mistook coalesced writes for a long write and left stale bytes in the attribute.** The
+  queued-write procedure was inferred from the *number* of parts in a callback as well as their offsets,
+  but the stack coalesces several Write Without Response commands into one callback and each carries
+  offset 0 — so two commands to one characteristic were assembled as a long write, preserving the octets
+  past each one. A 3-byte write onto a 5-byte value left two bytes of the old value behind, which the
+  next read served, where Android replaced the value outright. The procedure is now recognised by its
+  offsets alone, which is the only evidence that distinguishes it: a part written past the start of an
+  attribute can only be a queued write, since `ATT_WRITE_REQ` has no offset field.
+- **iOS reported only one of several writes the stack delivered together.** Events were deduplicated by
+  attribute, which is right for the parts of a long write and wrong for independent commands: a
+  peripheral receiving a stream of framed Write Without Response commands lost one frame per coalesced
+  pair, silently, where Android delivered both. A long write is still reported once per attribute with
+  the reassembled value; coalesced writes now raise one event each, carrying the value each wrote.
+- **`onServerPublicationFailed` carried a different code on each platform.** A registration the stack
+  rejected reached `createServer`'s promise as `ERR_CREATE_SERVER` naming the service and the reason,
+  and reached the event as `ERR_NO_SERVER` with a message advising the reader to wait for `createServer`
+  to resolve — one fault under two codes, neither matching what the event documents, and Android
+  reported `ERR_CREATE_SERVER` for the same fault. A failed round now carries one error to all three
+  audiences: the completion, the parked `startAdvertising` callers, and the event.
+- **A late service registration could publish a database missing a service on iOS.** `add(_:)` was
+  called for every service at once, and `didAdd` carries nothing that identifies the round that asked
+  for it — so an acknowledgement left over from a round discarded by a Bluetooth reset was
+  indistinguishable from the current round's, satisfied it early, and left `createServer` resolving and
+  `isServerRunning` reporting `true` for a database one service short; the real result was then
+  discarded. Registration is now serialized, one outstanding `add(_:)` at a time, which is what makes an
+  unexpected acknowledgement recognisable — the structure Android already used.
+- **A round torn down mid-registration overwrote the teardown's outcome on Android.** `addNextService`
+  releases the publication lock for the `addService` binder call, and a teardown landing in that window
+  discards the round and settles its callers deliberately — `IDLE`, so a caller arriving before the
+  re-registration parks rather than being refused. The stale round then wrote `FAILED` over it and, with
+  no completion and no parked caller left, emitted `onServerPublicationFailed` for what was an ordinary
+  Bluetooth power-off, which the event documents itself as never reporting. Failing a round is now one
+  round-aware step that does nothing at all once the round has been discarded.
+- **`startAdvertising` could park for the life of the process on Android.** Every other asynchronous
+  wait in the module was bounded on the stated grounds that a platform callback which never arrives
+  otherwise parks a promise forever; the advertising start was not, even though
+  `BluetoothLeAdvertiser` is the API most often reported to swallow its callback — an exhausted
+  advertiser slot, or a Bluetooth process restart with no `STATE_OFF`/`STATE_ON` pair. The start is now
+  bounded like the others, and the expiry takes the radio back as well as rejecting, so nothing is left
+  advertising with its promise already settled.
+- **`createServer` lost its bound when Bluetooth reported `resetting` on iOS.** That state deliberately
+  spares the waiting callers, because a further state update is expected — but it discards the round,
+  and the round's timeout was the only limit those promises had. A stack that never returned to
+  `poweredOn` left `createServer` and every parked `startAdvertising` pending with no timer at all,
+  which is exactly what `publicationTimeoutMs` exists to prevent. The wait is now bounded against the
+  promises rather than against a round that no longer exists.
+- **An advertisement too large for the air went out silently on iOS.** Android's stack refuses one with
+  `ADVERTISE_FAILED_DATA_TOO_LARGE`, which the module reports as `ERR_ADVERTISE`; CoreBluetooth accepts
+  it, calls back with no error, truncates the local name and relocates service UUIDs into an
+  Apple-proprietary overflow area that only Apple hardware reads — so a non-Apple central filtering on a
+  service UUID never discovered the peripheral and nothing said why. The module now measures the payload
+  itself and rejects an over-budget advertisement with `ERR_ADVERTISE`, as the documentation already
+  described for both platforms. A start rejected this way leaves a running advertisement untouched.
+- **An attribute value the application set was not bounded at all.** Both platforms refused a *client*
+  write that assembled past 512 octets and capped a notification at `min(mtu - 3, 512)`, but a
+  configured `value` or an `updateCharacteristicValue` of any length was published — an attribute longer
+  than the specification permits (Core Spec Vol 3, Part F, §3.2.9), which no central could be notified
+  of and only a conformant Read Blob could read in full. The bound now applies wherever the value comes
+  from. `MAX_ATTRIBUTE_VALUE_LENGTH` is exported.
+- **A malformed entry in an Android configuration array was dropped rather than reported.** A
+  `characteristics` or `descriptors` element that was not an object, and a malformed `manufacturerData`
+  or `serviceData` entry, were skipped — so a service published with a characteristic missing, or an
+  advertisement went out with no manufacturer data, and `createServer` resolved as though the whole
+  configuration had been honoured. iOS already reported the same input; Android now does too. This is
+  the same silent-drop failure a misspelled property name is rejected to prevent.
+- **`createServer(undefined)` published an empty database and resolved.** A missing `services` argument
+  was coerced to `[]`, so a `loadServices()` that returned nothing on a failure path produced a
+  peripheral advertising a database containing nothing, with no promise reporting the mistake. A
+  non-array is now rejected. An *explicitly* empty array stays legal — it is how an advertise-only
+  peripheral is built, `startAdvertising` requiring a published database.
+- **A misspelled `sendNotification` option was ignored.** Every other options object was checked against
+  its known keys, on the grounds that a key no layer below reads is silently absent rather than an
+  error; `sendNotification`'s was not, so `requiresSubscription: false` — one letter out — left the send
+  refused with `ERR_NO_SUBSCRIBER` instead of forced. Unknown keys are now rejected there too, and
+  `requireSubscription` is type-checked.
 - **Every ordinary teardown reported a publication failure on Android.** `stop` settles the current
   registration round through the same `finishOpen` a genuine failure does, carrying the same
   `ERR_NO_SERVER` — so once `createServer` had resolved, leaving no promise to carry it, every

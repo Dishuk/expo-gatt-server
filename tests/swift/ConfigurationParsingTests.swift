@@ -1,3 +1,4 @@
+import CoreBluetooth
 import Foundation
 import XCTest
 
@@ -207,6 +208,199 @@ final class TimeoutParsingTests: XCTestCase {
       try parseTypedArray(
         [["uuid": "2a37"], 5], field: "characteristics", elementDescription: "characteristic objects"
       ) as [[String: Any]]?
+    )
+  }
+}
+
+/// The rules that guard a value or an argument's *shape* rather than its decoding.
+final class ArgumentBoundsTests: XCTestCase {
+  private func jsNumbers(_ values: [Double]) -> [Any] {
+    values.map { $0 as Any }
+  }
+
+  // MARK: - Integer arguments
+
+  /// The reason every integer argument is declared as a `Double` and narrowed here: expo-modules-core
+  /// produces a declared `Int` with `Int(double.rounded())`, and `Int(_: Double)` traps on these two
+  /// values — an uncatchable fatal error raised before any of this module's code runs. A `Double`
+  /// parameter is what makes them reportable at all, so these cases are the whole point of the change
+  /// and not merely another range check.
+  func testRejectsNonFiniteIntegerArguments() {
+    for value in [Double.nan, .infinity, -.infinity] {
+      XCTAssertThrowsError(
+        try parseIntArgument(
+          value, field: "response request id", min: 0, max: Int(Int32.max), explanation: "x"
+        ),
+        "\(value) must be reported, never narrowed"
+      )
+    }
+  }
+
+  func testRejectsAFractionRatherThanRoundingIt() {
+    // iOS rounded 1.5 to 2 and Android truncated it to 1, so the same call answered a different
+    // request on each platform.
+    XCTAssertThrowsError(
+      try parseIntArgument(1.5, field: "response request id", min: 0, max: 10, explanation: "x")
+    )
+  }
+
+  func testAcceptsTheBoundsAndRejectsOutsideThem() throws {
+    XCTAssertEqual(
+      try parseIntArgument(0, field: "response status", min: 0, max: 255, explanation: "x"), 0
+    )
+    XCTAssertEqual(
+      try parseIntArgument(255, field: "response status", min: 0, max: 255, explanation: "x"), 255
+    )
+    XCTAssertThrowsError(
+      try parseIntArgument(256, field: "response status", min: 0, max: 255, explanation: "x")
+    )
+    XCTAssertThrowsError(
+      try parseIntArgument(-1, field: "response status", min: 0, max: 255, explanation: "x")
+    )
+  }
+
+  // MARK: - The attribute value length limit
+
+  /// "The maximum length of an attribute value shall be 512 octets" — Core Spec Vol 3, Part F, §3.2.9.
+  /// Enforced on the values the *application* sets as well as the ones a central writes, which is what
+  /// was missing: a longer attribute is readable only through a conformant Read Blob and can never be
+  /// notified, since a notification is capped at `min(mtu - 3, 512)`.
+  func testAcceptsAValueOfExactlyTheLimit() throws {
+    let value = jsNumbers(Array(repeating: 0, count: maxAttributeValueLength))
+    XCTAssertEqual(
+      try parseAttributeValue(value, field: "characteristic")?.count, maxAttributeValueLength
+    )
+  }
+
+  func testRejectsAValuePastTheLimit() {
+    let value = jsNumbers(Array(repeating: 0, count: maxAttributeValueLength + 1))
+    XCTAssertThrowsError(try parseAttributeValue(value, field: "characteristic")) { error in
+      XCTAssertTrue(
+        "\(error.localizedDescription)".contains("at most \(maxAttributeValueLength) octets"),
+        "unexpected message: \(error.localizedDescription)"
+      )
+    }
+  }
+
+  func testTheTypedPathIsBoundedToo() {
+    // `updateCharacteristicValue` arrives already decoded, so it reaches the length rule directly.
+    XCTAssertThrowsError(
+      try assertAttributeValueLength(
+        Data(repeating: 0, count: maxAttributeValueLength + 1), field: "characteristic"
+      )
+    )
+    XCTAssertNoThrow(
+      try assertAttributeValueLength(
+        Data(repeating: 0, count: maxAttributeValueLength), field: "characteristic"
+      )
+    )
+  }
+
+  // MARK: - Descriptor uniqueness
+
+  /// Not a shadowing rule on this platform but a crash guard: `CBMutableCharacteristic.descriptors`
+  /// raises `NSInternalInconsistencyException` for a second User Description or Presentation Format
+  /// descriptor, and an Objective-C exception cannot be caught from Swift.
+  func testRejectsARepeatedDescriptorUuid() {
+    let characteristic = CBUUID(string: "2A37")
+    XCTAssertThrowsError(
+      try assertUniqueDescriptorUuids(
+        [CBUUID(string: "2901"), CBUUID(string: "2901")], characteristic: characteristic
+      )
+    ) { error in
+      XCTAssertTrue(
+        "\(error.localizedDescription)".contains("Duplicate descriptor UUID"),
+        "unexpected message: \(error.localizedDescription)"
+      )
+    }
+  }
+
+  /// `CBUUID` equality is width-insensitive, so the two spellings are one UUID and the rule sees them
+  /// as the repeat they are.
+  func testRecognisesTheTwoSpellingsOfOneDescriptorUuid() {
+    XCTAssertThrowsError(
+      try assertUniqueDescriptorUuids(
+        [CBUUID(string: "2901"), CBUUID(string: "00002901-0000-1000-8000-00805F9B34FB")],
+        characteristic: CBUUID(string: "2A37")
+      )
+    )
+  }
+
+  func testAcceptsDistinctDescriptorUuids() {
+    XCTAssertNoThrow(
+      try assertUniqueDescriptorUuids(
+        [CBUUID(string: "2901"), CBUUID(string: "2904")], characteristic: CBUUID(string: "2A37")
+      )
+    )
+  }
+
+  // MARK: - The advertising budget
+
+  /// CoreBluetooth accepts an advertisement that does not fit and reports success: the local name is
+  /// truncated and service UUIDs are moved into the Apple-proprietary overflow area, where a non-Apple
+  /// central filtering on one stops finding the peripheral. Android's stack refuses the same
+  /// advertisement outright, and the shared documentation promises that rejection for both platforms —
+  /// so the size is decided here, before the call that cannot report it.
+  func testAnEmptyAdvertisementCostsOnlyTheFlags() {
+    XCTAssertEqual(advertisementPayloadSize(localName: nil, serviceUuids: []), advertisingFlagsLength)
+  }
+
+  func testALocalNameCostsItsUtf8BytesPlusAHeader() {
+    // Two octets of header, then the name itself — and the count is of UTF-8 bytes, not characters.
+    XCTAssertEqual(advertisementPayloadSize(localName: "abc", serviceUuids: []), 3 + 2 + 3)
+    XCTAssertEqual(advertisementPayloadSize(localName: "é", serviceUuids: []), 3 + 2 + 2)
+  }
+
+  /// UUIDs of one width share a single AD structure, so the header is paid once per width rather than
+  /// once per UUID.
+  func testServiceUuidsAreGroupedByWidth() {
+    let short = [CBUUID(string: "180D"), CBUUID(string: "180F")]
+    XCTAssertEqual(advertisementPayloadSize(localName: nil, serviceUuids: short), 3 + 2 + 4)
+
+    let long = [CBUUID(string: "0000FE01-1234-1000-8000-00805F9B34FB")]
+    XCTAssertEqual(advertisementPayloadSize(localName: nil, serviceUuids: long), 3 + 2 + 16)
+
+    XCTAssertEqual(
+      advertisementPayloadSize(localName: nil, serviceUuids: short + long),
+      3 + (2 + 4) + (2 + 16)
+    )
+  }
+
+  func testAnAdvertisementThatExactlyFitsIsAccepted() {
+    // 3 flags + 2 header + 26 name = 31.
+    let name = String(repeating: "a", count: 26)
+    XCTAssertEqual(advertisementPayloadSize(localName: name, serviceUuids: []), 31)
+    XCTAssertNoThrow(try assertAdvertisementFits(localName: name, serviceUuids: []))
+  }
+
+  func testAnAdvertisementOneByteOverIsRejected() {
+    let name = String(repeating: "a", count: 27)
+    XCTAssertThrowsError(try assertAdvertisementFits(localName: name, serviceUuids: [])) { error in
+      XCTAssertTrue(
+        "\(error.localizedDescription)".contains("at most \(maxAdvertisementPayloadLength)"),
+        "unexpected message: \(error.localizedDescription)"
+      )
+    }
+  }
+
+  /// The case the contraction in `advertisedForm` exists for, and the reason the check runs on the
+  /// contracted spelling: the same two UUIDs fit as 16-bit aliases and do not as their 128-bit
+  /// expansions.
+  func testTheWidthAUuidIsAdvertisedAtDecidesWhetherItFits() {
+    let shortForms = [CBUUID(string: "180D"), CBUUID(string: "180F")]
+    let expansions = shortForms.map { CBUUID(string: $0.normalizedString) }
+
+    XCTAssertNoThrow(
+      try assertAdvertisementFits(localName: "Peripheral", serviceUuids: shortForms)
+    )
+    XCTAssertThrowsError(
+      try assertAdvertisementFits(localName: "Peripheral", serviceUuids: expansions)
+    )
+    // ...and contracting them is what the advertisement actually sends.
+    XCTAssertNoThrow(
+      try assertAdvertisementFits(
+        localName: "Peripheral", serviceUuids: expansions.map { $0.advertisedForm }
+      )
     )
   }
 }

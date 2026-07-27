@@ -271,13 +271,35 @@ class ExpoGattServerModule : Module() {
       }
     }
 
+    // The three numbers are declared as `Double` and narrowed by [parseIntArgument], matching iOS.
+    // Declared as `Int`, expo-modules-core produces them with `asDouble().toInt()`, which turns `NaN`
+    // into request 0 and truncates a fraction the iOS converter rounds — so the same call answered a
+    // different request on each platform, and neither reported it. (On iOS the same conversion *traps*,
+    // which is what made this the argument to fix rather than to document.)
     AsyncFunction("sendResponse") {
       deviceId: String,
-      requestId: Int,
-      status: Int,
-      offset: Int,
+      rawRequestId: Double,
+      rawStatus: Double,
+      rawOffset: Double,
       value: List<Int>,
       promise: Promise ->
+      val (requestId, status, offset) = try {
+        Triple(
+          parseIntArgument(
+            rawRequestId, "response request id", 0, Int.MAX_VALUE,
+            "A request id is the whole number the matching request event carried."
+          ),
+          parseIntArgument(
+            rawStatus, "response status", 0, 0xFF, "An ATT error code is a single byte."
+          ),
+          parseIntArgument(
+            rawOffset, "response offset", 0, 0xFFFF, "An ATT offset is an unsigned 16-bit value."
+          ),
+        )
+      } catch (e: Exception) {
+        promise.reject("ERR_RESPONSE", e.message, e)
+        return@AsyncFunction
+      }
       // `REQUEST_NOT_FOUND` rather than `ERR_NO_SERVER`, matching iOS and what `docs/api.md` documents
       // for both. Answering a request the module no longer holds is a missing request either way: with no
       // server there are no pending requests at all — `stop` answered and discarded them — so the lookup
@@ -310,8 +332,10 @@ class ExpoGattServerModule : Module() {
         return@AsyncFunction
       }
       try {
+        // The same bound a configured value gets: this is the other way an application sets an
+        // attribute's value, and the specification bounds the attribute rather than the route to it.
         mgr.updateCharacteristicValue(
-          serviceUuid, characteristicUuid, toByteArray(value, "characteristic")
+          serviceUuid, characteristicUuid, parseAttributeValue(value, "characteristic")
         )
         promise.resolve(null)
       } catch (e: GattServerException) {

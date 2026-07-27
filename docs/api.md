@@ -138,8 +138,13 @@ Initialize the native BLE GATT server with the given services and characteristic
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `services` | `GattServiceConfig[]` | -- | Array of service definitions |
+| `services` | `GattServiceConfig[]` | -- | Array of service definitions. Must be an array; pass `[]` for a database with no services of its own |
 | `options.requestTimeoutMs` | `number` | `10000` | How long a delegated request may go unanswered before the module answers it itself |
+
+An explicitly empty `services` array is accepted -- it is how an advertise-only peripheral is built,
+since `startAdvertising` requires a published database. Anything that is *not* an array is rejected,
+including `undefined`: a `loadServices()` that returned nothing on a failure path used to publish an
+empty server and resolve as though the configuration had arrived.
 
 Must be called before `startAdvertising`. Calling it again **replaces** the existing server: the
 previous one is stopped first, so an explicit `stopServer` in between is not required.
@@ -183,7 +188,14 @@ than one attribute is therefore rejected:
 |---|---|
 | Two services with the same UUID | **Rejected** |
 | One service declaring the same characteristic UUID twice | **Rejected** |
+| One characteristic declaring the same descriptor UUID twice | **Rejected** |
 | The same characteristic UUID in two *different* services | **Accepted** -- GATT permits it, and the pair of UUIDs still names one attribute |
+| The same descriptor UUID on two *different* characteristics | **Accepted**, for the same reason |
+
+A repeated descriptor UUID is refused more firmly than the others: on Android the second would shadow
+the first, but on iOS `CBMutableCharacteristic.descriptors` raises `NSInternalInconsistencyException`
+for a second User Description or Presentation Format descriptor, and an Objective-C exception cannot be
+caught from Swift -- so a configuration Android published quietly **terminated the application** there.
 
 UUIDs are compared after normalisation, so `'180d'` and `'0000180D-0000-1000-8000-00805F9B34FB'` count
 as the same service. Both platforms repeat the check natively, since the native module is reachable
@@ -311,6 +323,8 @@ The split is deliberate. `mode`, `txPowerLevel` and `includeTxPowerLevel` are hi
 `timeoutMs` is bounded at `180000` on both platforms -- the limit `AdvertiseSettings.Builder.setTimeout` enforces -- so one configuration behaves the same either side. On iOS it is **emulated** by a module timer that calls `stopAdvertising` when it fires, matching Android's behaviour of simply stopping with no error and no callback. Because it is a process-local timer, it only holds while the process is alive; `isAdvertising` goes `false` when it fires on either platform.
 
 `serviceUuids`, `manufacturerData` and `serviceData` all go in the advertisement itself, where a passive scanner sees them, and share its 31-byte budget; the device name and TX power go in the scan response so they do not compete for it. An over-budget advertisement rejects with `ERR_ADVERTISE` ("Advertise data too large").
+
+The budget is enforced on both platforms, but only Android's stack reports it. CoreBluetooth accepts an advertisement that does not fit and calls back with no error: it truncates the local name and relocates service UUIDs into an Apple-proprietary scan-response overflow area that only Apple hardware reads, so a non-Apple central filtering on a service UUID simply never discovers the peripheral. The module therefore measures the payload itself on iOS -- three bytes of connectable flags, two per AD structure, the local name's UTF-8 bytes, and the service UUIDs grouped by width -- and rejects an advertisement past 31 bytes with `ERR_ADVERTISE` before CoreBluetooth is asked. A start rejected this way leaves any advertisement already running untouched. Note that a 16-bit UUID costs 2 bytes where its 128-bit expansion costs 16, and the module advertises the shortest spelling of each UUID for exactly that reason.
 
 #### The advertised local name
 
@@ -504,7 +518,7 @@ Answer a pending read or write request -- one delivered by
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `deviceId` | `string` | Requesting device identifier, from the event |
-| `requestId` | `number` | Request ID from the event |
+| `requestId` | `number` | Request ID from the event. Must be a whole number `0`--`9007199254740991`; `NaN`, an infinity or a fraction is rejected rather than narrowed |
 | `status` | `number` | `GATT_SUCCESS` or an `ATT_ERROR_*` code. Must be an integer `0`--`255`, since an ATT error code is a single octet |
 | `offset` | `number` | The offset within the attribute at which `value` begins. Must be an integer `0`--`65535` |
 | `value` | `number[]` | Response byte array, starting at `offset`. Not transmitted for a write -- an `ATT_WRITE_RSP` carries no value -- so pass `[]` |
@@ -571,6 +585,12 @@ two are independent, so use both to push a value and make it readable.
 A value stored here is never overwritten by a write batch that was already outstanding when it
 resolved: that batch's held value is dropped instead. See
 [a batch that is only partly delegated](#a-batch-that-is-only-partly-delegated).
+
+`value` may hold at most **512 octets**, the specification's maximum attribute value length (Core Spec
+Vol 3, Part F, §3.2.9). The same bound applies to a `value` in the `createServer` configuration, on
+both platforms. It is enforced wherever the value comes from, not only on writes arriving from a
+central: a longer attribute could never be notified -- `sendNotification` caps at `min(mtu - 3, 512)` --
+and only a conformant Read Blob could retrieve it in full.
 
 **Rejects** with `ERR_CHARACTERISTIC_NOT_FOUND` when the pair of UUIDs names nothing in the published
 GATT database, `ERR_NO_SERVER` when no server exists, and `ERR_BLUETOOTH` when Bluetooth is not powered
@@ -1012,12 +1032,22 @@ the execute says the value is real.
 > it from.) CoreBluetooth handles the procedure below the app layer and surfaces whatever it decides
 > to surface through `didReceiveWriteRequests`, so there is nothing for the module to buffer and
 > nothing to configure. Long writes to an iOS peripheral work, and each request's `offset` is honoured
-> when its value is stored. The module assembles the batch itself, so it still reaches JavaScript as
+> when its value is stored. The module assembles the batch itself, so a long write reaches JavaScript as
 > one event per attribute carrying the reassembled value at `offset: 0` — the same shape Android
 > reports — and a `delegate.write` characteristic in the batch can still reject it, because an
 > `ATT_ERROR_*` passed to `sendResponse` fails the whole batch. What iOS cannot report is the
 > *distinction*: a plain `ATT_WRITE_REQ` and an executed prepared write arrive through the same
 > callback, so a write is never labelled as having been reliable.
+>
+> The module tells the two apart by the **offsets** in the batch, since that is the only evidence
+> available: a part written past the start of an attribute can only have come from the queued-write
+> procedure, because an `ATT_WRITE_REQ` carries no offset field at all. That matters because the same
+> callback also delivers several independent Write Without Response commands the stack coalesced —
+> including several to *one* characteristic, each at offset 0. Those are separate writes, so each
+> replaces the attribute's value and each raises its own `onCharacteristicWriteRequest`, exactly as
+> Android reports them. The one shape iOS genuinely cannot resolve is a long write delivered as a
+> single part at offset 0: indistinguishable from an ordinary write, it is treated as one, so it
+> replaces the value rather than leaving the tail beyond it in place as Android would.
 
 ---
 
@@ -1068,11 +1098,15 @@ the same fields as [`getMtu`](#getmtu).
 | `event.mtu` | `number` | ATT MTU in octets |
 | `event.maxNotificationPayload` | `number` | `min(mtu - 3, 512)`; size `sendNotification` payloads against this |
 
-Android delivers this from `BluetoothGattServerCallback.onMtuChanged`, as the change happens. iOS
-has no MTU callback at all, so the value is sampled whenever the central produces ATT activity -- a
-subscribe, read or write -- and the event fires when it differs from the value last seen. On iOS a
-change therefore surfaces at the next activity rather than the moment it happens, and the first
-event for a device arrives alongside `onDeviceConnected`.
+Both platforms report the link's starting MTU alongside `onDeviceConnected`, so a device that never
+negotiates one still produces an event: on Android `onMtuChanged` arrives only if the central asks to
+exchange, and many never do, which used to leave a peripheral sizing payloads against nothing.
+
+After that first report the platforms differ in *when* a change surfaces. Android delivers it from
+`BluetoothGattServerCallback.onMtuChanged`, as it happens. iOS has no MTU callback at all, so the value
+is sampled whenever the central produces ATT activity -- a subscribe, read or write -- and the event
+fires when it differs from the value last seen, meaning a change surfaces at the next activity rather
+than at the moment of the change.
 
 ---
 
@@ -1152,11 +1186,12 @@ both platforms: Android registers a receiver for `BluetoothAdapter.ACTION_STATE_
 On iOS the first event usually arrives shortly after `createServer` and carries the state
 CoreBluetooth resolved to; before that the state is `'unknown'`.
 
-> **Android sends no initial event.** It listens for `BluetoothAdapter.ACTION_STATE_CHANGED`, which is
-> not a sticky broadcast, so nothing is delivered until the adapter actually changes state. A listener
-> registered while Bluetooth is already on will not hear about it. Code that waits for a first
-> `'poweredOn'` before advertising therefore works on iOS and hangs on Android — read the state once
-> with [`getBluetoothState`](#getbluetoothstate) and treat the listener as reporting *changes* only.
+Android reports the state as it stands once, when the server is created, and then reports changes.
+`BluetoothAdapter.ACTION_STATE_CHANGED` is not a sticky broadcast and announces only a *change*, so
+without that first report a listener registered while Bluetooth was already on heard nothing at all,
+and code waiting for a first `'poweredOn'` before advertising worked on iOS and hung here. Both
+platforms therefore deliver a first event; only the timing differs, iOS's arriving whenever
+CoreBluetooth resolves the state.
 
 `poweredOff` destroys the published GATT database on both platforms, and every subscription with it,
 so expect `onCharacteristicUnsubscribed` and `onDeviceDisconnected` for everything that was live. The

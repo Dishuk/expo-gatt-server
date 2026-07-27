@@ -170,6 +170,18 @@ export const ATT_TRANSACTION_TIMEOUT_MS = 30_000;
 /** Default `CreateServerOptions.requestTimeoutMs`. */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
+/**
+ * The longest value any attribute may hold: "the maximum length of an attribute value shall be 512
+ * octets" (Core Spec Vol 3, Part F, §3.2.9).
+ *
+ * The bound applies to every value the module *stores* as an attribute — a characteristic or descriptor
+ * `value` in the configuration, and anything `updateCharacteristicValue` writes — not only to the ones a
+ * central writes. Both platforms already refuse a client write that assembles past it, and both cap a
+ * notification at `min(mtu - 3, 512)`, so without this an application could publish an attribute that no
+ * central could ever be notified of and that only a conformant Read Blob could retrieve in full.
+ */
+export const MAX_ATTRIBUTE_VALUE_LENGTH = 512;
+
 export interface CreateServerOptions {
   /**
    * How long a request delegated to JavaScript may go unanswered before the module answers it itself

@@ -42,6 +42,19 @@ Most scripts delegate to `expo-module-scripts`. `prepublishOnly` cleans and rebu
 same pair — `plugin/tsconfig.json` builds it, `plugin/tsconfig.check.json` checks it with its suite —
 and `npm run typecheck` runs both, so nothing under `src/` or `plugin/src/` goes unchecked.
 
+Neither of those reads the *emitted* declarations, though, and those are what a consumer gets. The one
+check that does is the example app's own type-check, which resolves `expo-gatt-server` through the
+`file:..` symlink and so reads `build/index.d.ts`:
+
+```bash
+npm run build                                    # in the repo root, first
+cd example && npx tsc --noEmit -p tsconfig.json
+```
+
+It deliberately has no `paths` override onto `../src`: with one, a declaration emit that was wrong or
+stale still type-checked green here and broke in the first consumer's app instead. CI runs both builds
+before this step for the same reason.
+
 ## Project Layout
 
 ```

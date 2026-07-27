@@ -385,10 +385,30 @@ class GattServerManager: NSObject {
   /// Whether every configured service is currently published.
   private var databasePublished: Bool { publication == .published }
 
-  /// Whether the current round of `add(_:)` calls has already had one service rejected. The callbacks
-  /// arrive in no guaranteed order, so without this a failure followed by a success would see nothing
-  /// left awaiting registration and publish a database that is missing a service.
-  private var registrationFailed = false
+  /// How the current round failed, or `nil` while it is still viable.
+  ///
+  /// The *error*, not a flag, because one failure has three audiences — `createServer`'s completion,
+  /// the callers parked in `whenDatabasePublished`, and `onServerPublicationFailed` — and each used to
+  /// be handed an error of its own. A registration the stack rejected reached the completion as
+  /// `ERR_CREATE_SERVER` naming the service and the reason, and reached the event as `ERR_NO_SERVER`
+  /// advising the reader to wait for `createServer` to resolve: the same fault under two codes, neither
+  /// of them what `ServerPublicationFailedEvent` documents. Android has always carried one
+  /// `GattServerException` through `finishOpen` to all three. Holding the error here is what makes that
+  /// possible rather than remembering to spell it the same way at each call site.
+  private var registrationFailure: GattServerError?
+
+  /// The services this round has still to hand to `add(_:)`, in order, and the one it is waiting on.
+  ///
+  /// Registration is serialized — one `add(_:)` outstanding at a time — because that is the only way a
+  /// `didAdd` can be attributed to the round that asked for it. CoreBluetooth passes no round, no token
+  /// and no context back, so with several adds in flight a callback left over from a discarded round is
+  /// indistinguishable from this round's: it removed the UUID from the awaited set, and the round then
+  /// "completed" with a service that had never registered, publishing a database missing one service and
+  /// discarding the real result when it arrived. Waiting for exactly one named service makes an
+  /// unexpected acknowledgement recognisable, and the round is left to its own bound instead. Android
+  /// serializes registration for the same reason, through a per-round callback object.
+  private var registrationQueue: [CBMutableService] = []
+  private var outstandingRegistration: CBUUID?
 
   /// Whether this round's outcome already reached a caller through `openCompletion`. Cleared when a
   /// round starts. `openCompletion` alone cannot answer that: the `didAdd` failure path settles it as
@@ -559,8 +579,10 @@ class GattServerManager: NSObject {
   private func publishConfiguredServices(on peripheral: CBPeripheralManager) {
     publicationGeneration += 1
     publication = .inProgress
-    registrationFailed = false
+    registrationFailure = nil
     roundReportedToCaller = false
+    registrationQueue = serviceConfiguration
+    outstandingRegistration = nil
     servicesAwaitingRegistration = Set(serviceConfiguration.map { $0.uuid })
     guard !servicesAwaitingRegistration.isEmpty else {
       publication = .published
@@ -579,9 +601,33 @@ class GattServerManager: NSObject {
     // taking a working server down for good over a blip it was meant to recover from. Calling this on a
     // database that really is empty costs nothing.
     peripheral.removeAllServices()
-    for service in serviceConfiguration {
-      peripheral.add(service)
-    }
+    addNextService(on: peripheral)
+  }
+
+  /// Hands the next service of the round to `add(_:)`, one at a time. See [registrationQueue].
+  private func addNextService(on peripheral: CBPeripheralManager) {
+    guard publication == .inProgress, !registrationQueue.isEmpty else { return }
+    let service = registrationQueue.removeFirst()
+    outstandingRegistration = service.uuid
+    peripheral.add(service)
+  }
+
+  /// Ends the round as failed, telling each audience the same thing.
+  ///
+  /// The order matters and is the reason this is one function: `reportPublicationFailure` emits only
+  /// when nobody is waiting to be told, so it has to run after `completeOpen` — which records that a
+  /// caller was told — and before `flushReadinessWaiters`, which empties the list it consults.
+  private func failPublicationRound(_ error: GattServerError) {
+    registrationFailure = error
+    publication = .failed
+    registrationQueue.removeAll()
+    outstandingRegistration = nil
+    servicesAwaitingRegistration.removeAll()
+    cancelPublicationTimeout()
+    unpublishFailedRegistration()
+    completeOpen(error)
+    reportPublicationFailure(error)
+    flushReadinessWaiters(error)
   }
 
   /// Bounds the round that has just started. See [publicationTimeout].
@@ -599,22 +645,12 @@ class GattServerManager: NSObject {
         awaiting: self.servicesAwaitingRegistration.map { $0.normalizedString }.sorted(),
         timeoutMs: publicationTimeoutMs
       )
-      self.publication = .failed
-      // Set so the deferred unpublish below recognises this as a failed round, and so a late
-      // acknowledgement cannot publish a database this has already reported as absent.
-      self.registrationFailed = true
-      // Abandoned explicitly, after the error above has read it. `unpublishFailedRegistration` waits
-      // for this set to empty so it never runs with sibling `add(_:)` calls outstanding — but on this
-      // path it can only be non-empty, because a round whose services had all reported would have
-      // cancelled this timer in `didAdd`. Left as it was, the unpublish returned every time and the
-      // services this round did manage to register stayed in the process-wide GATT database while the
-      // module reported no server at all. A late acknowledgement cannot resurrect them: `didAdd`
-      // returns at once unless `publication == .inProgress`, which was just cleared.
-      self.servicesAwaitingRegistration.removeAll()
-      self.unpublishFailedRegistration()
-      self.reportPublicationFailure(error)
-      self.completeOpen(error)
-      self.flushReadinessWaiters(error)
+      // Ends the round exactly as a rejected registration does — same state, same error to every
+      // audience. `unpublishFailedRegistration` waits for the awaited set to empty so it never runs
+      // with an `add(_:)` still outstanding; that clearing happens there. A late acknowledgement cannot
+      // resurrect the round either: `didAdd` returns at once unless `publication == .inProgress`, which
+      // this clears.
+      self.failPublicationRound(error)
     }
     publicationTimeout = work
     DispatchQueue.main.asyncAfter(
@@ -625,6 +661,33 @@ class GattServerManager: NSObject {
   private func cancelPublicationTimeout() {
     publicationTimeout?.cancel()
     publicationTimeout = nil
+  }
+
+  /// Bounds callers who are waiting for a database that no round is currently building.
+  ///
+  /// `resetting` is the one state that discards the database and keeps the waiters, on the grounds that
+  /// a further state update is coming — but nothing guarantees one does, and the round's own bound went
+  /// with the round. This gives the promises a limit of their own: if the re-publish has not happened by
+  /// the time it fires, they are rejected rather than left pending for the life of the process.
+  ///
+  /// Stored in `publicationTimeout` so that a round starting in the meantime replaces it — a publication
+  /// under way is a better bound than this one, and `armPublicationTimeout` cancels whatever is there.
+  private func armWaiterTimeout(reason: GattServerError) {
+    guard openCompletion != nil || !readinessWaiters.isEmpty else { return }
+    cancelPublicationTimeout()
+    let generation = publicationGeneration
+    let work = DispatchWorkItem { [weak self] in
+      guard let self = self,
+            self.publicationGeneration == generation,
+            self.publication != .published else { return }
+      self.publicationTimeout = nil
+      self.completeOpen(reason)
+      self.flushReadinessWaiters(reason)
+    }
+    publicationTimeout = work
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + .milliseconds(publicationTimeoutMs), execute: work
+    )
   }
 
   /// Advertises once the database is published, holding the call until then rather than refusing it, and
@@ -676,6 +739,18 @@ class GattServerManager: NSObject {
       completion(GattServerError.databaseNotPublished)
       return
     }
+    // Contracted here and nowhere else: the advertisement is the one place a UUID's width is spent
+    // rather than merely spelled. See `CBUUID.advertisedForm`.
+    let advertisedUuids = (serviceUuids ?? []).map { $0.advertisedForm }
+    // Checked before anything is displaced, so an advertisement that cannot go on the air does not take
+    // down the one that is already running. CoreBluetooth reports no failure for an over-budget payload
+    // — see `assertAdvertisementFits`.
+    do {
+      try assertAdvertisementFits(localName: localName, serviceUuids: advertisedUuids)
+    } catch {
+      completion(advertisingError(error.localizedDescription))
+      return
+    }
     let displaced = claimAdvertisingCompletion()
     displaced?(advertisingError("Advertising restarted"))
     // Taken off the air before the replacement goes on it. `peripheralManagerDidStartAdvertising` names
@@ -701,10 +776,8 @@ class GattServerManager: NSObject {
     if let name = localName {
       advertisementData[CBAdvertisementDataLocalNameKey] = name
     }
-    if let uuids = serviceUuids, !uuids.isEmpty {
-      // Contracted here and nowhere else: the advertisement is the one place a UUID's width is spent
-      // rather than merely spelled. See `CBUUID.advertisedForm`.
-      advertisementData[CBAdvertisementDataServiceUUIDsKey] = uuids.map { $0.advertisedForm }
+    if !advertisedUuids.isEmpty {
+      advertisementData[CBAdvertisementDataServiceUUIDsKey] = advertisedUuids
     }
     cancelAdvertisingTimeout()
     // Held rather than armed. The limit is one on how long the advertisement stays *on the air*, and
@@ -1186,7 +1259,9 @@ class GattServerManager: NSObject {
     servicesAwaitingRegistration.removeAll()
     cancelPublicationTimeout()
     publication = .idle
-    registrationFailed = false
+    registrationFailure = nil
+    registrationQueue.removeAll()
+    outstandingRegistration = nil
     addedServices.removeAll()
     connectedCentrals.removeAll()
     centralPayloadLengths.removeAll()
@@ -1263,12 +1338,22 @@ class GattServerManager: NSObject {
     return result
   }
 
-  /// Whether a batch of write offsets can only have come from the queued-write procedure.
+  /// Whether one attribute's share of a write callback can only have come from the queued-write
+  /// procedure.
   ///
   /// CoreBluetooth runs that procedure below the app layer and delivers its result through the same
   /// callback as an ordinary write, with no flag telling them apart — so the shape of the batch is the
-  /// only evidence. More than one request, or any request at a non-zero offset, is beyond what a single
-  /// `ATT_WRITE_REQ` can produce and therefore names a queued write.
+  /// only evidence. A non-zero offset is the whole of that evidence: an `ATT_WRITE_REQ` carries a handle
+  /// and a value and no offset field at all (Core Spec Vol 3, Part F, §3.4.5.1), so any part placed past
+  /// the start of the attribute names a queued write.
+  ///
+  /// *Counting* the parts does not work, and used to: two requests for one attribute were read as a
+  /// queued write, but Write Without Response commands need no response and the stack coalesces several
+  /// into one callback, so two `ATT_WRITE_CMD`s to the same characteristic arrive as two parts at offset
+  /// 0. Assembling those as queued preserved the octets past each one — leaving a stale tail behind a
+  /// shorter write and serving it on the next read, where Android replaced the value outright. A genuine
+  /// long write cannot look like that: its parts carry advancing offsets, so at least one is non-zero
+  /// the moment there is more than one.
   ///
   /// What is left genuinely ambiguous is a lone part at offset 0: identical in shape to an unqueued
   /// write, so it is assembled as one. That is the single case where a long write can still leave a
@@ -1279,7 +1364,20 @@ class GattServerManager: NSObject {
   /// Takes the offsets rather than the requests, because `CBATTRequest` has no public initialiser and
   /// this is the whole of what the decision depends on.
   func isQueuedWriteBatch(offsets: [Int]) -> Bool {
-    offsets.count > 1 || offsets.contains { $0 > 0 }
+    offsets.contains { $0 > 0 }
+  }
+
+  /// The addresses in `fragments` whose parts came from the queued-write procedure.
+  ///
+  /// One decision with two consumers — the assembly below and the reporting in `didReceiveWrite` — so a
+  /// batch can never be *assembled* as one procedure and *reported* as the other. Grouped per attribute
+  /// because the procedure is: one characteristic's fragmentation says nothing about another's.
+  func queuedWriteAddresses(_ fragments: [WriteFragment]) -> Set<CharacteristicAddress> {
+    var offsetsByAddress: [CharacteristicAddress: [Int]] = [:]
+    for fragment in fragments {
+      offsetsByAddress[fragment.address, default: []].append(fragment.offset)
+    }
+    return Set(offsetsByAddress.filter { isQueuedWriteBatch(offsets: $0.value) }.keys)
   }
 
   /// One `CBATTRequest`'s worth of a write, reduced to what the assembly actually depends on.
@@ -1308,11 +1406,7 @@ class GattServerManager: NSObject {
     _ fragments: [WriteFragment],
     current: [CharacteristicAddress: Data]
   ) -> [CharacteristicAddress: Data]? {
-    var offsetsByAddress: [CharacteristicAddress: [Int]] = [:]
-    for fragment in fragments {
-      offsetsByAddress[fragment.address, default: []].append(fragment.offset)
-    }
-    let queuedByAddress = offsetsByAddress.mapValues { isQueuedWriteBatch(offsets: $0) }
+    let queued = queuedWriteAddresses(fragments)
 
     var assembled: [CharacteristicAddress: Data] = [:]
     for fragment in fragments {
@@ -1321,7 +1415,7 @@ class GattServerManager: NSObject {
         base,
         offset: fragment.offset,
         part: fragment.value,
-        queued: queuedByAddress[fragment.address] ?? false
+        queued: queued.contains(fragment.address)
       ) else {
         return nil
       }
@@ -1432,7 +1526,15 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       // every central has been disconnected and the local database is cleared. Only the waiters are
       // spared, because a further state update really is coming and the re-publish that follows powering
       // on can still satisfy them.
-      discardPublishedDatabase(reason: .bluetoothUnavailable(state: peripheral.state))
+      let error = GattServerError.bluetoothUnavailable(state: peripheral.state)
+      discardPublishedDatabase(reason: error)
+      // Sparing them costs them their bound: `discardPublishedDatabase` cancels the publication timeout,
+      // which is the *round's* limit, and only `publishConfiguredServices` re-arms it — on a transition
+      // to powered on that may never come. So a `createServer` and every parked `startAdvertising` were
+      // left with no timer at all, which is precisely the outcome `publicationTimeoutMs` exists to
+      // prevent. The wait is bounded here instead, keyed to the promises rather than to a round that no
+      // longer exists.
+      armWaiterTimeout(reason: error)
     default:
       let error = GattServerError.bluetoothUnavailable(state: peripheral.state)
       discardPublishedDatabase(reason: error)
@@ -1506,46 +1608,46 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     _ peripheral: CBPeripheralManager,
     didAdd service: CBService, error: Error?
   ) {
-    // Bluetooth dropping mid-registration discards the database while adds are still outstanding; without
-    // this the late acknowledgement would publish it again and report a server that no longer exists.
+    // Bluetooth dropping mid-registration discards the database while an add is still outstanding;
+    // without this the late acknowledgement would publish it again and report a server that no longer
+    // exists.
     guard publication == .inProgress else { return }
+    // Attributed to the round that asked for it, which on this platform means the service this round is
+    // currently waiting on — CoreBluetooth hands back nothing else to test. An acknowledgement for
+    // anything else belongs to a round that has since been discarded and says nothing about this one:
+    // crediting it advanced this round on a registration that never happened. See [registrationQueue].
+    guard outstandingRegistration == service.uuid else { return }
+    outstandingRegistration = nil
 
     servicesAwaitingRegistration.remove(service.uuid)
 
     if let error = error {
-      registrationFailed = true
-      completeOpen(GattServerError.serviceRegistrationFailed(
+      // The round stops at the first rejection rather than issuing the rest, which is what Android does
+      // and what serializing makes possible: there is no sibling `add(_:)` left in flight to wait for.
+      failPublicationRound(GattServerError.serviceRegistrationFailed(
         uuid: service.uuid.normalizedString,
         reason: error.localizedDescription
       ))
-    } else {
-      // Mirrored from the configuration this manager built rather than from the callback's `CBService`,
-      // because only the configured instance is guaranteed to carry the characteristics — and it is
-      // matching those instances that lets `address(of:)` name a characteristic's service without
-      // relying on the weak back-pointer.
-      addedServices[service.uuid] = serviceConfiguration.first { $0.uuid == service.uuid }
-        ?? service as? CBMutableService
-        ?? CBMutableService(type: service.uuid, primary: service.isPrimary)
+      return
     }
 
-    // The set is no longer cleared on failure, so the siblings still registering are waited for rather
-    // than abandoned — which is what makes the unpublish below safe to schedule.
-    guard servicesAwaitingRegistration.isEmpty else { return }
-    // The round is over either way, so its bound goes with it.
-    cancelPublicationTimeout()
-    if registrationFailed {
-      publication = .failed
-      unpublishFailedRegistration()
-      // Before the waiters are flushed, because it reports only when nothing is waiting.
-      reportPublicationFailure(GattServerError.databaseNotPublished)
-      // Settled here rather than left parked for a re-publish that is not coming: nothing retries a
-      // failed registration, so the next state update is the only other thing that could release them.
-      flushReadinessWaiters(GattServerError.databaseNotPublished)
-    } else {
-      publication = .published
-      completeOpen(nil)
-      flushReadinessWaiters(nil)
+    // Mirrored from the configuration this manager built rather than from the callback's `CBService`,
+    // because only the configured instance is guaranteed to carry the characteristics — and it is
+    // matching those instances that lets `address(of:)` name a characteristic's service without
+    // relying on the weak back-pointer.
+    addedServices[service.uuid] = serviceConfiguration.first { $0.uuid == service.uuid }
+      ?? service as? CBMutableService
+      ?? CBMutableService(type: service.uuid, primary: service.isPrimary)
+
+    guard registrationQueue.isEmpty else {
+      addNextService(on: peripheral)
+      return
     }
+    // The round is over, so its bound goes with it.
+    cancelPublicationTimeout()
+    publication = .published
+    completeOpen(nil)
+    flushReadinessWaiters(nil)
   }
 
   /// Takes back the services a failed registration round did manage to publish, which otherwise stay in
@@ -1559,7 +1661,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
   private func unpublishFailedRegistration() {
     DispatchQueue.main.async { [weak self] in
       guard let self = self else { return }
-      guard self.registrationFailed,
+      guard self.registrationFailure != nil,
             self.servicesAwaitingRegistration.isEmpty,
             !self.databasePublished else { return }
       self.peripheralManager?.removeAllServices()
@@ -1752,28 +1854,39 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       registerPendingRequest(batchId, request: first, isRead: false, deferredValues: deferred)
     }
 
-    // Reported once per attribute, from offset 0 and carrying the value as assembled — the shape
-    // Android reports, rather than replaying the fragments the central happened to split the value
-    // into. Replaying them handed every fragment the batch's single `requestId`, so a long write to a
-    // delegated characteristic raised three events all claiming `responseNeeded`, and the second and
-    // third `sendResponse` rejected with `REQUEST_NOT_FOUND` after the first had answered the batch.
+    // A long write is reported once per attribute, from offset 0 and carrying the value as assembled —
+    // the shape Android reports, rather than replaying the fragments the central happened to split the
+    // value into. Replaying them handed every fragment the batch's single `requestId`, so a long write
+    // to a delegated characteristic raised three events all claiming `responseNeeded`, and the second
+    // and third `sendResponse` rejected with `REQUEST_NOT_FOUND` after the first had answered the batch.
     //
-    // Exactly one attribute is marked `responseNeeded`, because Apple's rule is one
+    // Independent writes the stack coalesced are reported *one event each*, because that is what they
+    // are: two Write Without Response commands to one characteristic are two writes, not two parts of
+    // one, and collapsing them by address dropped the earlier frame entirely — a peripheral receiving a
+    // stream of framed commands lost one frame per coalesced pair, silently, where Android delivered
+    // both. Each event carries the value that write left behind, which for an unqueued write is the
+    // value it wrote.
+    //
+    // Exactly one event is marked `responseNeeded`, because Apple's rule is one
     // `respond(to:withResult:)` per callback and the batch is answered as a unit — the answer covers
     // every attribute in it. A second delegated attribute still receives its event and can commit its
     // value with `updateCharacteristicValue`; it simply must not answer a second time.
-    let responder = addresses.first { delegated.contains($0) }
+    let queued = queuedWriteAddresses(fragments)
+    let responderIndex = addresses.firstIndex { delegated.contains($0) }
     var reported: Set<CharacteristicAddress> = []
-    for (request, address) in zip(requests, addresses) {
-      guard reported.insert(address).inserted else { continue }
+    for (index, (request, address)) in zip(requests, addresses).enumerated() {
+      let isQueued = queued.contains(address)
+      if isQueued, !reported.insert(address).inserted {
+        continue
+      }
       delegate?.onCharacteristicWriteRequest(
         deviceId: request.central.identifier.uuidString,
         requestId: batchId,
         serviceUuid: address.service.normalizedString,
         characteristicUuid: address.characteristic.normalizedString,
         offset: 0,
-        value: assembled[address] ?? Data(),
-        responseNeeded: address == responder
+        value: isQueued ? (assembled[address] ?? Data()) : (request.value ?? Data()),
+        responseNeeded: index == responderIndex
       )
     }
   }
