@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.ParcelUuid
+import android.os.SystemClock
 import android.util.Log
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -153,8 +154,26 @@ private const val PUBLICATION_TIMEOUT_MS = 30_000L
  */
 private const val NOTIFICATION_TIMEOUT_MS = 35_000L
 
+/**
+ * How long to wait before offering the stack an entry it refused as busy again.
+ *
+ * Short, because the refusal means the previous send is still in flight rather than that anything is
+ * wrong, and the entry is holding up its device's whole queue while it waits.
+ */
+private const val NOTIFICATION_BUSY_RETRY_MS = 50L
+
 open class GattServerException(val code: String, message: String) : Exception(message)
 class MtuException(code: String, message: String) : GattServerException(code, message)
+
+/**
+ * The stack refusing a send because it is still carrying the previous one — `ERROR_GATT_WRITE_REQUEST_BUSY`.
+ *
+ * Distinguished from every other refusal because it says nothing about the entry: the same payload
+ * offered a moment later is accepted. Settling it as a failure and moving on made one refusal fatal to
+ * the entire queue, since the next entry is offered while the stack is in exactly the state that
+ * produced it — see [NOTIFICATION_TIMEOUT_MS], which describes that sweep.
+ */
+class NotifyBusyException(message: String) : GattServerException("ERR_NOTIFY", message)
 
 data class CharacteristicAddress(val service: UUID, val characteristic: UUID)
 
@@ -422,7 +441,13 @@ class GattServerManager(
     val confirm: Boolean,
     val value: ByteArray,
     val onResult: (GattServerException?) -> Unit,
-  )
+  ) {
+    /**
+     * When to stop offering this entry to a stack that keeps refusing it as busy, as an uptime
+     * milliseconds reading. Zero until the first refusal. Read and written under the queue's monitor.
+     */
+    var busyDeadline = 0L
+  }
 
   /** Every field is read and written under the instance's own monitor. */
   private class NotificationQueue {
@@ -1896,6 +1921,10 @@ class GattServerManager(
         armNotificationTimeout(deviceId, queue, next)
         return
       }
+      // A busy stack has refused the offer, not the entry, so the entry goes back where it was rather
+      // than being failed — and the loop stops, because offering the next one now would be refused for
+      // exactly the same reason and take the whole backlog down with it.
+      if (error is NotifyBusyException && reparkBusyNotification(deviceId, queue, next)) return
       // Only the thread that still owns the entry may settle it: a disconnect or a stop can take it
       // during the dispatch and settle it first, and a second settle throws on a release build.
       val stillOurs = synchronized(queue) {
@@ -1909,6 +1938,37 @@ class GattServerManager(
       if (!stillOurs) return
       next.onResult(error)
     }
+  }
+
+  /**
+   * Puts an entry the stack refused as busy back at the head of its queue and schedules another attempt,
+   * reporting whether it did.
+   *
+   * `false` means the entry must be settled by the caller instead: either its budget is spent — bounded
+   * by [NOTIFICATION_TIMEOUT_MS], the same outer bound a send the stack accepted gets, so a device whose
+   * stack never frees up fails its sends rather than retrying for the life of the process — or something
+   * else has taken it already, in which case the caller's own ownership check declines to settle it too.
+   */
+  private fun reparkBusyNotification(
+    deviceId: String,
+    queue: NotificationQueue,
+    entry: QueuedNotification,
+  ): Boolean {
+    val now = SystemClock.uptimeMillis()
+    synchronized(queue) {
+      if (queue.inFlight !== entry) return false
+      if (entry.busyDeadline == 0L) {
+        entry.busyDeadline = now + NOTIFICATION_TIMEOUT_MS
+      }
+      if (now >= entry.busyDeadline) {
+        Log.w(TAG, "The stack has been busy for $NOTIFICATION_TIMEOUT_MS ms; failing the send to $deviceId")
+        return false
+      }
+      queue.inFlight = null
+      queue.waiting.addFirst(entry)
+    }
+    timeoutHandler.postDelayed({ pumpNotifications(deviceId) }, NOTIFICATION_BUSY_RETRY_MS)
+    return true
   }
 
   /**
@@ -2490,6 +2550,11 @@ class GattServerManager(
   ): GattServerException? {
     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
       val status = server.notifyCharacteristicChanged(device, characteristic, confirm, payload)
+      if (status == android.bluetooth.BluetoothStatusCodes.ERROR_GATT_WRITE_REQUEST_BUSY) {
+        return NotifyBusyException(
+          "The Bluetooth stack is still carrying the previous notification for this device"
+        )
+      }
       if (status != android.bluetooth.BluetoothStatusCodes.SUCCESS) {
         return GattServerException(
           "ERR_NOTIFY",
