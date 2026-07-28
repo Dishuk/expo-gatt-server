@@ -1,3 +1,11 @@
+/**
+ * Bytes accepted anywhere this module takes a value. A `Uint8Array` is converted to `number[]` at
+ * the boundary, since neither native bridge marshals typed arrays.
+ *
+ * Event payloads always come back as `number[]`.
+ */
+export type Bytes = number[] | Uint8Array;
+
 /** Opt-in delegation of ATT request handling to JavaScript. Defaults to automatic responses. */
 export interface CharacteristicDelegateConfig {
   /** Emit `onCharacteristicReadRequest` even when a value exists, for computed/dynamic reads. */
@@ -16,7 +24,7 @@ export interface GattCharacteristicConfig {
   properties: CharacteristicProperty[];
   permissions: CharacteristicPermission[];
   /** Value that reads are answered from. Omit to delegate all reads. `[]` is present but zero-length. */
-  value?: number[];
+  value?: Bytes;
   /** Additional descriptors beyond Client Characteristic Configuration. See `GattDescriptorConfig`. */
   descriptors?: GattDescriptorConfig[];
   /** Opt out of the module's automatic responses for this characteristic. */
@@ -36,7 +44,7 @@ export const CLIENT_CHARACTERISTIC_CONFIGURATION_UUID = '00002902-0000-1000-8000
 export interface GattDescriptorConfig {
   uuid: string;
   /** Required and immutable once published. For 0x2901, must be valid UTF-8. */
-  value: number[];
+  value: Bytes;
   /** Android only, defaults to `['readable']`. Ignored on iOS. */
   permissions?: CharacteristicPermission[];
 }
@@ -99,6 +107,15 @@ export interface CreateServerOptions {
 
 export interface SendNotificationOptions {
   /**
+   * Send an indication instead of a notification. Defaults to `false`. The characteristic must
+   * declare the matching property (Core Spec Vol 3, Part G, Table 3.5) or the call rejects with
+   * `ERR_CONFIRM_UNSUPPORTED`.
+   *
+   * iOS never receives this: `updateValue(_:for:onSubscribedCentrals:)` has no confirm parameter and
+   * CoreBluetooth decides from the declared properties alone.
+   */
+  confirm?: boolean;
+  /**
    * Reject with `ERR_NO_SUBSCRIBER` if not subscribed to this transmission mode.
    * Defaults to `true`. Android checks CCCD bits; iOS checks subscription state only.
    */
@@ -114,13 +131,13 @@ export type AdvertisingTxPower = 'ultraLow' | 'low' | 'medium' | 'high';
 /** Android only; rejected on iOS with `ERR_UNSUPPORTED`. */
 export interface ManufacturerDataEntry {
   companyId: number;
-  data: number[];
+  data: Bytes;
 }
 
 /** Android only; rejected on iOS with `ERR_UNSUPPORTED`. Use 16-bit UUID for portability. */
 export interface ServiceDataEntry {
   uuid: string;
-  data: number[];
+  data: Bytes;
 }
 
 /** Android-only options. Ignored on iOS. */

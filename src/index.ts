@@ -6,6 +6,7 @@ import {
   MAX_ATTRIBUTE_VALUE_LENGTH,
 } from './ExpoGattServer.types';
 import type {
+  Bytes,
   GattServiceConfig,
   GattServiceType,
   GattCharacteristicConfig,
@@ -36,6 +37,7 @@ import ExpoGattServerModule, { type ExpoGattServerModuleType } from './ExpoGattS
 export type { EventSubscription };
 
 export {
+  type Bytes,
   type GattServiceConfig,
   type GattServiceType,
   type CreateServerOptions,
@@ -162,10 +164,18 @@ function normalizeUuid(uuid: unknown, field: string): string {
   return lower.padStart(8, '0') + BLUETOOTH_BASE_UUID.slice(8);
 }
 
-function assertValidBytes(value: unknown, field: string): void {
+/**
+ * Validates bytes and returns them as `number[]`, the only form either native bridge accepts.
+ * A `Uint8Array` is converted here rather than rejected: it is the natural container for binary
+ * data, and expo-modules-core does not marshal it as a number array.
+ */
+function toByteArray(value: unknown, field: string): number[] {
+  if (value instanceof Uint8Array) {
+    return Array.from(value);
+  }
   if (!Array.isArray(value)) {
     throw new Error(
-      `Invalid ${field} value ${JSON.stringify(value)}. Expected an array of byte values.`,
+      `Invalid ${field} value ${JSON.stringify(value)}. Expected an array of byte values or a Uint8Array.`,
     );
   }
   for (const [index, byte] of value.entries()) {
@@ -176,15 +186,15 @@ function assertValidBytes(value: unknown, field: string): void {
       );
     }
   }
+  return value as number[];
 }
 
 /**
  * Enforces MAX_ATTRIBUTE_VALUE_LENGTH. Core Spec Vol 3, Part F, §3.2.9.
  * Platforms cap notifications but do not bound app-supplied values; every path through here.
  */
-function assertValidAttributeValue(value: unknown, field: string): void {
-  assertValidBytes(value, field);
-  const bytes = value as number[];
+function toAttributeValue(value: unknown, field: string): number[] {
+  const bytes = toByteArray(value, field);
   if (bytes.length > MAX_ATTRIBUTE_VALUE_LENGTH) {
     throw new Error(
       `Invalid ${field} value of ${bytes.length} bytes. An attribute value may hold at most ` +
@@ -192,6 +202,7 @@ function assertValidAttributeValue(value: unknown, field: string): void {
         'could never be notified or read in a single response.',
     );
   }
+  return bytes;
 }
 
 /**
@@ -343,7 +354,7 @@ const ADVERTISE_KEYS = [
 const ANDROID_ADVERTISE_KEYS = ['includeDeviceName', 'setAdapterName'] as const;
 const MANUFACTURER_DATA_KEYS = ['companyId', 'data'] as const;
 const SERVICE_DATA_KEYS = ['uuid', 'data'] as const;
-const SEND_NOTIFICATION_KEYS = ['requireSubscription'] as const;
+const SEND_NOTIFICATION_KEYS = ['confirm', 'requireSubscription'] as const;
 
 function normalizeCharacteristic(
   characteristic: GattCharacteristicConfig,
@@ -356,9 +367,10 @@ function normalizeCharacteristic(
     CHARACTERISTIC_PERMISSIONS,
     'characteristic permission',
   );
-  if (characteristic.value !== undefined) {
-    assertValidAttributeValue(characteristic.value, 'characteristic');
-  }
+  const value =
+    characteristic.value === undefined
+      ? undefined
+      : toAttributeValue(characteristic.value, 'characteristic');
   assertValidDelegate(characteristic?.delegate, uuid);
   assertArrayOrAbsent(characteristic.descriptors, 'characteristic descriptors');
   const descriptors = characteristic.descriptors?.map((descriptor) => {
@@ -373,13 +385,14 @@ function normalizeCharacteristic(
       );
     }
     assertNoUnknownKeys(descriptor, DESCRIPTOR_KEYS, 'descriptor');
-    assertValidAttributeValue(descriptor?.value, 'descriptor');
+    const descriptorValue = toAttributeValue(descriptor?.value, 'descriptor');
     if (descriptor.permissions !== undefined) {
       assertEachOneOf(descriptor.permissions, CHARACTERISTIC_PERMISSIONS, 'descriptor permission');
     }
-    return { ...descriptor, uuid: descriptorUuid };
+    return { ...descriptor, uuid: descriptorUuid, value: descriptorValue };
   });
-  return descriptors ? { ...characteristic, uuid, descriptors } : { ...characteristic, uuid };
+  const normalized = { ...characteristic, uuid, ...(value !== undefined && { value }) };
+  return descriptors ? { ...normalized, descriptors } : normalized;
 }
 
 /**
@@ -609,7 +622,7 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
     }
   }
   assertArrayOrAbsent(config.manufacturerData, 'advertising manufacturerData');
-  for (const entry of config.manufacturerData ?? []) {
+  const manufacturerData = config.manufacturerData?.map((entry) => {
     // Bluetooth SIG Company Identifier is 16-bit; Android rejects only negatives natively.
     if (!Number.isInteger(entry?.companyId) || entry.companyId < 0 || entry.companyId > 0xffff) {
       throw new Error(
@@ -618,14 +631,13 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
       );
     }
     assertNoUnknownKeys(entry, MANUFACTURER_DATA_KEYS, 'manufacturer data');
-    assertValidBytes(entry.data, 'manufacturer');
-  }
+    return { ...entry, data: toByteArray(entry.data, 'manufacturer') };
+  });
   assertArrayOrAbsent(config.serviceData, 'advertising serviceData');
   const serviceData = config.serviceData?.map((entry) => {
     const uuid = normalizeUuid(entry?.uuid, 'service data');
     assertNoUnknownKeys(entry, SERVICE_DATA_KEYS, 'service data');
-    assertValidBytes(entry.data, 'service data');
-    return { ...entry, uuid };
+    return { ...entry, uuid, data: toByteArray(entry.data, 'service data') };
   });
   if (Platform.OS === 'ios') {
     // Warn rather than reject: iOS cannot express mode/txPowerLevel/includeTxPowerLevel.
@@ -649,7 +661,12 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
   // Claim here, not on entry, so only validated calls reach native and take ownership.
   const generation = ++advertisingStartEpoch;
   try {
-    await nativeModule().startAdvertising({ ...config, serviceUuids, serviceData });
+    await nativeModule().startAdvertising({
+      ...config,
+      serviceUuids,
+      serviceData,
+      manufacturerData,
+    });
   } finally {
     if (advertisingStopEpoch !== epoch && advertisingStartEpoch === generation) {
       // If stop came in while start was in flight, stop again now (out-of-order detection).
@@ -682,27 +699,31 @@ export async function sendNotification(
   deviceId: string,
   serviceUuid: string,
   characteristicUuid: string,
-  value: number[],
-  confirm: boolean = false,
+  value: Bytes,
   options: SendNotificationOptions = {},
 ): Promise<void> {
-  assertValidBytes(value, 'notification');
-  assertNoUnknownKeys(options, SEND_NOTIFICATION_KEYS, 'sendNotification');
-  if (
-    options.requireSubscription !== undefined &&
-    typeof options.requireSubscription !== 'boolean'
-  ) {
+  const bytes = toByteArray(value, 'notification');
+  // `confirm` used to be a positional fifth argument; name the move rather than failing on "unknown
+  // options object", which does not say what to change.
+  if (typeof options === 'boolean') {
     throw new Error(
-      `Invalid sendNotification option requireSubscription ` +
-        `${JSON.stringify(options.requireSubscription)}. Expected a boolean.`,
+      '[expo-gatt-server] sendNotification no longer takes `confirm` as a positional argument. ' +
+        `Pass { confirm: ${options} } as the fifth argument instead.`,
     );
   }
+  assertNoUnknownKeys(options, SEND_NOTIFICATION_KEYS, 'sendNotification');
+  assertTypeOrAbsent(options.confirm, 'sendNotification option confirm', 'boolean');
+  assertTypeOrAbsent(
+    options.requireSubscription,
+    'sendNotification option requireSubscription',
+    'boolean',
+  );
   return nativeModule().sendNotification(
     deviceId,
     normalizeUuid(serviceUuid, 'service'),
     normalizeUuid(characteristicUuid, 'characteristic'),
-    value,
-    confirm,
+    bytes,
+    options.confirm ?? false,
     options.requireSubscription ?? true,
   );
 }
@@ -718,7 +739,7 @@ export async function sendResponse(
   requestId: number,
   status: number,
   offset: number,
-  value: number[],
+  value: Bytes,
 ): Promise<void> {
   // Validate all three: requestId NaN traps on iOS; status wider than byte truncates on Android.
   assertValidInteger(
@@ -736,8 +757,13 @@ export async function sendResponse(
     0xffff,
     'An ATT offset is an unsigned 16-bit value.',
   );
-  assertValidBytes(value, 'response');
-  return nativeModule().sendResponse(deviceId, requestId, status, offset, value);
+  return nativeModule().sendResponse(
+    deviceId,
+    requestId,
+    status,
+    offset,
+    toByteArray(value, 'response'),
+  );
 }
 
 /**
@@ -747,13 +773,12 @@ export async function sendResponse(
 export async function updateCharacteristicValue(
   serviceUuid: string,
   characteristicUuid: string,
-  value: number[],
+  value: Bytes,
 ): Promise<void> {
-  assertValidAttributeValue(value, 'characteristic');
   return nativeModule().updateCharacteristicValue(
     normalizeUuid(serviceUuid, 'service'),
     normalizeUuid(characteristicUuid, 'characteristic'),
-    value,
+    toAttributeValue(value, 'characteristic'),
   );
 }
 

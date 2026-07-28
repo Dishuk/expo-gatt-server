@@ -33,6 +33,19 @@ Complete reference for all exported functions, types, events, and constants.
 - [Constants](#constants)
 - [Error Codes](#error-codes)
 
+## Byte values
+
+Everywhere this API takes bytes -- a characteristic or descriptor `value`, a `sendNotification` or
+`sendResponse` payload, `updateCharacteristicValue`, `ManufacturerDataEntry.data`,
+`ServiceDataEntry.data` -- the type is `Bytes`:
+
+```typescript
+type Bytes = number[] | Uint8Array;
+```
+
+A `Uint8Array` is converted to `number[]` in the shared TypeScript layer, because neither native
+bridge marshals typed arrays. Event payloads always come back as `number[]`.
+
 ## UUID forms
 
 Every UUID this API accepts may be written in any of the three forms the Bluetooth Core Specification
@@ -367,8 +380,7 @@ sendNotification(
   deviceId: string,
   serviceUuid: string,
   characteristicUuid: string,
-  value: number[],
-  confirm?: boolean,
+  value: Bytes,
   options?: SendNotificationOptions,
 ): Promise<void>
 ```
@@ -380,11 +392,14 @@ Send a notification or indication to a connected central.
 | `deviceId` | `string` | -- | Target device identifier |
 | `serviceUuid` | `string` | -- | Service containing the characteristic |
 | `characteristicUuid` | `string` | -- | Characteristic to update |
-| `value` | `number[]` | -- | Byte array payload |
-| `confirm` | `boolean` | `false` | `true` for indication (acknowledged), `false` for notification |
+| `value` | `Bytes` | -- | `number[]` or `Uint8Array` payload |
+| `options.confirm` | `boolean` | `false` | `true` for indication (acknowledged), `false` for notification |
 | `options.requireSubscription` | `boolean` | `true` | Refuse the send when the device has not subscribed |
 
-#### `confirm`: notification or indication
+> `confirm` was a positional fifth argument and is now an option. A boolean passed in that position
+> throws and names the replacement.
+
+#### `options.confirm`: notification or indication
 
 An indication is acknowledged -- the central must reply with an `ATT_HANDLE_VALUE_CFM` and "no
 further indications to this client shall occur until the confirmation has been received by the
@@ -393,8 +408,8 @@ server" (Vol 3, Part F, Section 3.4.7.2). A notification is fire-and-forget (Sec
 The characteristic must declare the property that matches, or the call rejects with
 `ERR_CONFIRM_UNSUPPORTED`:
 
-| `confirm` | Required `properties` entry |
-|-----------|------------------------------|
+| `options.confirm` | Required `properties` entry |
+|-------------------|------------------------------|
 | `true` | `'indicate'` |
 | `false` | `'notify'` |
 
@@ -511,7 +526,7 @@ sendResponse(
   requestId: number,
   status: number,
   offset: number,
-  value: number[],
+  value: Bytes,
 ): Promise<void>
 ```
 
@@ -581,7 +596,7 @@ read request bearing an offset -- so answering with more than fits is normal ATT
 updateCharacteristicValue(
   serviceUuid: string,
   characteristicUuid: string,
-  value: number[],
+  value: Bytes,
 ): Promise<void>
 ```
 
@@ -1308,7 +1323,7 @@ interface GattCharacteristicConfig {
   uuid: string;
   properties: CharacteristicProperty[];
   permissions: CharacteristicPermission[];
-  value?: number[];
+  value?: Bytes;
   descriptors?: GattDescriptorConfig[];
   delegate?: CharacteristicDelegateConfig;
 }
@@ -1371,7 +1386,7 @@ Both behave identically on Android and iOS, with three notes:
 ```typescript
 interface GattDescriptorConfig {
   uuid: string;
-  value: number[];
+  value: Bytes;
   permissions?: CharacteristicPermission[];
 }
 ```
@@ -1589,7 +1604,7 @@ Platform-neutral names for `AdvertiseSettings.ADVERTISE_TX_POWER_*`. Ignored on 
 ```typescript
 interface ManufacturerDataEntry {
   companyId: number;
-  data: number[];
+  data: Bytes;
 }
 ```
 
@@ -1600,7 +1615,7 @@ interface ManufacturerDataEntry {
 ```typescript
 interface ServiceDataEntry {
   uuid: string;
-  data: number[];
+  data: Bytes;
 }
 ```
 

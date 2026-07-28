@@ -200,7 +200,7 @@ export default function App() {
     if (!deviceId) {
       throw new Error('no connected device');
     }
-    return sendNotification(deviceId, SERVICE_UUID, CHARACTERISTIC_UUID, [0, counter], false);
+    return sendNotification(deviceId, SERVICE_UUID, CHARACTERISTIC_UUID, [0, counter]);
   }, [deviceId]);
 
   // Kept as data rather than inline JSX so every cell of the grid is laid out identically, and so the

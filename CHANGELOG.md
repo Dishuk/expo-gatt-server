@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Uint8Array` is accepted anywhere bytes are taken.** A characteristic or descriptor `value`, a
+  `sendNotification` or `sendResponse` payload, `updateCharacteristicValue`,
+  `ManufacturerDataEntry.data` and `ServiceDataEntry.data` now take the exported `Bytes` type
+  (`number[] | Uint8Array`). It used to be `number[]` only, and a `Uint8Array` — the natural container
+  for binary data — was rejected outright, so every call site paid an `Array.from()`. The conversion
+  happens in the shared TypeScript layer, since neither native bridge marshals typed arrays. Event
+  payloads still come back as `number[]`.
+
 - **`addServerPublicationFailedListener`.** The module re-publishes the services on every transition to
   `poweredOn` / `STATE_ON`, and until now a re-publication that *failed* reported to nobody: by then
   `createServer` had resolved, so no promise was left to reject, and only a `startAdvertising` parked at
@@ -209,6 +217,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LICENSE` file
 
 ### Changed
+
+- **Breaking: `sendNotification` takes `confirm` as an option, not a positional argument.** The
+  signature was six parameters ending in a positional boolean followed by an options object; it is now
+  `sendNotification(deviceId, serviceUuid, characteristicUuid, value, options?)` with `confirm` and
+  `requireSubscription` both in `options`. A boolean passed in the old fifth position throws and names
+  the replacement rather than being read as a malformed options object.
 
 - **Breaking (iOS): a delegated long write raises one event per attribute, not one per fragment.**
   `onCharacteristicWriteRequest` now carries the value as assembled at `offset: 0` — the shape Android

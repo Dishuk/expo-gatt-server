@@ -42,7 +42,6 @@ describe('what counts as a byte', () => {
   it.each([
     ['a string', 'abc'],
     ['null', null],
-    ['a Uint8Array', new Uint8Array([1, 2])],
   ])('rejects %s in place of the array', async (_case, value) => {
     await expect(reject(value)).rejects.toThrow(/Expected an array of byte values/);
   });
@@ -50,6 +49,39 @@ describe('what counts as a byte', () => {
   it('accepts the 0 and 255 boundaries, and an empty array', async () => {
     await expect(reject([0, 255])).resolves.toBeUndefined();
     await expect(reject([])).resolves.toBeUndefined();
+  });
+
+  it('converts a Uint8Array in a characteristic and descriptor configuration too', async () => {
+    await createServer([
+      {
+        uuid: SERVICE,
+        characteristics: [
+          {
+            uuid: CHARACTERISTIC,
+            properties: ['read'],
+            permissions: ['readable'],
+            value: new Uint8Array([7, 8]),
+            descriptors: [{ uuid: '2901', value: new Uint8Array([9]) }],
+          },
+        ],
+      },
+    ]);
+
+    const [services] = nativeModuleMock.createServer.mock.calls.at(-1)!;
+    expect(services[0].characteristics[0].value).toEqual([7, 8]);
+    expect(services[0].characteristics[0].descriptors[0].value).toEqual([9]);
+  });
+
+  it('accepts a Uint8Array and hands the native module a plain array', async () => {
+    await expect(reject(new Uint8Array([1, 2, 255]))).resolves.toBeUndefined();
+    expect(nativeModuleMock.sendNotification).toHaveBeenLastCalledWith(
+      'AA:BB',
+      SERVICE,
+      CHARACTERISTIC,
+      [1, 2, 255],
+      false,
+      true,
+    );
   });
 
   it('reports the offending byte, its index and the field it belongs to', async () => {

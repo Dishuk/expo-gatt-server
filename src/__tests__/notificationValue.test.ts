@@ -34,7 +34,8 @@ describe('sendNotification and updateCharacteristicValue as separate wrapper cal
 
   // `toHaveBeenCalledWith` is exact on arity, so this also pins that no extra argument rides along.
   it('forwards exactly the six documented arguments, so no value-mirroring flag is smuggled in', async () => {
-    await sendNotification(DEVICE, SERVICE, CHARACTERISTIC, [1], true, {
+    await sendNotification(DEVICE, SERVICE, CHARACTERISTIC, [1], {
+      confirm: true,
       requireSubscription: false,
     });
 

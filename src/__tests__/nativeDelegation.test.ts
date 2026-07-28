@@ -182,7 +182,10 @@ describe('argument forwarding', () => {
   });
 
   it('forwards the notification arguments in the order the native module declares', async () => {
-    await sendNotification('AA:BB', '180d', '2a37', [1, 2], true, { requireSubscription: false });
+    await sendNotification('AA:BB', '180d', '2a37', [1, 2], {
+      confirm: true,
+      requireSubscription: false,
+    });
 
     expect(nativeModuleMock.sendNotification).toHaveBeenCalledWith(
       'AA:BB',
