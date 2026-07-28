@@ -57,18 +57,32 @@ src/                          # TypeScript source (public API)
 
 ios/                          # iOS native implementation (Swift)
 ├── ExpoGattServer.podspec    # CocoaPods spec
-├── ExpoGattServerModule.swift  # Expo binding: parses configs, emits events
-└── GattServerManager.swift     # CoreBluetooth peripheral, and the ATT logic
+├── ExpoGattServerModule.swift    # Expo binding: parses configs, emits events
+├── GattServerManager.swift       # CoreBluetooth peripheral: publication and ATT routing
+├── AdvertisingCoordinator.swift  # The radio, and the promise waiting on it
+├── NotificationQueue.swift       # Sends CoreBluetooth's transmit queue refused
+├── PendingRequestStore.swift     # Requests handed to JavaScript, and their expiries
+├── WriteBatch.swift              # Write assembly and response rebasing, stateless
+├── GattServerError.swift         # The rejection codes, which are public API
+├── GattTypes.swift               # Shared constants, addresses, MTU, UUID spelling
+└── GattConfigurationParsing.swift  # Configuration decoding, free of ExpoModulesCore
 
 android/                      # Android native implementation (Kotlin)
 ├── build.gradle
 └── src/main/
     ├── AndroidManifest.xml
     └── java/expo/modules/gattserver/
-        ├── ExpoGattServerModule.kt  # Expo binding: bridge arguments, permissions, events
-        ├── GattConfiguration.kt     # What a configuration means, free of any Expo import
-        ├── AttOperations.kt         # ATT arithmetic, free of the Android framework
-        └── GattServerManager.kt     # BluetoothGatt server and its state
+        ├── ExpoGattServerModule.kt   # Expo binding: bridge arguments, permissions, events
+        ├── GattServerManager.kt      # BluetoothGatt server: publication and ATT routing
+        ├── AdvertisingController.kt  # The radio, the adapter name, and the start bounds
+        ├── NotificationDispatcher.kt # Per-device send queues and their bounds
+        ├── PreparedWriteQueue.kt     # The queued-write procedure and its atomic execute
+        ├── AttributeStore.kt         # Mirrored attribute values and the monitor guarding them
+        ├── SubscriptionRegistry.kt   # Per-client CCCD state
+        ├── BluetoothAvailability.kt  # Adapter state, normalised to the shared union
+        ├── GattConfiguration.kt      # What a configuration means, free of any Expo import
+        ├── AttOperations.kt          # ATT arithmetic, free of the Android framework
+        └── GattLog.kt                # The debug-log tag and its gate
 
 plugin/src/                   # Expo config plugin (built to plugin/build/)
 ├── index.ts                  # Entry point, options and their defaults
@@ -95,9 +109,13 @@ jest.config.js                # Runs one Jest project, not one per platform — 
 |------|------|
 | `index.ts` | The shared layer: UUID normalisation, argument validation, graceful degradation when the native module is absent |
 | `ExpoGattServerModule.swift/.kt` | Expo module definition -- reads bridge arguments, checks permissions, emits events |
-| `GattConfiguration.kt` | What a configuration turns into: attributes, properties, permissions, delegation |
-| `AttOperations.kt` | Write assembly, response rebasing, CCCD bits, MTU and transmission checks |
-| `GattServerManager.swift/.kt` | Owns the native BLE peripheral -- all Bluetooth state lives here |
+| `GattConfiguration.kt` / `GattConfigurationParsing.swift` | What a configuration turns into: attributes, properties, permissions, delegation |
+| `AttOperations.kt` / `WriteBatch.swift` | Write assembly, response rebasing, CCCD bits, MTU and transmission checks. Stateless, so these are what the host suites exercise |
+| `GattServerManager.swift/.kt` | Owns the native BLE peripheral: publishes the database, routes every ATT callback, and holds the connection state |
+| `AdvertisingCoordinator.swift` / `AdvertisingController.kt` | Everything about the radio: the advertisement, its start and airtime bounds, and (Android) the adapter name |
+| `NotificationQueue.swift` / `NotificationDispatcher.kt` | Keeps at most one send outstanding per link and settles each on the platform's own callback |
+| `PendingRequestStore.swift` | Requests handed to JavaScript, with the expiry that answers one JavaScript never does |
+| `AttributeStore.kt` | The mirrored attribute values and the single monitor guarding them. iOS keeps its equivalent in the manager, being main-queue only |
 | `ExpoGattServer.types.ts` | Single source of truth for the TypeScript API surface |
 | `expo-module.config.json` | Tells Expo which native classes to load per platform |
 
@@ -127,9 +145,11 @@ Concurrency (lock ordering, notification settling, state machines) is reviewed b
 
 ### Running the native suites
 
-`swift test` uses the root `Package.swift`, which compiles `ios/GattServerManager.swift` on its own --
-it imports nothing but CoreBluetooth, which macOS provides. The package is test-only; apps get the
-module through the podspec and Expo autolinking, and it is excluded from the npm tarball.
+`swift test` uses the root `Package.swift`, which compiles everything in `ios/` except
+`ExpoGattServerModule.swift` -- the rest imports nothing but CoreBluetooth, which macOS provides. The
+target lists exclusions rather than sources, so a new file is covered without being registered anywhere.
+The package is test-only; apps get the module through the podspec and Expo autolinking, and it is
+excluded from the npm tarball.
 
 `npm run test:android` runs `tests/android/`, a standalone Gradle project that compiles the module's
 Kotlin sources in place. It exists separately from `android/build.gradle` because that build is driven

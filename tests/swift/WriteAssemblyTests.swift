@@ -9,20 +9,6 @@ import XCTest
 /// to treat every fragment at offset 0 as a whole-value replacement, truncating an attribute that a
 /// long write did not fully cover.
 final class WriteAssemblyTests: XCTestCase {
-  private var manager: GattServerManager!
-
-  override func setUp() {
-    super.setUp()
-    // Safe to build off-device: the initialiser only stores the timeout. `CBPeripheralManager` is not
-    // created until `open`, which these tests never call.
-    manager = GattServerManager()
-  }
-
-  override func tearDown() {
-    manager = nil
-    super.tearDown()
-  }
-
   private func data(_ bytes: [UInt8]) -> Data { Data(bytes) }
 
   // MARK: - Unqueued ATT_WRITE_REQ
@@ -32,26 +18,26 @@ final class WriteAssemblyTests: XCTestCase {
   func testUnqueuedWriteTruncatesALongerAttribute() {
     let current = data([1, 2, 3, 4, 5])
 
-    let result = manager.spliced(current, offset: 0, part: data([9, 9]), queued: false)
+    let result = spliced(current, offset: 0, part: data([9, 9]), queued: false)
 
     XCTAssertEqual(result, data([9, 9]))
   }
 
   func testUnqueuedWriteLengthensAShorterAttribute() {
-    let result = manager.spliced(data([1]), offset: 0, part: data([1, 2, 3]), queued: false)
+    let result = spliced(data([1]), offset: 0, part: data([1, 2, 3]), queued: false)
 
     XCTAssertEqual(result, data([1, 2, 3]))
   }
 
   /// A zero-length write is a present but empty attribute, not an absent one.
   func testUnqueuedEmptyWriteEmptiesTheAttribute() {
-    let result = manager.spliced(data([1, 2, 3]), offset: 0, part: Data(), queued: false)
+    let result = spliced(data([1, 2, 3]), offset: 0, part: Data(), queued: false)
 
     XCTAssertEqual(result, Data())
   }
 
   func testUnqueuedWriteOntoAnEmptyAttribute() {
-    let result = manager.spliced(Data(), offset: 0, part: data([7]), queued: false)
+    let result = spliced(Data(), offset: 0, part: data([7]), queued: false)
 
     XCTAssertEqual(result, data([7]))
   }
@@ -63,7 +49,7 @@ final class WriteAssemblyTests: XCTestCase {
   func testQueuedPartAtOffsetZeroKeepsTheTail() {
     let current = data([1, 2, 3, 4, 5])
 
-    let result = manager.spliced(current, offset: 0, part: data([9, 9]), queued: true)
+    let result = spliced(current, offset: 0, part: data([9, 9]), queued: true)
 
     XCTAssertEqual(result, data([9, 9, 3, 4, 5]))
   }
@@ -71,44 +57,44 @@ final class WriteAssemblyTests: XCTestCase {
   func testQueuedPartKeepsBothSidesOfTheFragment() {
     let current = data([1, 2, 3, 4, 5])
 
-    let result = manager.spliced(current, offset: 1, part: data([8]), queued: true)
+    let result = spliced(current, offset: 1, part: data([8]), queued: true)
 
     XCTAssertEqual(result, data([1, 8, 3, 4, 5]))
   }
 
   /// An offset exactly at the end appends, which is what every long write after the first part does.
   func testQueuedPartAtTheEndAppends() {
-    let result = manager.spliced(data([1, 2]), offset: 2, part: data([3, 4]), queued: true)
+    let result = spliced(data([1, 2]), offset: 2, part: data([3, 4]), queued: true)
 
     XCTAssertEqual(result, data([1, 2, 3, 4]))
   }
 
   func testQueuedPartMayExtendPastTheCurrentEnd() {
-    let result = manager.spliced(data([1, 2]), offset: 1, part: data([8, 9, 10]), queued: true)
+    let result = spliced(data([1, 2]), offset: 1, part: data([8, 9, 10]), queued: true)
 
     XCTAssertEqual(result, data([1, 8, 9, 10]))
   }
 
   /// "Invalid Offset" — Core Spec Vol 3, Part F, §3.4.6.3. `nil` is how this reports it.
   func testOffsetPastTheEndIsRejected() {
-    XCTAssertNil(manager.spliced(data([1, 2]), offset: 3, part: data([9]), queued: true))
-    XCTAssertNil(manager.spliced(Data(), offset: 1, part: data([9]), queued: true))
+    XCTAssertNil(spliced(data([1, 2]), offset: 3, part: data([9]), queued: true))
+    XCTAssertNil(spliced(Data(), offset: 1, part: data([9]), queued: true))
   }
 
   func testOffsetExactlyAtTheEndIsInRange() {
-    XCTAssertNotNil(manager.spliced(data([1, 2]), offset: 2, part: data([9]), queued: true))
+    XCTAssertNotNil(spliced(data([1, 2]), offset: 2, part: data([9]), queued: true))
   }
 
   // MARK: - Recognising the procedure
 
   func testALoneFragmentAtOffsetZeroReadsAsAnUnqueuedWrite() {
-    XCTAssertFalse(manager.isQueuedWriteBatch(offsets: [0]))
+    XCTAssertFalse(isQueuedWriteBatch(offsets: [0]))
   }
 
   /// A long write's parts carry advancing offsets, so more than one part always brings a non-zero one
   /// with it. The decision rests on that offset, never on the count — see the case below.
   func testAdvancingOffsetsNameAQueuedWrite() {
-    XCTAssertTrue(manager.isQueuedWriteBatch(offsets: [0, 4]))
+    XCTAssertTrue(isQueuedWriteBatch(offsets: [0, 4]))
   }
 
   /// The regression this rule was rewritten for. Two Write Without Response commands to one
@@ -117,17 +103,17 @@ final class WriteAssemblyTests: XCTestCase {
   /// the queued splice then preserved the octets past each one, leaving a stale tail where Android
   /// replaced the value outright.
   func testTwoPartsAtOffsetZeroAreNotAQueuedWrite() {
-    XCTAssertFalse(manager.isQueuedWriteBatch(offsets: [0, 0]))
+    XCTAssertFalse(isQueuedWriteBatch(offsets: [0, 0]))
   }
 
   /// A single `ATT_WRITE_REQ` carries no offset field at all, so a non-zero one names a queued write
   /// even on its own.
   func testANonZeroOffsetCanOnlyBeAQueuedWrite() {
-    XCTAssertTrue(manager.isQueuedWriteBatch(offsets: [4]))
+    XCTAssertTrue(isQueuedWriteBatch(offsets: [4]))
   }
 
   func testAnEmptyBatchIsNotAQueuedWrite() {
-    XCTAssertFalse(manager.isQueuedWriteBatch(offsets: []))
+    XCTAssertFalse(isQueuedWriteBatch(offsets: []))
   }
 
   /// The decision that drives both the assembly and the reporting, so the two can never disagree about
@@ -139,11 +125,11 @@ final class WriteAssemblyTests: XCTestCase {
     let streamed = CharacteristicAddress(
       service: CBUUID(string: "180F"), characteristic: CBUUID(string: "2A19")
     )
-    let queued = manager.queuedWriteAddresses([
-      GattServerManager.WriteFragment(address: long, offset: 0, value: Data([1])),
-      GattServerManager.WriteFragment(address: long, offset: 1, value: Data([2])),
-      GattServerManager.WriteFragment(address: streamed, offset: 0, value: Data([3])),
-      GattServerManager.WriteFragment(address: streamed, offset: 0, value: Data([4])),
+    let queued = queuedWriteAddresses([
+      WriteFragment(address: long, offset: 0, value: Data([1])),
+      WriteFragment(address: long, offset: 1, value: Data([2])),
+      WriteFragment(address: streamed, offset: 0, value: Data([3])),
+      WriteFragment(address: streamed, offset: 0, value: Data([4])),
     ])
 
     XCTAssertEqual(queued, [long])
@@ -157,9 +143,9 @@ final class WriteAssemblyTests: XCTestCase {
   /// Drives the real assembly `didReceiveWrite` uses, rather than a copy of it. `assembleWriteBatch`
   /// takes plain fragments because `CBATTRequest` has no public initialiser.
   private func assemble(current: Data, fragments: [(offset: Int, bytes: [UInt8])]) -> Data? {
-    manager.assembleWriteBatch(
+    assembleWriteBatch(
       fragments.map {
-        GattServerManager.WriteFragment(
+        WriteFragment(
           address: address, offset: $0.offset, value: data($0.bytes)
         )
       },
@@ -243,17 +229,16 @@ final class WriteAssemblyTests: XCTestCase {
 /// Two attributes written in one callback, which the batch-wide heuristic used to conflate.
 extension WriteAssemblyTests {
   func testEachAttributeGetsItsOwnQueuedWriteDecision() {
-    let manager = GattServerManager(requestTimeoutMs: 1000)
     // Two coalesced commands, each a lone part at offset 0: neither is a queued write, both truncate.
     let fragments = [
-      GattServerManager.WriteFragment(
+      WriteFragment(
         address: CharacteristicAddress(
           service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
         ),
         offset: 0,
         value: Data([9, 9])
       ),
-      GattServerManager.WriteFragment(
+      WriteFragment(
         address: CharacteristicAddress(
           service: CBUUID(string: "180F"), characteristic: CBUUID(string: "2A19")
         ),
@@ -266,7 +251,7 @@ extension WriteAssemblyTests {
       fragments[1].address: Data([1, 2, 3, 4, 5]),
     ]
 
-    let assembled = manager.assembleWriteBatch(fragments, current: current)
+    let assembled = assembleWriteBatch(fragments, current: current)
 
     XCTAssertEqual(assembled?[fragments[0].address], Data([9, 9]))
     XCTAssertEqual(assembled?[fragments[1].address], Data([8, 8]))
@@ -275,7 +260,6 @@ extension WriteAssemblyTests {
   /// A genuine long write to one attribute is still read as queued when another attribute shares the
   /// callback, so the fix does not cost the case it was protecting.
   func testAGenuineLongWriteIsStillQueuedAlongsideAnotherAttribute() {
-    let manager = GattServerManager(requestTimeoutMs: 1000)
     let long = CharacteristicAddress(
       service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
     )
@@ -283,12 +267,12 @@ extension WriteAssemblyTests {
       service: CBUUID(string: "180F"), characteristic: CBUUID(string: "2A19")
     )
     let fragments = [
-      GattServerManager.WriteFragment(address: long, offset: 0, value: Data([10, 11])),
-      GattServerManager.WriteFragment(address: long, offset: 2, value: Data([12, 13])),
-      GattServerManager.WriteFragment(address: other, offset: 0, value: Data([7])),
+      WriteFragment(address: long, offset: 0, value: Data([10, 11])),
+      WriteFragment(address: long, offset: 2, value: Data([12, 13])),
+      WriteFragment(address: other, offset: 0, value: Data([7])),
     ]
 
-    let assembled = manager.assembleWriteBatch(
+    let assembled = assembleWriteBatch(
       fragments,
       current: [long: Data([1, 2, 3, 4, 5, 6]), other: Data([1, 2, 3])]
     )
@@ -308,16 +292,15 @@ extension WriteAssemblyTests {
   /// Assembly bounds the offset and not the result, so fragments that are each within what a PDU carries
   /// can still build a value longer than an attribute may hold.
   func testFragmentsWithinRangeCanStillAssemblePastTheLimit() {
-    let manager = GattServerManager(requestTimeoutMs: 1000)
     let address = CharacteristicAddress(
       service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
     )
     let fragments = [
-      GattServerManager.WriteFragment(address: address, offset: 0, value: Data(repeating: 1, count: 500)),
-      GattServerManager.WriteFragment(address: address, offset: 500, value: Data(repeating: 2, count: 500)),
+      WriteFragment(address: address, offset: 0, value: Data(repeating: 1, count: 500)),
+      WriteFragment(address: address, offset: 500, value: Data(repeating: 2, count: 500)),
     ]
 
-    let assembled = manager.assembleWriteBatch(fragments, current: [:])
+    let assembled = assembleWriteBatch(fragments, current: [:])
 
     XCTAssertEqual(assembled?[address]?.count, 1000)
     XCTAssertTrue(exceedsAttributeLength(assembled?[address]?.count ?? 0))
@@ -325,32 +308,30 @@ extension WriteAssemblyTests {
 
   /// And the batch is refused whole for it, with the ATT error Android answers the same input with.
   func testABatchThatAssemblesPastTheLimitIsRefusedWhole() {
-    let manager = GattServerManager(requestTimeoutMs: 1000)
     let address = CharacteristicAddress(
       service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
     )
     let fragments = [
-      GattServerManager.WriteFragment(address: address, offset: 0, value: Data(repeating: 1, count: 500)),
-      GattServerManager.WriteFragment(address: address, offset: 500, value: Data(repeating: 2, count: 500)),
+      WriteFragment(address: address, offset: 0, value: Data(repeating: 1, count: 500)),
+      WriteFragment(address: address, offset: 500, value: Data(repeating: 2, count: 500)),
     ]
 
     XCTAssertEqual(
-      manager.resolveWriteBatch(fragments, current: [:]), .exceedsAttributeLength
+      resolveWriteBatch(fragments, current: [:]), .exceedsAttributeLength
     )
   }
 
   func testABatchAtTheLimitIsAccepted() {
-    let manager = GattServerManager(requestTimeoutMs: 1000)
     let address = CharacteristicAddress(
       service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
     )
     let fragments = [
-      GattServerManager.WriteFragment(address: address, offset: 0, value: Data(repeating: 1, count: 256)),
-      GattServerManager.WriteFragment(address: address, offset: 256, value: Data(repeating: 2, count: 256)),
+      WriteFragment(address: address, offset: 0, value: Data(repeating: 1, count: 256)),
+      WriteFragment(address: address, offset: 256, value: Data(repeating: 2, count: 256)),
     ]
 
     XCTAssertEqual(
-      manager.resolveWriteBatch(fragments, current: [:]),
+      resolveWriteBatch(fragments, current: [:]),
       .assembled([address: Data(repeating: 1, count: 256) + Data(repeating: 2, count: 256)])
     )
   }
@@ -358,14 +339,13 @@ extension WriteAssemblyTests {
   /// A fragment addressing a gap past the end of its attribute is the other way a batch resolves to
   /// nothing, and it answers a different ATT error.
   func testAFragmentPastTheEndIsRefusedAsAnInvalidOffset() {
-    let manager = GattServerManager(requestTimeoutMs: 1000)
     let address = CharacteristicAddress(
       service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
     )
     let fragments = [
-      GattServerManager.WriteFragment(address: address, offset: 4, value: Data([1, 2]))
+      WriteFragment(address: address, offset: 4, value: Data([1, 2]))
     ]
 
-    XCTAssertEqual(manager.resolveWriteBatch(fragments, current: [:]), .invalidOffset)
+    XCTAssertEqual(resolveWriteBatch(fragments, current: [:]), .invalidOffset)
   }
 }

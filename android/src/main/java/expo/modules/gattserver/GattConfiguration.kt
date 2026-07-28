@@ -29,21 +29,32 @@ internal fun parseUuid(value: Any?, field: String): UUID {
   return UUID.fromString(expanded)
 }
 
+/**
+ * Reads a whole number in [min]..[max] out of an untyped configuration value.
+ *
+ * expo-modules-core delivers every JavaScript number as a `Double`, so the integrality check is the
+ * point: a fraction or a NaN would otherwise be truncated into a plausible-looking value. A `Boolean`
+ * is not a `Number`, so it is refused here rather than bridged into 0 or 1.
+ */
+private inline fun requireWholeNumber(value: Any?, min: Int, max: Int, message: () -> String): Int {
+  val number = value as? Number
+  val whole = number?.toInt()
+  if (number == null || whole == null ||
+    number.toDouble() != whole.toDouble() || whole !in min..max
+  ) {
+    throw IllegalArgumentException(message())
+  }
+  return whole
+}
+
 /** Validates bytes 0..255. expo-modules-core passes Int as Double; this checks for NaN and fractions. */
 internal fun toByteArray(value: List<*>, field: String): ByteArray {
   val bytes = ByteArray(value.size)
   value.forEachIndexed { index, element ->
-    val number = element as? Number
-    val intValue = number?.toInt()
-    if (number == null || intValue == null ||
-      number.toDouble() != intValue.toDouble() || intValue !in 0..255
-    ) {
-      throw IllegalArgumentException(
-        "Invalid $field byte $element at index $index. " +
-          "Every element must be an integer between 0 and 255."
-      )
-    }
-    bytes[index] = intValue.toByte()
+    bytes[index] = requireWholeNumber(element, 0, 255) {
+      "Invalid $field byte $element at index $index. " +
+        "Every element must be an integer between 0 and 255."
+    }.toByte()
   }
   return bytes
 }
@@ -87,50 +98,30 @@ internal fun asConfigMap(item: Any?, field: String, index: Int): Map<*, *> =
 /** Validates timeout before passing to AdvertiseSettings.Builder.setTimeout. */
 internal fun parseAdvertisingTimeout(value: Any?): Int {
   if (value == null) return 0
-  val number = value as? Number
-  val millis = number?.toInt()
-  if (number == null || millis == null || number.toDouble() != millis.toDouble() ||
-    millis < 0 || millis > MAX_ADVERTISING_TIMEOUT_MS
-  ) {
-    throw IllegalArgumentException(
-      "Invalid advertising timeout $value. Expected an integer between 0 and " +
-        "$MAX_ADVERTISING_TIMEOUT_MS milliseconds, where 0 means no time limit."
-    )
+  return requireWholeNumber(value, 0, MAX_ADVERTISING_TIMEOUT_MS) {
+    "Invalid advertising timeout $value. Expected an integer between 0 and " +
+      "$MAX_ADVERTISING_TIMEOUT_MS milliseconds, where 0 means no time limit."
   }
-  return millis
 }
 
 internal fun parseRequestTimeout(value: Any?): Int {
   if (value == null) return DEFAULT_REQUEST_TIMEOUT_MS
-  val number = value as? Number
-  val millis = number?.toInt()
-  if (number == null || millis == null || number.toDouble() != millis.toDouble() ||
-    millis < 0 || millis >= ATT_TRANSACTION_TIMEOUT_MS
-  ) {
-    throw IllegalArgumentException(
-      "Invalid request timeout $value. Expected an integer between 0 and " +
-        "${ATT_TRANSACTION_TIMEOUT_MS - 1} milliseconds — below the ATT transaction timeout of " +
-        "$ATT_TRANSACTION_TIMEOUT_MS ms, past which the central has already given up — where 0 " +
-        "disables the timeout."
-    )
+  return requireWholeNumber(value, 0, ATT_TRANSACTION_TIMEOUT_MS - 1) {
+    "Invalid request timeout $value. Expected an integer between 0 and " +
+      "${ATT_TRANSACTION_TIMEOUT_MS - 1} milliseconds — below the ATT transaction timeout of " +
+      "$ATT_TRANSACTION_TIMEOUT_MS ms, past which the central has already given up — where 0 " +
+      "disables the timeout."
   }
-  return millis
 }
 
 internal fun parseManufacturerData(value: Any?): List<ManufacturerData> {
   val list = value as? List<*> ?: return emptyList()
   return list.mapIndexed { index, item ->
     val map = asConfigMap(item, "manufacturerData", index)
-    val number = map["companyId"] as? Number
-    val companyId = number?.toInt()
     // Company ID is 16-bit; addManufacturerData only rejects negative values.
-    if (number == null || companyId == null || number.toDouble() != companyId.toDouble() ||
-      companyId !in 0..0xFFFF
-    ) {
-      throw IllegalArgumentException(
-        "Invalid manufacturer company id ${map["companyId"]}. A Bluetooth SIG Company " +
-          "Identifier is a 16-bit value, so it must be an integer between 0 and 65535."
-      )
+    val companyId = requireWholeNumber(map["companyId"], 0, 0xFFFF) {
+      "Invalid manufacturer company id ${map["companyId"]}. A Bluetooth SIG Company " +
+        "Identifier is a 16-bit value, so it must be an integer between 0 and 65535."
     }
     val data = (map["data"] as? List<*>) ?: emptyList<Any>()
     ManufacturerData(companyId, toByteArray(data, "manufacturer"))

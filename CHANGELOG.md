@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Native managers split into focused collaborators.** No behaviour or API change. `GattServerManager` kept publication and ATT routing; advertising, notification queueing, delegated requests, attribute values, per-client CCCD state and (Android) queued writes moved to one class each — `AdvertisingCoordinator`/`AdvertisingController`, `NotificationQueue`/`NotificationDispatcher`, `PendingRequestStore`, `AttributeStore`, `SubscriptionRegistry`, `PreparedWriteQueue`. The Swift write arithmetic moved from methods on the manager to free functions in `WriteBatch.swift`, so the host suite no longer builds a manager to reach it. Kotlin 2495 → 1429 lines, Swift 1533 → 916
 - **Breaking: `sendNotification` signature.** Now `sendNotification(deviceId, serviceUuid, characteristicUuid, value, options?)` with `confirm` and `requireSubscription` in options object
 - **Breaking (iOS): delegated long writes.** `onCharacteristicWriteRequest` fires once per attribute with assembled value, not per fragment; one event per batch carries `responseNeeded: true`
 - **Breaking: `sendResponse` error after `stopServer`.** Rejects with `REQUEST_NOT_FOUND` (not `ERR_NO_SERVER`) on both platforms

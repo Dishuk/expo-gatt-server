@@ -82,7 +82,22 @@ The module does not hold BLE state itself -- it delegates to `GattServerManager`
 
 ## GATT Server Manager
 
-**GattServerManager** (Swift / Kotlin) owns the native BLE peripheral and manages all state.
+**GattServerManager** (Swift / Kotlin) owns the native BLE peripheral. It publishes the database, routes
+every ATT callback to either an automatic answer or a JavaScript event, and holds the connection state.
+
+The concerns with state of their own live beside it, one class each, on both platforms:
+
+| Collaborator | iOS | Android | Owns |
+|---|---|---|---|
+| Advertising | `AdvertisingCoordinator` | `AdvertisingController` | The advertisement, the promise waiting for the stack to confirm it, the start and airtime bounds, and on Android the borrowed adapter name |
+| Notifications | `NotificationQueue` | `NotificationDispatcher` | The sends the stack refused, one outstanding per link |
+| Delegated requests | `PendingRequestStore` | (in the manager) | Requests handed to JavaScript, with the expiry that answers one it never answers |
+| Attribute values | (in the manager) | `AttributeStore` | The mirrored values reads are answered from. Android needs a monitor; iOS is main-queue only |
+| Subscriptions | (in the manager) | `SubscriptionRegistry` | Per-client CCCD state |
+| Queued writes | not applicable | `PreparedWriteQueue` | The prepare queues and the atomic execute |
+
+The ATT arithmetic — write assembly, response rebasing, CCCD bits, MTU checks — is stateless and lives
+in `WriteBatch.swift` and `AttOperations.kt`. That is the part the host suites cover.
 
 ### Managed State
 

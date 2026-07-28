@@ -1,190 +1,5 @@
 import CoreBluetooth
 
-/// Default ATT_MTU, in octets — Core Spec Vol 3, Part G, §5.2.1.
-let defaultAttMtu = 23
-
-/// Header octets in ATT_HANDLE_VALUE_NTF/IND PDU: 1-octet opcode + 2-octet handle (Core Spec Vol 3, Part F, §§3.4.7.1–3.4.7.2).
-let attNotificationHeaderSize = 3
-
-private let defaultAttMtuPayload = defaultAttMtu - attNotificationHeaderSize
-
-/// "The maximum length of an attribute value shall be 512 octets" — Core Spec Vol 3, Part F, §3.2.9.
-let maxAttributeValueLength = 512
-
-/// Checked separately: a queued write can exceed per-PDU limits; an unqueued write cannot.
-func exceedsAttributeLength(_ size: Int) -> Bool {
-  size > maxAttributeValueLength
-}
-
-/// Octets that fit in one notification: min of link MTU and max attribute value length.
-func notificationPayloadLimit(for central: CBCentral) -> Int {
-  min(central.maximumUpdateValueLength, maxAttributeValueLength)
-}
-
-/// Upper bound per central while the transmit queue is full. Per-central limit prevents one silent link from starving others.
-private let maxQueuedNotifications = 64
-
-/// How long a parked notification waits before abandoned. Above `attTransactionTimeoutMs` so slow links aren't cut off prematurely.
-private let notificationTimeoutMs = 35_000
-
-/// ATT transaction timeout; failure requires new bearer (Core Spec Vol 3, Part F, §3.3.3). Module timeout must be below this.
-let attTransactionTimeoutMs = 30_000
-
-/// Request timeout for JavaScript handlers; below attTransactionTimeoutMs with margin for bearer recovery.
-let defaultRequestTimeoutMs = 10_000
-
-/// How long a registration round waits before timing out — generously above what healthy hardware needs.
-let publicationTimeoutMs = 30_000
-
-/// Timeout for peripheralManagerDidStartAdvertising callback (Apple guarantees nothing). Matches Android AdvertiseCallback.
-let advertisingStartTimeoutMs = 30_000
-
-enum GattServerError: Error {
-  case payloadExceedsMtu(maxPayload: Int, payloadSize: Int)
-  case requestNotFound(requestId: Int)
-  case requestDeviceMismatch(requestId: Int, owner: String, supplied: String)
-  case responseOffsetAfterRequest(requestId: Int, requested: Int, supplied: Int)
-  case responseOffsetNegative(requestId: Int, requested: Int, supplied: Int)
-  case bluetoothUnavailable(state: CBManagerState)
-  case serviceRegistrationFailed(uuid: String, reason: String)
-  case publicationTimedOut(awaiting: [String], timeoutMs: Int)
-  case serverStopped
-  case databaseNotPublished
-  case characteristicNotFound(service: String, characteristic: String)
-  case notifyQueueFull(limit: Int)
-  case notificationTimedOut(timeoutMs: Int)
-  case deviceDisconnected(deviceId: String)
-  case noSubscriber(deviceId: String, characteristic: String)
-  case confirmUnsupported(characteristic: String, confirm: Bool)
-  case advertisingOptionUnsupported(option: String, reason: String)
-  case configurationUnsupported(option: String, reason: String)
-
-  var code: String {
-    switch self {
-    case .payloadExceedsMtu: return "PAYLOAD_EXCEEDS_MTU"
-    case .requestNotFound: return "REQUEST_NOT_FOUND"
-    case .requestDeviceMismatch: return "REQUEST_DEVICE_MISMATCH"
-    case .responseOffsetAfterRequest, .responseOffsetNegative: return "ERR_RESPONSE_OFFSET"
-    case .bluetoothUnavailable(let state):
-      return state == .unauthorized ? "ERR_PERMISSION" : "ERR_BLUETOOTH"
-    case .serviceRegistrationFailed, .publicationTimedOut: return "ERR_CREATE_SERVER"
-    case .serverStopped, .databaseNotPublished: return "ERR_NO_SERVER"
-    case .characteristicNotFound: return "ERR_CHARACTERISTIC_NOT_FOUND"
-    case .notifyQueueFull: return "ERR_NOTIFY_QUEUE_FULL"
-    case .notificationTimedOut: return "ERR_NOTIFY"
-    case .deviceDisconnected: return "ERR_DEVICE_DISCONNECTED"
-    case .noSubscriber: return "ERR_NO_SUBSCRIBER"
-    case .confirmUnsupported: return "ERR_CONFIRM_UNSUPPORTED"
-    case .advertisingOptionUnsupported, .configurationUnsupported: return "ERR_UNSUPPORTED"
-    }
-  }
-
-  var message: String {
-    switch self {
-    case .payloadExceedsMtu(let maxPayload, let payloadSize):
-      var message = "Payload size \(payloadSize) exceeds the \(maxPayload) bytes a single " +
-        "notification or indication can carry on this link. Nothing was sent."
-      if maxPayload <= defaultAttMtuPayload {
-        message += " The link is still at the default ATT MTU of \(defaultAttMtu); a central that " +
-          "negotiates a larger one is reported through onMtuChanged."
-      }
-      return message
-    case .requestNotFound(let requestId):
-      return "Request \(requestId) not found or already responded"
-    case .requestDeviceMismatch(let requestId, let owner, let supplied):
-      return "Request \(requestId) belongs to device \(owner), not \(supplied)"
-    case .responseOffsetAfterRequest(let requestId, let requested, let supplied):
-      return "Request \(requestId) asked for the attribute from offset \(requested), but the " +
-        "response supplies it from offset \(supplied), which leaves the requested bytes missing. " +
-        "Pass the value together with the offset it starts at — offset 0 with the whole value " +
-        "always works."
-    case .responseOffsetNegative(let requestId, let requested, let supplied):
-      return "Request \(requestId) was answered with offset \(supplied) against a requested offset " +
-        "of \(requested). An ATT offset is an unsigned 16-bit value."
-    case .bluetoothUnavailable(let state):
-      switch state {
-      case .poweredOff: return "Bluetooth is turned off"
-      case .unauthorized: return "Bluetooth permission not granted"
-      case .unsupported: return "BLE not supported on this device"
-      default: return "Bluetooth not ready"
-      }
-    case .serviceRegistrationFailed(let uuid, let reason):
-      return "Failed to publish service \(uuid): \(reason)"
-    case .publicationTimedOut(let awaiting, let timeoutMs):
-      return "CoreBluetooth did not acknowledge \(awaiting.joined(separator: ", ")) within " +
-        "\(timeoutMs) ms, so the database was not published. Call createServer again to retry."
-    case .serverStopped:
-      return "Server was stopped before it finished opening"
-    case .databaseNotPublished:
-      return "No GATT database is published, so there is nothing to advertise. Wait for createServer " +
-        "to resolve; isServerRunning reports whether the database is still there, which a failed " +
-        "registration or Bluetooth going down undoes."
-    case .characteristicNotFound(let service, let characteristic):
-      return "Characteristic \(characteristic) was not found in service \(service)"
-    case .notifyQueueFull(let limit):
-      return "\(limit) notifications are already waiting for the transmit queue to drain for this " +
-        "central. Wait for earlier sends to resolve before queueing more."
-    case .notificationTimedOut(let timeoutMs):
-      return "CoreBluetooth did not report the transmit queue ready within \(timeoutMs) ms, so the " +
-        "notification was abandoned and the ones behind it were retried. The central may have gone " +
-        "away without CoreBluetooth reporting it."
-    case .deviceDisconnected(let deviceId):
-      return "Device \(deviceId) disconnected"
-    case .noSubscriber(let deviceId, let characteristic):
-      return "Device \(deviceId) has not subscribed to characteristic \(characteristic). " +
-        "Wait for onCharacteristicSubscribed. CoreBluetooth only transmits to subscribed " +
-        "centrals, so this cannot be overridden on iOS."
-    case .confirmUnsupported(let characteristic, let confirm):
-      // updateValue has no confirm parameter; this check prevents silent mismatch.
-      if confirm {
-        return "Characteristic \(characteristic) does not declare the \"indicate\" property, so it " +
-          "cannot send the acknowledged indication confirm: true asks for. Declare \"indicate\" on " +
-          "the characteristic, or send a notification with confirm: false."
-      }
-      return "Characteristic \(characteristic) does not declare the \"notify\" property, so it " +
-        "cannot send an unacknowledged notification. Declare \"notify\" on the characteristic, or " +
-        "send an indication with confirm: true."
-    case .advertisingOptionUnsupported(let option, let reason):
-      return "iOS cannot honour the advertising option \"\(option)\": \(reason) " +
-        "CBPeripheralManager.startAdvertising supports only CBAdvertisementDataLocalNameKey and " +
-        "CBAdvertisementDataServiceUUIDsKey."
-    case .configurationUnsupported(let option, let reason):
-      return "iOS cannot honour \"\(option)\": \(reason)"
-    }
-  }
-}
-
-/// Surfaces as `ERR_ADVERTISE`, matching Android.
-private func advertisingError(_ message: String) -> NSError {
-  NSError(domain: "ExpoGattServer", code: 0, userInfo: [NSLocalizedDescriptionKey: message])
-}
-
-/// The link budget for one central, expressed in the units the public API uses.
-struct DeviceMtu {
-  /// ATT_MTU in octets.
-  let mtu: Int
-  /// Octets that fit in one notification or indication: `ATT_MTU - 3`.
-  let maxNotificationPayload: Int
-
-  /// iOS reports only payload length; reconstructed to ATT_MTU. Capped by max attribute value length (Core Spec Vol 3, Part F, §3.2.9).
-  init(maxNotificationPayload: Int) {
-    self.mtu = maxNotificationPayload + attNotificationHeaderSize
-    self.maxNotificationPayload = min(maxNotificationPayload, maxAttributeValueLength)
-  }
-}
-
-struct CharacteristicAddress: Hashable {
-  let service: CBUUID
-  let characteristic: CBUUID
-}
-
-struct CharacteristicDelegation: Equatable {
-  var read = false
-  var write = false
-
-  static let none = CharacteristicDelegation()
-}
-
 protocol GattServerManagerDelegate: AnyObject {
   func onDeviceConnected(deviceId: String, name: String?)
   func onDeviceDisconnected(deviceId: String)
@@ -205,97 +20,41 @@ protocol GattServerManagerDelegate: AnyObject {
   func onCharacteristicUnsubscribed(deviceId: String, serviceUuid: String, characteristicUuid: String)
 }
 
-/// Maps a status supplied by JavaScript onto the ATT error code CoreBluetooth transmits.
+/// The peripheral's lifecycle: publishing the database and routing every ATT callback either to an
+/// automatic answer or to JavaScript.
 ///
-/// `CBATTError.Code` models 0x00 through 0x11 (Core Spec 5.4, Vol 3, Part F, Table 3.4), so those map
-/// straight across and match what Android sends. The specification also defines 0x12, 0x13 and the
-/// application and profile ranges, but `respond(to:withResult:)` accepts only a `CBATTError.Code`, so
-/// anything unrepresentable becomes the generic "unlikely error" rather than being downgraded to
-/// success.
-func attErrorCode(for status: Int) -> CBATTError.Code {
-  switch status {
-  case 0x00: return .success
-  case 0x01: return .invalidHandle
-  case 0x02: return .readNotPermitted
-  case 0x03: return .writeNotPermitted
-  case 0x04: return .invalidPdu
-  case 0x05: return .insufficientAuthentication
-  case 0x06: return .requestNotSupported
-  case 0x07: return .invalidOffset
-  case 0x08: return .insufficientAuthorization
-  case 0x09: return .prepareQueueFull
-  case 0x0A: return .attributeNotFound
-  case 0x0B: return .attributeNotLong
-  case 0x0C: return .insufficientEncryptionKeySize
-  case 0x0D: return .invalidAttributeValueLength
-  case 0x0E: return .unlikelyError
-  case 0x0F: return .insufficientEncryption
-  case 0x10: return .unsupportedGroupType
-  case 0x11: return .insufficientResources
-  default: return .unlikelyError
-  }
-}
-
-/// The Bluetooth Base UUID's trailing four groups — Core Spec Vol 3, Part B, §2.5.1.
-private let bluetoothBaseUuidSuffix = "-0000-1000-8000-00805f9b34fb"
-
-extension CBUUID {
-  /// The lowercase 128-bit spelling, which is what `java.util.UUID.toString` produces on Android.
-  ///
-  /// `CBUUID.uuidString` is not that: it uppercases the 128-bit form and echoes a 16-bit or 32-bit
-  /// UUID back in the short form it was constructed from, which made the same characteristic arrive in
-  /// event payloads spelled differently on each platform. Normalising is repeated here as well as in
-  /// JavaScript because these UUIDs come back out of CoreBluetooth rather than from the configuration.
-  var normalizedString: String {
-    let lower = uuidString.lowercased()
-    guard lower.count < 36 else { return lower }
-    return String(repeating: "0", count: 8 - lower.count) + lower + bluetoothBaseUuidSuffix
-  }
-
-  /// The shortest spelling of this UUID that means the same thing, for use in an advertisement.
-  ///
-  /// Unlike Android's encoder, `CBUUID` advertises whatever width it was constructed from: a 16-bit
-  /// alias occupies two octets of the 31-byte budget, its 128-bit expansion sixteen. The shared
-  /// TypeScript layer expands every UUID to 128 bits so both platforms see one spelling — correct for
-  /// addressing and for event payloads, and free on Android, but on iOS it silently cost fourteen bytes
-  /// of advertising space per UUID. That is enough to push a service UUID out of the advertisement and
-  /// into the Apple-only scan-response overflow area, where a non-Apple central filtering on it stops
-  /// finding the peripheral at all.
-  ///
-  /// Only exact members of the Bluetooth base range contract; a vendor UUID has no shorter form and is
-  /// returned unchanged.
-  var advertisedForm: CBUUID {
-    let lower = uuidString.lowercased()
-    guard lower.count == 36, lower.hasSuffix(bluetoothBaseUuidSuffix) else { return self }
-    let leading = String(lower.prefix(8))
-    // A 16-bit alias is a 32-bit one whose top half is zero, and `CBUUID(string:)` accepts both widths.
-    let short = leading.hasPrefix("0000") ? String(leading.suffix(4)) : leading
-    return CBUUID(string: short)
-  }
-}
-
-/// Maps `CBManagerState` onto the platform-neutral state union shared with Android.
-func normalizedBluetoothState(_ state: CBManagerState) -> String {
-  switch state {
-  case .poweredOn: return "poweredOn"
-  case .poweredOff: return "poweredOff"
-  case .resetting: return "resetting"
-  case .unsupported: return "unsupported"
-  case .unauthorized: return "unauthorized"
-  default: return "unknown"
-  }
-}
-
+/// The concerns with state of their own live beside it — `AdvertisingCoordinator` owns the radio,
+/// `NotificationQueue` the sends CoreBluetooth refused, and `PendingRequestStore` the requests handed to
+/// JavaScript. The write arithmetic is in `WriteBatch.swift`, with no state at all.
+///
 /// All state must be reached from the main queue; no concurrent access. CBPeripheralManager is created with queue: .main.
 class GattServerManager: NSObject {
   weak var delegate: GattServerManagerDelegate?
 
-  /// Milliseconds a delegated request may go unanswered; `0` disables the expiry entirely.
-  private let requestTimeoutMs: Int
+  private var advertising: AdvertisingCoordinator!
+  private var pendingRequests: PendingRequestStore!
+  private var notifications: NotificationQueue!
 
   init(requestTimeoutMs: Int = defaultRequestTimeoutMs) {
-    self.requestTimeoutMs = requestTimeoutMs
     super.init()
+    advertising = AdvertisingCoordinator(
+      peripheral: { [weak self] in self?.peripheralManager },
+      isDatabasePublished: { [weak self] in self?.databasePublished ?? false }
+    )
+    pendingRequests = PendingRequestStore(timeoutMs: requestTimeoutMs) { [weak self] request in
+      // Answers with unlikelyError so the central does not stall waiting for its own timeout.
+      self?.peripheralManager?.respond(to: request, withResult: .unlikelyError)
+    }
+    notifications = NotificationQueue(
+      isActive: { [weak self] in self?.peripheralManager != nil },
+      deliver: { [weak self] entry in
+        guard let self = self else {
+          entry.completion(GattServerError.serverStopped)
+          return true
+        }
+        return self.deliver(entry)
+      }
+    )
   }
 
   var onStateChange: ((CBManagerState) -> Void)?
@@ -305,17 +64,6 @@ class GattServerManager: NSObject {
   private var servicesAwaitingRegistration: Set<CBUUID> = []
   private var openCompletion: ((Error?) -> Void)?
   private var readinessWaiters: [(Error?) -> Void] = []
-  private var advertisingCompletion: ((Error?) -> Void)?
-  private var advertisingTimeout: DispatchWorkItem?
-
-  /// Cancelled by `claimAdvertisingCompletion`, live only while a start awaits.
-  private var advertisingStartTimeout: DispatchWorkItem?
-
-  /// The `timeoutMs` to arm after the start succeeds.
-  private var pendingAdvertisingTimeoutMs = 0
-
-  /// Bumped by every stop; lets a waiting start detect that stop() was called.
-  private var advertisingGeneration = 0
 
   private var addedServices: [CBUUID: CBMutableService] = [:]
 
@@ -361,44 +109,7 @@ class GattServerManager: NSObject {
   private var subscribedCentrals: [String: [CharacteristicAddress: CBCentral]] = [:]
   /// Keyed by (service, characteristic) since GATT allows the same UUID in different services.
   private var characteristicValues: [CharacteristicAddress: Data] = [:]
-  private var pendingRequests: [Int: PendingRequest] = [:]
-  private var requestCounter = 0
   private var delegations: [CharacteristicAddress: CharacteristicDelegation] = [:]
-
-  /// Notifications refused by transmit queue, oldest first. Re-sent when `peripheralManagerIsReady` fires.
-  private var pendingNotifications: [QueuedNotification] = []
-
-  /// Unique ID per queued entry; prevents timeouts from abandoning the wrong one.
-  private var nextNotificationId = 0
-
-  private struct QueuedNotification {
-    let id: Int
-    let deviceId: String
-    let address: CharacteristicAddress
-    let characteristic: CBMutableCharacteristic
-    let central: CBCentral
-    let value: Data
-    let completion: (Error?) -> Void
-    /// Expiry held with entry so timeout and removal cannot separate.
-    var timeout: DispatchWorkItem?
-  }
-
-  /// Value withheld from a partially delegated batch; baseline used to detect stale overwrites.
-  private struct DeferredWrite {
-    let value: Data
-    /// nil when attribute had no value initially (distinct from empty).
-    let baseline: Data?
-  }
-
-  private struct PendingRequest {
-    let request: CBATTRequest
-    /// True for read (carries response value); false for write (value is input only).
-    let isRead: Bool
-    /// Auto values for non-delegated characteristics, withheld until batch is accepted (atomicity).
-    let deferredValues: [CharacteristicAddress: DeferredWrite]
-    /// Expiry to cancel on answer or discard.
-    let timeout: DispatchWorkItem?
-  }
 
   /// Records which characteristics hand their ATT requests to JavaScript. Call before `open`.
   func setDelegations(_ map: [CharacteristicAddress: CharacteristicDelegation]) {
@@ -582,7 +293,7 @@ class GattServerManager: NSObject {
     timeoutMs: Int,
     completion: @escaping (Error?) -> Void
   ) {
-    let generation = advertisingGeneration
+    let generation = advertising.generation
     whenDatabasePublished { [weak self] error in
       guard let self = self else {
         completion(GattServerError.serverStopped)
@@ -592,113 +303,19 @@ class GattServerManager: NSObject {
         completion(error)
         return
       }
-      guard generation == self.advertisingGeneration else {
+      guard generation == self.advertising.generation else {
         completion(advertisingError("Advertising stopped"))
         return
       }
-      self.beginAdvertising(
+      self.advertising.begin(
         localName: localName, serviceUuids: serviceUuids,
         timeoutMs: timeoutMs, completion: completion
       )
     }
   }
 
-  /// Builds only CBAdvertisementDataLocalNameKey and CBAdvertisementDataServiceUUIDsKey (per Apple docs).
-  private func beginAdvertising(
-    localName: String?,
-    serviceUuids: [CBUUID]?,
-    timeoutMs: Int,
-    completion: @escaping (Error?) -> Void
-  ) {
-    guard databasePublished else {
-      completion(GattServerError.databaseNotPublished)
-      return
-    }
-    let advertisedUuids = (serviceUuids ?? []).map { $0.advertisedForm }
-    do {
-      try assertAdvertisementFits(localName: localName, serviceUuids: advertisedUuids)
-    } catch {
-      completion(advertisingError(error.localizedDescription))
-      return
-    }
-    let displaced = claimAdvertisingCompletion()
-    displaced?(advertisingError("Advertising restarted"))
-    // Stop the old one before starting the new one. Callback carries no identity, so race remains possible if starts are issued back-to-back.
-    if displaced != nil {
-      peripheralManager?.stopAdvertising()
-    }
-    advertisingCompletion = completion
-    var advertisementData: [String: Any] = [:]
-    if let name = localName {
-      advertisementData[CBAdvertisementDataLocalNameKey] = name
-    }
-    if !advertisedUuids.isEmpty {
-      advertisementData[CBAdvertisementDataServiceUUIDsKey] = advertisedUuids
-    }
-    cancelAdvertisingTimeout()
-    // Held until peripheralManagerDidStartAdvertising fires (which reports the on-air time started).
-    pendingAdvertisingTimeoutMs = timeoutMs
-    peripheralManager?.startAdvertising(advertisementData)
-    armAdvertisingStartTimeout()
-  }
-
   func stopAdvertising() {
-    advertisingGeneration += 1
-    cancelAdvertisingTimeout()
-    pendingAdvertisingTimeoutMs = 0
-    peripheralManager?.stopAdvertising()
-    claimAdvertisingCompletion()?(advertisingError("Advertising stopped"))
-  }
-
-  /// Takes ownership so the promise is settled by exactly one of didStartAdvertising, restart, stop, or Bluetooth down.
-  private func claimAdvertisingCompletion() -> ((Error?) -> Void)? {
-    defer {
-      advertisingCompletion = nil
-      cancelAdvertisingStartTimeout()
-    }
-    return advertisingCompletion
-  }
-
-  /// Stops advertising on timeout (avoiding hung start with radio on).
-  private func armAdvertisingStartTimeout() {
-    cancelAdvertisingStartTimeout()
-    let work = DispatchWorkItem { [weak self] in
-      guard let self = self else { return }
-      self.advertisingStartTimeout = nil
-      self.pendingAdvertisingTimeoutMs = 0
-      self.peripheralManager?.stopAdvertising()
-      self.claimAdvertisingCompletion()?(advertisingError(
-        "The Bluetooth stack did not report the advertisement as started within " +
-          "\(advertisingStartTimeoutMs) ms. Nothing is advertising."
-      ))
-    }
-    advertisingStartTimeout = work
-    DispatchQueue.main.asyncAfter(
-      deadline: .now() + .milliseconds(advertisingStartTimeoutMs), execute: work
-    )
-  }
-
-  private func cancelAdvertisingStartTimeout() {
-    advertisingStartTimeout?.cancel()
-    advertisingStartTimeout = nil
-  }
-
-  /// Emulates AdvertiseSettings.setTimeout by stopping at the limit (matching Android behavior).
-  private func scheduleAdvertisingTimeout(_ timeoutMs: Int) {
-    guard timeoutMs > 0 else { return }
-    let work = DispatchWorkItem { [weak self] in
-      guard let self = self else { return }
-      // Cleared first, so `stopAdvertising` does not try to cancel the item running it.
-      self.advertisingTimeout = nil
-      self.stopAdvertising()
-    }
-    advertisingTimeout = work
-    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(timeoutMs), execute: work)
-  }
-
-  private func cancelAdvertisingTimeout() {
-    advertisingTimeout?.cancel()
-    advertisingTimeout = nil
+    advertising.stop()
   }
 
   /// Sends one notification; reports outcome to completion (nil once CoreBluetooth accepts). Throws for pre-queue validation errors.
@@ -754,63 +371,17 @@ class GattServerManager: NSObject {
       throw GattServerError.payloadExceedsMtu(maxPayload: maxPayload, payloadSize: value.count)
     }
 
-    nextNotificationId += 1
-    let entry = QueuedNotification(
-      id: nextNotificationId,
-      deviceId: deviceId,
-      address: address,
-      characteristic: characteristic,
-      central: central,
-      value: value,
-      completion: completion
+    try notifications.submit(
+      QueuedNotification(
+        id: notifications.makeId(),
+        deviceId: deviceId,
+        address: address,
+        characteristic: characteristic,
+        central: central,
+        value: value,
+        completion: completion
+      )
     )
-
-    guard pendingNotifications.isEmpty else {
-      let queuedForCentral = pendingNotifications.reduce(0) {
-        $0 + ($1.deviceId == deviceId ? 1 : 0)
-      }
-      guard queuedForCentral < maxQueuedNotifications else {
-        throw GattServerError.notifyQueueFull(limit: maxQueuedNotifications)
-      }
-      park(entry)
-      return
-    }
-
-    if !deliver(entry) {
-      park(entry)
-    }
-  }
-
-  /// Queues an entry that transmit queue refused, with expiry timeout.
-  private func park(_ entry: QueuedNotification) {
-    var parked = entry
-    let id = entry.id
-    let work = DispatchWorkItem { [weak self] in
-      guard let self = self else { return }
-      guard let index = self.pendingNotifications.firstIndex(where: { $0.id == id }) else { return }
-      let abandoned = self.pendingNotifications.remove(at: index)
-      abandoned.completion(GattServerError.notificationTimedOut(timeoutMs: notificationTimeoutMs))
-      // Callback may never arrive, so retry rest instead of waiting for each to expire.
-      self.drainPendingNotifications()
-    }
-    parked.timeout = work
-    pendingNotifications.append(parked)
-    DispatchQueue.main.asyncAfter(
-      deadline: .now() + .milliseconds(notificationTimeoutMs), execute: work
-    )
-  }
-
-  /// Delivers queued notifications until one is refused, dequeuing first so completion callbacks don't interfere.
-  private func drainPendingNotifications() {
-    while let next = pendingNotifications.first {
-      pendingNotifications.removeFirst()
-      guard deliver(next) else {
-        // Requeue at head with existing expiry (don't re-arm).
-        pendingNotifications.insert(next, at: 0)
-        return
-      }
-      next.timeout?.cancel()
-    }
   }
 
   /// Delivers one queued notification. Returns false only if transmit queue is full.
@@ -842,71 +413,11 @@ class GattServerManager: NSObject {
     return true
   }
 
-  private func failPendingNotifications(
-    _ error: GattServerError, where predicate: (QueuedNotification) -> Bool = { _ in true }
-  ) {
-    let abandoned = pendingNotifications.filter(predicate)
-    guard !abandoned.isEmpty else { return }
-    pendingNotifications.removeAll(where: predicate)
-    for entry in abandoned {
-      entry.timeout?.cancel()
-      entry.completion(error)
-    }
-    // Callback may have been for abandoned entry; retry rest to avoid forever-waiting entries.
-    if !pendingNotifications.isEmpty && peripheralManager != nil {
-      drainPendingNotifications()
-    }
-  }
-
-  /// Arms expiry for unanswered delegated requests; called before the event fires so sync listeners can still find it.
-  private func registerPendingRequest(
-    _ requestId: Int, request: CBATTRequest, isRead: Bool,
-    deferredValues: [CharacteristicAddress: DeferredWrite] = [:]
-  ) {
-    var timeout: DispatchWorkItem?
-    if requestTimeoutMs > 0 {
-      let work = DispatchWorkItem { [weak self] in self?.expireRequest(requestId) }
-      timeout = work
-      DispatchQueue.main.asyncAfter(
-        deadline: .now() + .milliseconds(requestTimeoutMs), execute: work
-      )
-    }
-    pendingRequests[requestId] = PendingRequest(
-      request: request, isRead: isRead, deferredValues: deferredValues, timeout: timeout
-    )
-  }
-
-  /// Answers unanswered request with unlikelyError so central doesn't stall waiting for timeout.
-  private func expireRequest(_ requestId: Int) {
-    guard let pending = discardPendingRequest(requestId) else { return }
-    peripheralManager?.respond(to: pending.request, withResult: .unlikelyError)
-  }
-
-  @discardableResult
-  private func discardPendingRequest(_ requestId: Int) -> PendingRequest? {
-    guard let pending = pendingRequests.removeValue(forKey: requestId) else { return nil }
-    pending.timeout?.cancel()
-    return pending
-  }
-
-  private func discardPendingRequests(where predicate: (PendingRequest) -> Bool) {
-    for (requestId, pending) in pendingRequests where predicate(pending) {
-      pending.timeout?.cancel()
-      pendingRequests.removeValue(forKey: requestId)
-    }
-  }
-
   /// Answers matching requests with result, then discards them. Responses sent after bookkeeping to avoid mid-teardown callbacks.
   private func answerAndDiscardPendingRequests(
     withResult result: CBATTError.Code, where predicate: (PendingRequest) -> Bool
   ) {
-    var answered: [CBATTRequest] = []
-    for (requestId, pending) in pendingRequests where predicate(pending) {
-      pending.timeout?.cancel()
-      pendingRequests.removeValue(forKey: requestId)
-      answered.append(pending.request)
-    }
-    for request in answered {
+    for request in pendingRequests.claim(where: predicate) {
       peripheralManager?.respond(to: request, withResult: result)
     }
   }
@@ -928,10 +439,11 @@ class GattServerManager: NSObject {
       )
     }
 
-    let payload = try responsePayload(
-      for: pending, requestId: requestId, offset: offset, value: value
+    let payload = try rebasedResponseValue(
+      value, isRead: pending.isRead, suppliedOffset: offset,
+      requestedOffset: pending.request.offset, requestId: requestId
     )
-    discardPendingRequest(requestId)
+    pendingRequests.discard(requestId)
 
     let result = attErrorCode(for: status)
     if pending.isRead {
@@ -947,39 +459,6 @@ class GattServerManager: NSObject {
     }
     // Not size-checked: reads can use Read Blob requests for continuations (unlike notifications).
     peripheralManager?.respond(to: request, withResult: result)
-  }
-
-  private func responsePayload(
-    for pending: PendingRequest, requestId: Int, offset: Int, value: Data
-  ) throws -> Data {
-    try rebasedResponseValue(
-      value, isRead: pending.isRead, suppliedOffset: offset,
-      requestedOffset: pending.request.offset, requestId: requestId
-    )
-  }
-
-  /// Rebases response from suppliedOffset to requestedOffset. CBATTRequest.offset is read-only; CoreBluetooth derives offset from request.
-  func rebasedResponseValue(
-    _ value: Data, isRead: Bool, suppliedOffset: Int, requestedOffset: Int, requestId: Int
-  ) throws -> Data {
-    guard isRead else { return value }
-
-    // Re-check: native module is directly callable. Prevent negative offsets from trimming response undetected.
-    guard suppliedOffset >= 0, requestedOffset >= 0 else {
-      throw GattServerError.responseOffsetNegative(
-        requestId: requestId, requested: requestedOffset, supplied: suppliedOffset
-      )
-    }
-
-    guard suppliedOffset <= requestedOffset else {
-      throw GattServerError.responseOffsetAfterRequest(
-        requestId: requestId, requested: requestedOffset, supplied: suppliedOffset
-      )
-    }
-    let skip = requestedOffset - suppliedOffset
-    guard skip > 0 else { return value }
-    guard skip < value.count else { return Data() }
-    return value.subdata(in: skip..<value.count)
   }
 
   /// Replaces the mirrored value read responses are answered from. Address validated against published database.
@@ -1006,10 +485,10 @@ class GattServerManager: NSObject {
 
   /// Stops server and clears all state. Uses removeAllServices to unpublish (not individual entries).
   func stop() {
-    stopAdvertising()
+    advertising.stop()
     completeOpen(GattServerError.serverStopped)
     flushReadinessWaiters(GattServerError.serverStopped)
-    failPendingNotifications(.serverStopped)
+    notifications.failAll(.serverStopped)
     // Answer requests (not silent drop) before removing services. Centrals likely still connected.
     answerAndDiscardPendingRequests(withResult: .unlikelyError) { _ in true }
     peripheralManager?.removeAllServices()
@@ -1031,7 +510,7 @@ class GattServerManager: NSObject {
     subscribedCentrals.removeAll()
     characteristicValues.removeAll()
     delegations.removeAll()
-    requestCounter = 0
+    pendingRequests.resetIds()
     onStateChange = nil
 
     // Clear delegate to prevent queued callbacks from repopulating cleared state.
@@ -1066,90 +545,6 @@ class GattServerManager: NSObject {
     }
     guard owners.count == 1, let owner = owners.first else { return nil }
     return address(in: owner)
-  }
-
-  /// Assembles fragment at offset into current value. Returns nil if offset past end (InvalidOffset).
-  /// For unqueued writes, replaces all (Core Spec Vol 3, Part F, §3.4.5.1).
-  /// For queued writes, preserves octets beyond fragment (Core Spec Vol 3, Part F, §3.4.6.1).
-  func spliced(_ current: Data, offset: Int, part: Data, queued: Bool) -> Data? {
-    guard offset <= current.count else { return nil }
-    guard queued else { return part }
-    var result = Data(current.prefix(offset))
-    result.append(part)
-    result.append(contentsOf: current.dropFirst(offset + part.count))
-    return result
-  }
-
-  /// True if any offset is non-zero (queued write signature). ATT_WRITE_REQ has no offset field (Core Spec Vol 3, Part F, §3.4.5.1).
-  /// Lone offset-0 part is ambiguous; treated as unqueued write.
-  func isQueuedWriteBatch(offsets: [Int]) -> Bool {
-    offsets.contains { $0 > 0 }
-  }
-
-  /// Addresses whose fragments are queued writes (grouped per attribute; decision reused for assembly and reporting).
-  func queuedWriteAddresses(_ fragments: [WriteFragment]) -> Set<CharacteristicAddress> {
-    var offsetsByAddress: [CharacteristicAddress: [Int]] = [:]
-    for fragment in fragments {
-      offsetsByAddress[fragment.address, default: []].append(fragment.offset)
-    }
-    return Set(offsetsByAddress.filter { isQueuedWriteBatch(offsets: $0.value) }.keys)
-  }
-
-  /// One write request's payload, minimal form for testability (CBATTRequest has no public init).
-  struct WriteFragment {
-    let address: CharacteristicAddress
-    let offset: Int
-    let value: Data
-  }
-
-  /// Assembles fragments onto current values; returns nil if any part is past end (atomic failure). Per-attribute queued-write decision.
-  func assembleWriteBatch(
-    _ fragments: [WriteFragment],
-    current: [CharacteristicAddress: Data]
-  ) -> [CharacteristicAddress: Data]? {
-    let queued = queuedWriteAddresses(fragments)
-
-    var assembled: [CharacteristicAddress: Data] = [:]
-    for fragment in fragments {
-      let base = assembled[fragment.address] ?? current[fragment.address] ?? Data()
-      guard let merged = spliced(
-        base,
-        offset: fragment.offset,
-        part: fragment.value,
-        queued: queued.contains(fragment.address)
-      ) else {
-        return nil
-      }
-      assembled[fragment.address] = merged
-    }
-    return assembled
-  }
-
-  /// What a batch of write fragments resolves to, and the ATT error to answer it with when it resolves
-  /// to nothing.
-  enum WriteBatchOutcome: Equatable {
-    case invalidOffset
-    case exceedsAttributeLength
-    case assembled([CharacteristicAddress: Data])
-  }
-
-  /// Validates batch assembly; checked on result (fragments alone can't exceed limit due to placement).
-  func resolveWriteBatch(
-    _ fragments: [WriteFragment],
-    current: [CharacteristicAddress: Data]
-  ) -> WriteBatchOutcome {
-    guard let assembled = assembleWriteBatch(fragments, current: current) else {
-      return .invalidOffset
-    }
-    if assembled.contains(where: { exceedsAttributeLength($0.value.count) }) {
-      return .exceedsAttributeLength
-    }
-    return .assembled(assembled)
-  }
-
-  private func nextRequestId() -> Int {
-    requestCounter += 1
-    return requestCounter
   }
 
   /// Records central activity and first sighting as connection. Always refreshes stored instance (per-callback variation).
@@ -1187,7 +582,7 @@ class GattServerManager: NSObject {
   }
 
   var isAdvertising: Bool {
-    peripheralManager?.isAdvertising ?? false
+    advertising.isAdvertising
   }
 
   /// Clears all state for deviceId and reports disconnection once. abortPendingRequests=false for inferred disconnects (unsubscribe).
@@ -1203,7 +598,7 @@ class GattServerManager: NSObject {
         $0.request.central.identifier.uuidString == deviceId
       }
     }
-    failPendingNotifications(reason) { $0.deviceId == deviceId }
+    notifications.failAll(reason) { $0.deviceId == deviceId }
     delegate?.onDeviceDisconnected(deviceId: deviceId)
   }
 }
@@ -1257,14 +652,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     servicesAwaitingRegistration.removeAll()
     noteDiscardedRegistration()
 
-    // `peripheralManagerDidStartAdvertising:error:` is documented only as returning "the result of a
-    // startAdvertising: call", with nothing promising one arrives when the state drops instead — so a
-    // start CoreBluetooth already has is settled here rather than left pending for the process
-    // lifetime. Claiming the completion is what stops a late callback settling it a second time, and
-    // the expiry goes with the advertisement it belonged to rather than stopping a later one.
-    cancelAdvertisingTimeout()
-    pendingAdvertisingTimeoutMs = 0
-    claimAdvertisingCompletion()?(reason)
+    advertising.discard(reason: reason)
 
     // Every subscription dies with the database, so report each one as ended.
     let ended = subscribedCentrals.map { ($0.key, Array($0.value.keys)) }
@@ -1285,8 +673,8 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     connectedCentrals.removeAll()
     centralPayloadLengths.removeAll()
     subscribedCentrals.removeAll()
-    discardPendingRequests { _ in true }
-    failPendingNotifications(reason)
+    pendingRequests.discard { _ in true }
+    notifications.failAll(reason)
     for deviceId in disconnected {
       delegate?.onDeviceDisconnected(deviceId: deviceId)
     }
@@ -1294,12 +682,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
 
   // Different selector than expected; only path that resolves startAdvertising promise.
   func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
-    // Arm timeout only if start succeeded (airtime limit only applies to successful ads).
-    if error == nil {
-      scheduleAdvertisingTimeout(pendingAdvertisingTimeoutMs)
-    }
-    pendingAdvertisingTimeoutMs = 0
-    claimAdvertisingCompletion()?(error)
+    advertising.didStart(error: error)
   }
 
   func peripheralManager(
@@ -1398,7 +781,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       serviceUuid: resolved?.service.normalizedString ?? "",
       characteristicUuid: characteristic.uuid.normalizedString
     )
-    failPendingNotifications(.deviceDisconnected(deviceId: deviceId)) { entry in
+    notifications.failAll(.deviceDisconnected(deviceId: deviceId)) { entry in
       guard entry.deviceId == deviceId else { return false }
       guard let resolved = resolved else {
         return entry.address.characteristic == characteristic.uuid
@@ -1438,8 +821,8 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       return
     }
 
-    let reqId = nextRequestId()
-    registerPendingRequest(reqId, request: request, isRead: true)
+    let reqId = pendingRequests.nextId()
+    pendingRequests.register(reqId, request: request, isRead: true)
 
     delegate?.onCharacteristicReadRequest(
       deviceId: request.central.identifier.uuidString,
@@ -1470,7 +853,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     }
 
     // Must call respond(to:withResult:) exactly once per callback, on first request. Batch is answered as a unit.
-    let batchId = nextRequestId()
+    let batchId = pendingRequests.nextId()
     let delegated = Set(addresses.filter { delegation(for: $0).write })
 
     // Assemble before applying so one invalid fragment fails the whole batch (atomicity).
@@ -1501,7 +884,7 @@ extension GattServerManager: CBPeripheralManagerDelegate {
       for (address, value) in automatic {
         deferred[address] = DeferredWrite(value: value, baseline: characteristicValues[address])
       }
-      registerPendingRequest(batchId, request: first, isRead: false, deferredValues: deferred)
+      pendingRequests.register(batchId, request: first, isRead: false, deferredValues: deferred)
     }
 
     // Long writes: once per attribute, offset 0, assembled value (like Android). Queued writes deduplicated.
@@ -1528,6 +911,6 @@ extension GattServerManager: CBPeripheralManagerDelegate {
 
   /// Drains queued notifications. Selector name matters: peripheralManagerIsReady(_:) is never called.
   func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
-    drainPendingNotifications()
+    notifications.drain()
   }
 }

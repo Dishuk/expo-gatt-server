@@ -9,22 +9,10 @@ import XCTest
 /// response PDU verbatim. Both spellings are documented to work: the whole value with `offset: 0`, or
 /// an already-sliced value with the request's own offset. Android implements the same contract.
 final class ResponseRebasingTests: XCTestCase {
-  private var manager: GattServerManager!
-
-  override func setUp() {
-    super.setUp()
-    manager = GattServerManager()
-  }
-
-  override func tearDown() {
-    manager = nil
-    super.tearDown()
-  }
-
   private func rebase(
     _ bytes: [UInt8], supplied: Int, requested: Int, isRead: Bool = true
   ) throws -> Data {
-    try manager.rebasedResponseValue(
+    try rebasedResponseValue(
       Data(bytes), isRead: isRead, suppliedOffset: supplied,
       requestedOffset: requested, requestId: 7
     )

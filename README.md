@@ -18,7 +18,11 @@ Expo module that turns your React Native app into a BLE GATT server. Advertise s
 ## Features
 
 - **Peripheral mode** -- Act as a BLE GATT server, not just a client
-- **Cross-platform** -- Unified API across iOS (CoreBluetooth) and Android (BluetoothGatt); platform differences documented
+- **Cross-platform** -- One API across iOS (CoreBluetooth) and Android (BluetoothGatt), with the same
+  error codes and UUID spelling on both. Where a platform cannot honour a call it says so rather than
+  pretending: `disconnectDevice` is Android-only, `localName` is advertised on iOS only, and the
+  advertising tuning options (`mode`, `txPowerLevel`, `manufacturerData`, `serviceData`) are Android-only.
+  Every difference is on the type and in [Platform Setup](docs/platform-setup.md)
 - **Expo native modules** -- No manual linking, auto-configured via expo-modules
 - **Config plugin** -- Ships its own iOS permission, background mode and Android BLE requirement configuration
 - **Event-driven** -- Connections, subscriptions, read/write requests, notification delivery, MTU changes, adapter state
@@ -74,7 +78,8 @@ await createServer([
   },
 ]);
 
-// Start advertising
+// Start advertising. `localName` is advertised verbatim on iOS only — Android has nowhere to put a
+// per-advertisement name and broadcasts the device's own instead. See Platform Setup.
 await startAdvertising({
   localName: 'MyDevice',
   serviceUuids: ['00001234-0000-1000-8000-00805f9b34fb'],
@@ -131,15 +136,28 @@ expo-gatt-server/
 ├── ios/
 │   ├── ExpoGattServer.podspec     # CocoaPods spec (iOS 15.1+)
 │   ├── ExpoGattServerModule.swift # Expo module definition
-│   ├── GattConfigurationParsing.swift # Configuration decoding, host-testable
-│   └── GattServerManager.swift    # CoreBluetooth peripheral manager
+│   ├── GattServerManager.swift    # CoreBluetooth peripheral: publication and ATT routing
+│   ├── AdvertisingCoordinator.swift # The radio and the promise waiting on it
+│   ├── NotificationQueue.swift    # Sends the transmit queue refused
+│   ├── PendingRequestStore.swift  # Requests handed to JavaScript, and their expiries
+│   ├── WriteBatch.swift           # Write assembly and response rebasing, host-testable
+│   ├── GattServerError.swift      # Rejection codes and messages
+│   ├── GattTypes.swift            # Shared constants, addresses, MTU, UUID spelling
+│   └── GattConfigurationParsing.swift # Configuration decoding, host-testable
 ├── android/
 │   ├── build.gradle               # Android build config (API 24+)
 │   └── src/main/java/expo/modules/gattserver/
-│       ├── AttOperations.kt         # ATT property, permission and error maps
 │       ├── ExpoGattServerModule.kt  # Expo module definition
+│       ├── GattServerManager.kt     # BluetoothGatt server: publication and ATT routing
+│       ├── AdvertisingController.kt # The radio, adapter name and start bounds
+│       ├── NotificationDispatcher.kt # Per-device send queues
+│       ├── PreparedWriteQueue.kt    # Queued writes and their atomic execute
+│       ├── AttributeStore.kt        # Mirrored attribute values and their monitor
+│       ├── SubscriptionRegistry.kt  # Per-client CCCD state
+│       ├── BluetoothAvailability.kt # Adapter state, normalised
 │       ├── GattConfiguration.kt     # Configuration parsing, host-testable
-│       └── GattServerManager.kt     # BluetoothGatt server manager
+│       ├── AttOperations.kt         # ATT arithmetic, host-testable
+│       └── GattLog.kt               # Debug-log tag and gate
 ├── tests/                         # Host-side Swift and Kotlin suites
 ├── plugin/src/                    # Expo config plugin (built to plugin/build/)
 ├── example/                       # Runnable harness app for local development
