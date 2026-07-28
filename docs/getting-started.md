@@ -18,21 +18,16 @@ A step-by-step guide to adding BLE peripheral functionality to your Expo app.
 npx expo install expo-gatt-server
 ```
 
-Installing from a git URL instead of the registry needs lifecycle scripts enabled: the published
-tarball carries the compiled `build/` and `plugin/build/`, but a git checkout produces them in
-`prepare`. Under `--ignore-scripts` (or `ignore-scripts=true` in `.npmrc`) the install still succeeds
-and the package is then missing its entry point and its config plugin.
+From git: enable lifecycle scripts (published tarball includes compiled `build/` and `plugin/build/`, git checkout builds in `prepare`).
 
-Rebuild native projects after installing:
+Rebuild native projects:
 
 ```bash
 npx expo prebuild --clean
 npx expo run:ios    # or run:android
 ```
 
-**This package cannot run in Expo Go**, which ships a fixed set of native modules. Use a development
-build (`npx expo run:*` or EAS Build). `isSupported()` reports `false` in Expo Go and on web, and
-importing the package never throws there, so a conditional integration is safe.
+**Not available in Expo Go** (fixed native modules). Use `npx expo run:*` or EAS Build. `isSupported()` returns `false` in Expo Go and on web; importing never throws, so conditional use is safe.
 
 ## Configure Permissions
 
@@ -48,7 +43,7 @@ The package ships an Expo config plugin, so the build-time configuration needs n
 }
 ```
 
-That alone writes `NSBluetoothAlwaysUsageDescription` into the iOS `Info.plist` -- without it iOS terminates the app the moment it touches CoreBluetooth. Every option is optional:
+This writes `NSBluetoothAlwaysUsageDescription` to iOS `Info.plist` (required for CoreBluetooth access). All options are optional:
 
 ```json
 {
@@ -151,19 +146,7 @@ central doing primary service discovery -- see
 | `writeSigned` | Writeable with a signature. **Android only** |
 | `writeSignedMitm` | Writeable with a signature and MITM protection. **Android only** |
 
-The Android-only values reject on iOS with `ERR_UNSUPPORTED` rather than being approximated into a
-weaker guarantee -- `CBAttributePermissions` has only four members and Apple documents `broadcast`
-and `extendedProperties` as not allowed for local characteristics. See
-[Properties and permissions in the API reference](./api.md#characteristicproperty) for the full
-per-platform mapping and the reasoning.
-
-An unrecognised property or permission name throws, so a typo cannot silently publish an attribute with
-one fewer of either than the configuration asked for.
-
-An encrypted permission also applies to subscriptions, so a central cannot receive by notification what
-it may not read directly: combining `notify` or `indicate` with `readEncrypted` or `writeEncrypted`
-means a central must reach that link security before it can subscribe. See
-[Permissions and subscriptions](./api.md#permissions-and-subscriptions).
+Android-only values reject on iOS with `ERR_UNSUPPORTED`. Unrecognized property or permission names throw. Encrypted permissions apply to subscriptions: a central cannot subscribe unless it meets the link security requirement for that characteristic. See [API reference](./api.md#characteristicproperty).
 
 ### Optional extras
 
@@ -181,11 +164,7 @@ import { createServer } from 'expo-gatt-server';
 await createServer(services);
 ```
 
-This initializes the native GATT server and registers all services and characteristics. On iOS, the
-module checks Bluetooth authorization status. On Android, it checks the `BLUETOOTH_CONNECT` permission.
-
-**The promise resolves only once every service is published**, so once it settles the database really is
-there to advertise. Calling `createServer` again replaces the server rather than adding to it.
+Initializes the GATT server and registers all services and characteristics. Checks Bluetooth authorization (iOS) or `BLUETOOTH_CONNECT` permission (Android). **Promise resolves only after all services are published.** Calling again replaces the server.
 
 An optional second argument tunes how long a request delegated to JavaScript may go unanswered before
 the module answers it itself:
@@ -198,11 +177,9 @@ The default is 10000 ms. It exists because one unanswered request stalls the cen
 ATT transaction timeout, which then bars every further read, write **and notification** on that
 connection. See [createServer](./api.md#createserver).
 
-### Guarding for platforms without the module
+### Guarding for unsupported platforms
 
-Importing this package never throws, so a bundle that only uses BLE conditionally is safe. Calls that
-need the radio reject where the native module is absent -- on web, and in Expo Go, which ships a fixed
-set of native modules. Guard them:
+Importing never throws. Guard API calls on web and in Expo Go:
 
 ```typescript
 import { isSupported, createServer } from 'expo-gatt-server';
@@ -212,8 +189,7 @@ if (isSupported()) {
 }
 ```
 
-`isSupported` is synchronous and safe at module scope. Teardown functions and listener helpers never
-throw either, so cleanup code needs no guard.
+`isSupported()` is synchronous and safe at module scope. Cleanup functions and listeners never throw.
 
 ## Start Advertising
 
@@ -241,18 +217,13 @@ await startAdvertising({
 | `android.includeDeviceName` | `boolean` | `localName !== undefined` | Advertise the device's own Bluetooth name |
 | `android.setAdapterName` | `boolean` | `false` | Rename the phone's system-wide Bluetooth name to `localName` |
 
-iOS supports only two advertisement keys in the peripheral role, so the options marked "Android only" cannot be expressed there. `manufacturerData`, `serviceData` and `connectable: false` are **rejected** on iOS rather than dropped, because a scanner filtering on them would never find the peripheral; `mode`, `txPowerLevel` and `includeTxPowerLevel` are accepted and warned about, since they only tune the radio. See [Platform support for advertising options](./api.md#platform-support-for-advertising-options).
+**iOS**: Only two advertisement keys supported. Options marked "Android only" are **rejected** (`manufacturerData`, `serviceData`, `connectable: false`); tuning-only options (`mode`, `txPowerLevel`, `includeTxPowerLevel`) are accepted with a warning. See [API reference](./api.md#platform-support-for-advertising-options).
 
-On Android, `localName` cannot be advertised as given: the platform only offers "include the adapter's name". By default the device's existing name is advertised instead. Set `android.setAdapterName` to opt in to renaming the adapter, which the module reverses when advertising stops. See [the API reference](./api.md#the-advertised-local-name) for the details and caveats.
+**Android**: `localName` cannot be advertised directly. By default, the device's system Bluetooth name is advertised. Set `android.setAdapterName: true` to rename the adapter (module reverses on stop).
 
-The promise resolves when advertising starts successfully. On iOS, this requires Bluetooth to be powered
-on -- the call waits for a definitive state rather than sampling it, so calling it immediately after
-`createServer` is safe. On Android, this requires the `BLUETOOTH_ADVERTISE` permission.
+Promise resolves when advertising starts. **iOS**: requires Bluetooth powered on (waits for definitive state; safe to call immediately after `createServer`). **Android**: requires `BLUETOOTH_ADVERTISE` permission.
 
-`timeoutMs` stops the advertisement by itself after the given number of milliseconds, up to 180000 on
-both platforms. Android uses `AdvertiseSettings.setTimeout`; iOS has no equivalent, so the module
-emulates it with a timer, which only holds while the process is alive. Either way there is no event when
-it fires -- poll [`isAdvertising`](./api.md#isadvertising) if you need to know.
+`timeoutMs` stops advertising after the given milliseconds (max 180000 on both platforms). Android: `AdvertiseSettings.setTimeout`. iOS: emulated with timer (only holds while process is alive). No event on timeout; poll [`isAdvertising`](./api.md#isadvertising) if needed.
 
 ## Handle Requests
 
@@ -273,13 +244,7 @@ const disconnectSub = addDeviceDisconnectedListener((event) => {
 });
 ```
 
-> **These events do not mean the same thing on both platforms.** Android reports the connection itself.
-> iOS has no connection-level callback, so a central is reported on its **first ATT activity** -- a
-> subscribe, read or write -- and its disconnection is inferred from losing its last subscription. A
-> central that only reads and writes is therefore reported late and generally never reported as gone.
-> If your app needs a reliable "is this central still there" signal on iOS, drive it from the
-> subscription events below. See
-> [Platform Differences](./architecture.md#platform-differences).
+> **Platform difference:** Android reports connection directly. iOS reports on **first ATT activity** (subscribe/read/write); disconnection inferred from losing last subscription. A read-only central may not be reported as gone. Use subscription events for reliable "central present" on iOS. See [Platform Differences](./architecture.md#platform-differences).
 
 ### Subscription Events
 
@@ -301,8 +266,7 @@ const unsubscribeSub = addCharacteristicUnsubscribedListener((event) => {
 });
 ```
 
-Sending before a subscription arrives rejects with `ERR_NO_SUBSCRIBER`. Whether the central asked for
-notifications or indications is not reported, because CoreBluetooth does not expose the distinction.
+Sending before a subscription rejects with `ERR_NO_SUBSCRIBER`. Whether the central subscribed to notifications or indications is not reported (CoreBluetooth limitation).
 
 ### Read Requests
 
@@ -317,18 +281,14 @@ import {
 
 addCharacteristicReadRequestListener(async (event) => {
   const data = [0x06, 72]; // Flags + heart rate
-  // `offset: 0` says "this value starts at the beginning of the attribute", which is what `data` is.
-  // The module rebases the response onto the offset the request actually asked for, so a Read Blob
-  // continuation is answered correctly without slicing here. Pass `event.offset` only if you have
-  // already sliced `data` to start there — passing it with the whole value resends the prefix.
+  // Module rebases response onto the request's offset; pass 0 unless you've already sliced data.
   await sendResponse(event.deviceId, event.requestId, GATT_SUCCESS, 0, data);
 });
 ```
 
-> **Note:** If a characteristic has a cached value (set via `value` in config or `updateCharacteristicValue`), the native layer auto-responds to reads without invoking this listener. Set `delegate: { read: true }` on the characteristic to receive every read regardless.
+> **Note:** Cached values (via config `value` or `updateCharacteristicValue`) auto-respond without invoking this listener. Set `delegate: { read: true }` to receive all reads.
 
-Answer every request you receive. One left unanswered is completed with `ATT_ERROR_UNLIKELY_ERROR` after
-`requestTimeoutMs`, which keeps the connection usable but tells the central nothing useful.
+Answer every request. Unanswered requests timeout after `requestTimeoutMs` with `ATT_ERROR_UNLIKELY_ERROR`.
 
 ### Write Requests
 
@@ -342,14 +302,7 @@ addCharacteristicWriteRequestListener((event) => {
 });
 ```
 
-The event fires for every write. By default the module has **already** acknowledged it before the
-listener runs, on both platforms, so `event.responseNeeded` is `false` and there is nothing to answer.
-
-An acknowledged write also updates the value later reads are answered from, identically on both
-platforms, so a readable characteristic serves what was written with no help from the listener --
-there is no need to keep a copy of it yourself. A characteristic configured with
-`delegate: { write: true }` is the exception: nothing is stored until you accept the write, so commit
-the value with `updateCharacteristicValue` when you answer.
+The module acknowledges writes before the listener runs (both platforms), so `event.responseNeeded` is `false`. Acknowledged writes update the cached value for later reads automatically. With `delegate: { write: true }`, nothing is stored until you accept the write via `updateCharacteristicValue`.
 
 ### Delegating to JavaScript
 
@@ -384,9 +337,7 @@ import {
 } from 'expo-gatt-server';
 
 addCharacteristicWriteRequestListener(async (event) => {
-  // A delegated characteristic keeps its value yours to commit, whether or not this event is the one
-  // that answers. iOS delivers a long write touching several delegated characteristics as one batch,
-  // marking exactly one event `responseNeeded` — returning early on the rest would drop their values.
+  // iOS: long writes batch multiple delegated characteristics; only one has responseNeeded: true.
   if (!event.responseNeeded) {
     await updateCharacteristicValue(event.serviceUuid, event.characteristicUuid, event.value);
     return;
@@ -427,19 +378,14 @@ await sendNotification(deviceId, '180d', '2a37', heartRate);
 The central must have subscribed first, or the call rejects with `ERR_NO_SUBSCRIBER` -- wait for
 `onCharacteristicSubscribed`.
 
-This pushes the value; it does **not** change what a read of the characteristic returns. Call
-`updateCharacteristicValue` first if it should also be readable:
+Notifications do **not** update the cached value. Call `updateCharacteristicValue` first if readable:
 
 ```typescript
 await updateCharacteristicValue('180d', '2a37', heartRate);
 await sendNotification(deviceId, '180d', '2a37', heartRate);
 ```
 
-**What a resolved promise reports differs by platform**: on Android it means the stack finished
-transmitting (and, for an indication, that the central confirmed), while on iOS it means only that
-CoreBluetooth accepted the payload for transmission — the peripheral role has no delivery callback at
-all. Either way, sends issued while an earlier one is still in flight are queued in order, so awaiting
-it is what paces a stream against the link:
+**Promise resolution:** Android = transmission complete (+ confirmation for indications); iOS = CoreBluetooth accepted payload. Both platforms queue sends in order, so awaiting paces the stream:
 
 ```typescript
 for (const sample of samples) {
@@ -451,9 +397,7 @@ Pass `confirm: true` as the fifth argument to send an indication (acknowledged b
 a notification. The characteristic must declare the matching property -- `indicate` for `true`, `notify`
 for `false` -- or the call rejects with `ERR_CONFIRM_UNSUPPORTED`.
 
-> **A characteristic declaring both `notify` and `indicate` behaves differently per platform.** iOS never
-> receives the `confirm` flag: `updateValue(_:for:onSubscribedCentrals:)` has no such parameter and
-> CoreBluetooth chooses from the declared properties. Declare only the one you intend to use.
+> **Characteristic with both `notify` and `indicate`:** iOS ignores `confirm` flag; CoreBluetooth chooses from declared properties. Declare only the intended property.
 
 ### Payload size
 
@@ -480,10 +424,7 @@ addNotificationSentListener((event) => {
 });
 ```
 
-On Android this is the platform's own delivery callback and `status` is its GATT status. On iOS it is
-emitted when CoreBluetooth accepts the payload, always with `status: 0`, and a failed send produces no
-event at all -- only a rejected `sendNotification` promise. Prefer awaiting the promise when you need to
-know the outcome of a specific send.
+**Android:** platform's delivery callback; `status` is GATT status. **iOS:** emitted when payload accepted, always `status: 0`; failed sends have no event (only rejected promise). Await the promise for specific send outcome.
 
 ## Cleanup
 
@@ -499,13 +440,7 @@ stopAdvertising();
 stopServer();
 ```
 
-Both are synchronous and neither ever throws, including where the native module is absent, so cleanup
-needs no guard and no `try`.
-
-`stopServer` unpublishes the whole database and releases native resources, but **it does not disconnect
-anybody** and emits no `onDeviceDisconnected` events. On Android call
-[`disconnectDevice`](./api.md#disconnectdevice) first if a central must be dropped; on iOS that is not
-possible at all, and only the central can end the connection.
+Both are synchronous and never throw (safe without guards). `stopServer` unpublishes the database and releases resources, but **does not disconnect centrals** or emit `onDeviceDisconnected` events. To drop a central on Android, call [`disconnectDevice`](./api.md#disconnectdevice) first; on iOS, only the central can end the connection.
 
 ## Full Example
 
@@ -541,8 +476,7 @@ const services: GattServiceConfig[] = [
 ];
 
 export default function HeartRatePeripheral() {
-  // Subscribers, not connections. A central receives nothing until it subscribes, and on iOS a
-  // connection is not observable at all until the central's first ATT activity.
+  // Track subscribers, not connections (centrals receive nothing until subscribed).
   const subscribers = useRef<Set<string>>(new Set());
 
   useEffect(() => {
@@ -564,9 +498,7 @@ export default function HeartRatePeripheral() {
       const bpm = 60 + Math.floor(Math.random() * 40);
       for (const deviceId of Array.from(subscribers.current)) {
         try {
-          // Awaited per device: the promise settles once the platform has taken the payload — on
-          // Android when the send completed, on iOS when it was queued — which paces the stream
-          // against the link instead of overrunning it.
+          // Await per device to pace the stream: Android = send completed, iOS = queued.
           await sendNotification(deviceId, SERVICE_UUID, HR_CHAR_UUID, [0x06, bpm]);
         } catch (error) {
           console.warn(`notification to ${deviceId} failed`, error);
@@ -598,13 +530,9 @@ export default function HeartRatePeripheral() {
 }
 ```
 
-Two things this example deliberately does not do. It does not treat `onDeviceConnected` as "ready to
-stream", because nothing is delivered before a subscription and iOS may not report the connection at
-all. And it does not assume a central goes away quietly: `onCharacteristicUnsubscribed` covers both a
-deliberate unsubscribe and a disconnection while subscribed, on both platforms.
+This example does not treat `onDeviceConnected` as "ready" (no delivery before subscription); instead, it waits for `onCharacteristicSubscribed`. It also uses `onCharacteristicUnsubscribed` for cleanup (covers both explicit unsubscribe and disconnection while subscribed).
 
-A runnable version of this, with a button for every API call, lives in
-[`example/`](https://github.com/Dishuk/expo-gatt-server/tree/main/example).
+A runnable version with API buttons lives in [`example/`](https://github.com/Dishuk/expo-gatt-server/tree/main/example).
 
 ## Next Steps
 

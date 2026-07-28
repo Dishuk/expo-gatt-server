@@ -17,9 +17,7 @@ cd expo-gatt-server
 npm install
 ```
 
-`npm install` runs `prepare`, which compiles `src/` to `build/`. That matters because the package's
-`main` points at `build/index.js` — the example app resolves the module through it, so a checkout with
-no `build/` cannot bundle. If you ever clear it, `npm run build` puts it back.
+`npm install` runs `prepare`, which compiles `src/` to `build/`. The package's `main` points at `build/index.js`. Clear it with `npm run clean`, restore it with `npm run build`.
 
 ## Build
 
@@ -37,23 +35,16 @@ no `build/` cannot bundle. If you ever clear it, `npm run build` puts it back.
 Most scripts delegate to `expo-module-scripts`. `prepublishOnly` cleans and rebuilds both `build/` and
 `plugin/build/`, neither of which is committed.
 
-`tsconfig.json` drives the published build and excludes the test suites, so they are never emitted into
-`build/`. `tsconfig.check.json` includes them, and is what `npm run typecheck` uses. The plugin has the
-same pair — `plugin/tsconfig.json` builds it, `plugin/tsconfig.check.json` checks it with its suite —
-and `npm run typecheck` runs both, so nothing under `src/` or `plugin/src/` goes unchecked.
+`tsconfig.json` excludes test suites; `tsconfig.check.json` includes them for `npm run typecheck`. The plugin has the same pair (`plugin/tsconfig.json` and `plugin/tsconfig.check.json`).
 
-Neither of those reads the *emitted* declarations, though, and those are what a consumer gets. The one
-check that does is the example app's own type-check, which resolves `expo-gatt-server` through the
-`file:..` symlink and so reads `build/index.d.ts`:
+The example app type-checks against emitted declarations:
 
 ```bash
 npm run build                                    # in the repo root, first
 cd example && npx tsc --noEmit -p tsconfig.json
 ```
 
-It deliberately has no `paths` override onto `../src`: with one, a declaration emit that was wrong or
-stale still type-checked green here and broke in the first consumer's app instead. CI runs both builds
-before this step for the same reason.
+This reads `build/index.d.ts` through the `file:..` symlink and catches stale declarations before they reach consumers. CI runs both builds before this check.
 
 ## Project Layout
 
@@ -123,28 +114,16 @@ npm run test:android  # Android peripheral logic    (JUnit + Robolectric, via Gr
 
 ### What is covered, and what is not
 
-The suites target the logic that is **invisible until a peer connects**: a mis-assembled write, a
-response aligned to the wrong offset, a subscription that bypasses the value's own encryption. None of
-that raises an error at runtime -- it just puts the wrong bytes on the air -- so it is exactly what is
-worth pinning.
-
 | Suite | Covers |
 |---|---|
 | `src/__tests__/` | UUID normalisation and expansion, configuration validation, argument bounds, the ATT constants, delegation to the native module, the unsupported-platform fallbacks, and the three `Platform.OS` branches |
-| `plugin/src/__tests__/` | The two decisions the config plugin makes that only surface in a build: that it raises an existing `android.hardware.bluetooth_le` requirement but never relaxes one, and the three-way precedence of `bluetoothAlwaysPermission` |
-| `tests/swift/` | Write assembly and the queued-write distinction, response rebasing, the ATT error-code mapping, UUID spelling, adapter-state mapping, MTU arithmetic, every rejection code and the messages that have to say something specific |
-| `tests/android/` | The same ATT contracts as the Swift suite, case for case, plus configuration parsing against the real `android.bluetooth` classes -- including the CCCD permission derivation that stops an unbonded central subscribing to an encrypted characteristic |
+| `plugin/src/__tests__/` | Config plugin decisions: raising existing `android.hardware.bluetooth_le` requirements without relaxing them, and the three-way precedence of `bluetoothAlwaysPermission` |
+| `tests/swift/` | Write assembly, queued-write distinction, response rebasing, ATT error-code mapping, UUID spelling, adapter-state mapping, MTU arithmetic, all rejection codes with specific messages |
+| `tests/android/` | Same ATT contracts as the Swift suite (platform parity), configuration parsing against `android.bluetooth` classes, and CCCD permission derivation that blocks unbonded centrals from subscribing to encrypted characteristics |
 
-Several ATT cases are duplicated deliberately across `tests/swift/` and `tests/android/`. The platforms
-implement those contracts independently, and asserting that the same inputs produce the same bytes on
-each is the only thing holding them together -- the module's premise is that one configuration behaves
-the same either side, and a divergence there is otherwise found by a user.
+ATT cases are duplicated across `tests/swift/` and `tests/android/` to verify platform parity.
 
-**Not covered, and honestly so:** the concurrency. Lock ordering, the advertising generation counter,
-exactly-once settling of notification promises across a disconnect, and the publication state machine
-are all reviewed by reading and exercised by hand, not by tests. Mock-driven "concurrency tests" would
-pass regardless of whether the real races are handled, which is worse than not having them. Treat any
-change in that area as needing the manual pass below.
+Concurrency (lock ordering, notification settling, state machines) is reviewed by reading and exercised by hand, not by automated tests. Treat changes in that area as requiring the manual pass below.
 
 ### Running the native suites
 
@@ -225,28 +204,14 @@ Then use a BLE scanner app (e.g. nRF Connect) as the central to verify:
 
 ### Changing the ATT logic
 
-A change to write assembly, response rebasing, CCCD handling or the MTU checks needs the matching case
-in **both** `tests/swift/` and `tests/android/`, not just the platform you edited — that pairing is what
-keeps the two implementations agreeing.
-
-A new test should fail if the behaviour it describes is removed. Reintroducing a bug and watching the
-suite go red is a cheap way to check that, and worth doing for anything security- or wire-visible.
+Changes to write assembly, response rebasing, CCCD handling, or MTU checks require matching test cases in **both** `tests/swift/` and `tests/android/`. New tests should fail if their behavior is removed; verify this by reintroducing the bug and watching the suite fail.
 
 ### Keeping the suites honest
 
-Test *count* is not the goal, and two patterns are worth resisting because they inflate it without
-adding detection:
-
-- **Cross products.** Where one axis is a shared predicate and the other is the call sites that consult
-  it, test each axis once. `byteArrays.test.ts` is written this way: the interesting byte values go
-  through one entry point, and every entry point gets one bad value. Multiplying the two asserted the
-  same predicate seventy times.
-- **Enumerating data instead of behaviour.** The set of error codes a platform can raise is
-  documentation; the wrapper has no per-code logic. One representative code per entry point pins the
-  pass-through — forty of them pinned it forty times over.
-
-Reaching a conditional by running the whole suite twice is the same trap: `platformBranching.test.ts`
-mocks `Platform` and asserts both sides in one run, which is why there is a single Jest project.
+Avoid inflating test count with cross-products or data enumeration:
+- Test each axis once, not their product (e.g., `byteArrays.test.ts`: one bad value per entry point).
+- One representative error code per entry point pins pass-through behavior; all 40 codes asserted it 40 times over.
+- `platformBranching.test.ts` mocks `Platform` in one run, testing both sides together (hence a single Jest project).
 
 ### Commit Messages
 

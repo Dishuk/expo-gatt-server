@@ -1,6 +1,6 @@
 # expo-gatt-server - BLE Peripheral for Expo
 
-An Expo module that turns your React Native app into a BLE GATT server (peripheral). Advertise services, handle read/write requests, and push notifications to connected centrals -- all from JavaScript.
+Expo module that turns your React Native app into a BLE GATT server. Advertise services, handle read/write requests, send notifications to connected centrals—from JavaScript.
 
 ## Prerequisites
 
@@ -9,7 +9,7 @@ An Expo module that turns your React Native app into a BLE GATT server (peripher
 | [Expo](https://expo.dev/) | SDK 57 | Framework and module system -- the version this package is developed and tested against |
 | [React Native](https://reactnative.dev/) | as bundled with your Expo SDK | Runtime |
 | [Node.js](https://nodejs.org/) | >= 18 | Build tooling |
-| Xcode | 26.5 | iOS builds (iOS 15.1+ deployment target, Swift 5.9). Bounded at both ends by Expo SDK 57 rather than by this package: its prebuilt artefacts need Swift 6.2, and later compilers do not yet build them -- see the `ios-integration` job in `.github/workflows/ci.yml` |
+| Xcode | 26.5 | iOS builds (iOS 15.1+ deployment target, Swift 5.9). Bounded by Expo SDK 57 compatibility. |
 | Android Studio | any | Android builds (API 24+ / Android 7.0, compileSdk 35) |
 
 **A development build is required.** The package ships native code, so it cannot run in Expo Go. Use
@@ -18,18 +18,13 @@ An Expo module that turns your React Native app into a BLE GATT server (peripher
 ## Features
 
 - **Peripheral mode** -- Act as a BLE GATT server, not just a client
-- **Cross-platform** -- Unified API across iOS (CoreBluetooth) and Android (BluetoothGatt), with the
-  platform differences documented rather than papered over
+- **Cross-platform** -- Unified API across iOS (CoreBluetooth) and Android (BluetoothGatt); platform differences documented
 - **Expo native modules** -- No manual linking, auto-configured via expo-modules
 - **Config plugin** -- Ships its own iOS permission, background mode and Android BLE requirement configuration
-- **Event-driven** -- Connections, subscriptions, read/write requests, notification delivery, MTU
-  changes and Bluetooth adapter state
-- **Answer requests yourself** -- Per-characteristic `delegate` opt-in hands reads and writes to
-  JavaScript, so a write can be validated or rejected and a read can be computed
-- **MTU-aware** -- Validates payload size against the negotiated MTU before sending, and exposes the
-  MTU so payloads can be sized up front
-- **Portable UUIDs** -- 16-bit, 32-bit and 128-bit forms all accepted, normalised before either
-  platform sees them
+- **Event-driven** -- Connections, subscriptions, read/write requests, notification delivery, MTU changes, adapter state
+- **Delegated handlers** -- Per-characteristic `delegate` opt-in validates or rejects writes, computes reads in JavaScript
+- **MTU-aware** -- Validates payload size against negotiated MTU; exposes MTU for payload sizing
+- **Portable UUIDs** -- 16-bit, 32-bit, and 128-bit forms accepted and normalized
 - **Safe to import anywhere** -- `isSupported()` reports whether the native module is present;
   importing never throws on web or in Expo Go
 
@@ -40,9 +35,7 @@ An Expo module that turns your React Native app into a BLE GATT server (peripher
 npx expo install expo-gatt-server
 ```
 
-Add the config plugin to `app.json` -- it writes the iOS Bluetooth usage description your app cannot
-launch CoreBluetooth without, and exposes the background mode and the Android BLE hardware requirement
-as options. See [Getting Started](./docs/getting-started.md#config-plugin).
+Add the config plugin to `app.json` to configure iOS Bluetooth usage description, background mode, and Android BLE requirement. See [Getting Started](./docs/getting-started.md#config-plugin).
 
 ```json
 {
@@ -111,8 +104,7 @@ configuration used.
 
 ### iOS
 
-The config plugin writes `NSBluetoothAlwaysUsageDescription` for you. To set it by hand instead, add it
-to `Info.plist` (or `app.json` under `expo.ios.infoPlist`):
+The config plugin writes `NSBluetoothAlwaysUsageDescription`. To set it manually instead, add to `Info.plist` or `app.json` under `expo.ios.infoPlist`:
 
 ```xml
 <key>NSBluetoothAlwaysUsageDescription</key>
@@ -121,13 +113,11 @@ to `Info.plist` (or `app.json` under `expo.ios.infoPlist`):
 
 ### Android
 
-`BLUETOOTH`, `BLUETOOTH_ADMIN` (both API <= 30), `BLUETOOTH_ADVERTISE` and `BLUETOOTH_CONNECT` are
-declared in the module's `AndroidManifest.xml` and merged automatically. No location permission is
-declared -- that is a scanning concern, and this module never scans.
+Permissions declared in `AndroidManifest.xml`:
+- `BLUETOOTH`, `BLUETOOTH_ADMIN` (API <= 30)
+- `BLUETOOTH_ADVERTISE`, `BLUETOOTH_CONNECT` (API 31+)
 
-For Android 12+ (API 31), the module checks `BLUETOOTH_CONNECT` and `BLUETOOTH_ADVERTISE` at runtime --
-request them before calling `createServer` or `startAdvertising`. See
-[Platform Setup](docs/platform-setup.md#permissions-1).
+For Android 12+ (API 31), request `BLUETOOTH_CONNECT` and `BLUETOOTH_ADVERTISE` at runtime before calling `createServer` or `startAdvertising`. See [Platform Setup](docs/platform-setup.md#permissions-1).
 
 ## Project Structure
 

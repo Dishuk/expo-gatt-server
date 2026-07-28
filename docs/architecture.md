@@ -65,8 +65,7 @@ Expo Module Bridge (ExpoGattServerModule)
 
 Above the bridge, `src/index.ts` is not a pass-through. It normalises every UUID onto its 128-bit form,
 range-checks bytes, offsets, statuses and timeouts, rejects unrecognised enum names, warns about
-advertising options iOS ignores, and degrades gracefully when the native module is absent -- so both
-platforms receive identical, already-valid input.
+advertising options iOS ignores, and degrades gracefully when the native module is absent.
 
 ## Native Module Bridge
 
@@ -220,13 +219,13 @@ The ATT protocol has a default MTU of 23 bytes (3-byte header + 20-byte payload)
 
 `sendNotification` validates the payload **before** transmitting. Up to the 512-octet attribute limit both platforms silently truncate an oversized notification rather than failing it -- Apple documents that `updateValue` truncates a value exceeding `maximumUpdateValueLength` "to fit", and the Android stack logs "attribute value too long, to be truncated to N" while building the `ATT_HANDLE_VALUE_NTF` PDU. Past that limit Android does not truncate at all: `notifyCharacteristicChanged` throws `IllegalArgumentException`, on a binder thread where nothing catches it. Because a notification has no continuation mechanism, transmitting it would lose the tail with nothing to recover it, so the send is refused before either can happen.
 
-`sendResponse` is deliberately **not** size-checked. An `ATT_READ_RSP` carries at most `ATT_MTU - 1` octets and the central finishes a longer value with `ATT_READ_BLOB_REQ`, which arrives as another read request bearing an offset -- so answering with more than fits is normal ATT rather than a failure. The module's own automatic read path already answers with the whole remainder from the requested offset, so a size check here only penalised delegated reads for behaving identically.
+`sendResponse` is not size-checked. An `ATT_READ_RSP` carries at most `ATT_MTU - 1` octets and the central finishes a longer value with `ATT_READ_BLOB_REQ`, which arrives as another read request bearing an offset. The module's automatic read path answers with the whole remainder from the requested offset.
 
 On iOS, the negotiated payload size is read from `central.maximumUpdateValueLength`. On Android, it is tracked via the `onMtuChanged` callback.
 
 ### Exposing the MTU to JavaScript
 
-The public unit is the **ATT MTU in octets** -- what the Bluetooth Core Specification and the Android platform both call "MTU". `getMtu(deviceId)` returns it, and `onMtuChanged` reports every change. `maxNotificationPayload` is supplied alongside it as `min(mtu - 3, 512)` -- the maximum Attribute Value length of an `ATT_HANDLE_VALUE_NTF` PDU, bounded by the 512-octet maximum length of an attribute value itself -- so callers never have to know the header size or either limit.
+The public unit is the **ATT MTU in octets** -- what the Bluetooth Core Specification and the Android platform both call "MTU". `getMtu(deviceId)` returns it, and `onMtuChanged` reports every change. `maxNotificationPayload` is supplied as `min(mtu - 3, 512)` -- the maximum Attribute Value length of an `ATT_HANDLE_VALUE_NTF` PDU, bounded by the 512-octet maximum length of an attribute value itself.
 
 The two platforms report different halves of the same figure exactly, and derive the other:
 
@@ -264,8 +263,7 @@ affects.
 
 ## Known Limits
 
-Two behaviours are shared by both platforms and are not what the specification asks for. Neither is a
-race — they are where the current design stops.
+Two behaviours are shared by both platforms and are not what the specification asks for.
 
 **A subscription does not survive a disconnect, even for a bonded central.** "The Client Characteristic
 Configuration descriptor value shall be persistent across connections for bonded devices" (Core Spec
