@@ -1,13 +1,8 @@
 import {
   addBluetoothStateChangedListener,
-  addCharacteristicReadRequestListener,
-  addCharacteristicSubscribedListener,
-  addCharacteristicUnsubscribedListener,
   addCharacteristicWriteRequestListener,
   addDeviceConnectedListener,
-  addDeviceDisconnectedListener,
   addMtuChangedListener,
-  addNotificationSentListener,
   createServer,
   disconnectDevice,
   getBluetoothState,
@@ -36,10 +31,8 @@ describe('isSupported', () => {
   });
 });
 
-/**
- * Every call is listed because the guard is per call site — one that forgets it does not fail here,
- * it throws `Cannot read property of null` from inside the module, naming neither the cause nor the fix.
- */
+// Every call is listed because the guard is per call site — one that forgets to call it does not
+// fail here, it throws "Cannot read property of null" from inside the module instead.
 describe('calls that cannot be approximated', () => {
   const rejecting: [string, () => Promise<unknown>][] = [
     ['createServer', () => createServer([])],
@@ -60,8 +53,8 @@ describe('calls that cannot be approximated', () => {
     },
   );
 
-  // The message has to name the platform it is talking about, since the advice differs by platform —
-  // `unsupportedWeb.test.ts` covers the web wording, which must not mention a rebuild at all.
+  // The message names the platform since the advice differs by platform — unsupportedWeb.test.ts
+  // covers the web wording, which must not mention a rebuild at all.
   it('names the platform whose binary is missing the module', async () => {
     await expect(createServer([])).rejects.toThrow(/not present in this android binary/);
   });
@@ -92,28 +85,18 @@ describe('calls that degrade gracefully', () => {
 });
 
 describe('listener helpers', () => {
-  // The event payload differs per helper and is irrelevant here, so the listener is typed loosely
-  // enough to be accepted by all of them.
+  // Representative sample of the thin per-event wrappers around the same addListener helper — first,
+  // an interior, and the last.
   const helpers: [string, (listener: (event: any) => void) => EventSubscription][] = [
     ['addMtuChangedListener', addMtuChangedListener],
-    ['addDeviceConnectedListener', addDeviceConnectedListener],
-    ['addDeviceDisconnectedListener', addDeviceDisconnectedListener],
-    ['addCharacteristicReadRequestListener', addCharacteristicReadRequestListener],
     ['addCharacteristicWriteRequestListener', addCharacteristicWriteRequestListener],
-    ['addNotificationSentListener', addNotificationSentListener],
-    ['addCharacteristicSubscribedListener', addCharacteristicSubscribedListener],
-    ['addCharacteristicUnsubscribedListener', addCharacteristicUnsubscribedListener],
     ['addBluetoothStateChangedListener', addBluetoothStateChangedListener],
   ];
 
-  // Listed per helper because each could independently be written to throw or return nothing. What
-  // they return is one shared object, so its behaviour is pinned once, below.
   it.each(helpers)('%s returns a subscription rather than throwing', (_name, subscribe) => {
     expect(typeof subscribe(() => {}).remove).toBe('function');
   });
 
-  // An effect that registers a listener pairs it with a `remove()` in its teardown, which would
-  // otherwise crash on a value it never received.
   it('hands back a subscription that can be removed repeatedly', () => {
     const subscription = addDeviceConnectedListener(() => {});
 

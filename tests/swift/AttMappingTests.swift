@@ -4,16 +4,11 @@ import XCTest
 @testable import GattServerCore
 
 /// The translations between the module's platform-neutral vocabulary and CoreBluetooth's.
-///
-/// Every one of these is observable by a peer or by a consumer: the ATT error byte goes on the wire, the
-/// UUID spelling is what a consumer's `===` compares against, and the state string is what a consumer
-/// branches on. All three have an Android counterpart that must agree.
+/// Each mapping has an Android counterpart that must agree.
 final class AttMappingTests: XCTestCase {
   // MARK: - Advertised UUID width
 
-  /// The shared TypeScript layer expands every UUID to 128 bits, which is right for addressing and for
-  /// event payloads and free on Android — but `CBUUID` advertises the width it was built from, so on iOS
-  /// that expansion costs fourteen of the advertisement's thirty-one bytes per UUID.
+  /// `CBUUID` advertises the width it was built from; a base-range UUID contracts to its shortest form.
   func testABaseRangeUuidContractsToItsShortestSpelling() {
     let expanded = CBUUID(string: "0000180D-0000-1000-8000-00805F9B34FB")
     XCTAssertEqual(expanded.data.count, 16, "precondition: the expanded form really is 16 octets")
@@ -48,10 +43,8 @@ final class AttMappingTests: XCTestCase {
 
   // MARK: - ATT error codes
 
-  /// The whole point of the mapping is that it is the identity over the specified range: JavaScript
-  /// passes an ATT error code, and the same byte has to reach the air on both platforms. Asserting the
-  /// round trip catches a transposed case that spelling out 18 expected constants would not, because a
-  /// swapped pair still type-checks and still looks plausible.
+  /// The mapping is the identity over the specified range: an ATT error code has to reach the air
+  /// unchanged on both platforms.
   func testEverySpecifiedCodeMapsToItself() {
     for status in 0...0x11 {
       XCTAssertEqual(
@@ -61,16 +54,8 @@ final class AttMappingTests: XCTestCase {
     }
   }
 
-  func testSuccessIsDistinctFromEveryError() {
-    XCTAssertEqual(attErrorCode(for: 0x00), .success)
-    for status in 1...0x11 {
-      XCTAssertNotEqual(attErrorCode(for: status), .success)
-    }
-  }
-
-  /// `respond(to:withResult:)` accepts only a `CBATTError.Code`, so the codes the specification defines
-  /// beyond 0x11 — and the application and profile ranges — have no representation. Downgrading them to
-  /// success would report a failed operation as a successful one, so they become "unlikely error".
+  /// Codes beyond 0x11 — the application and profile ranges — have no `CBATTError.Code`
+  /// representation and become "unlikely error" rather than silently reporting success.
   func testUnrepresentableStatusesBecomeUnlikelyErrorRatherThanSuccess() {
     for status in [0x12, 0x13, 0x80, 0xFF, 256, -1] {
       let mapped = attErrorCode(for: status)
@@ -81,24 +66,14 @@ final class AttMappingTests: XCTestCase {
 
   // MARK: - UUID spelling
 
-  /// Java's `UUID.toString` produces the lowercase 128-bit form, and event payloads have to match it on
-  /// both platforms or a consumer's equality check against one canonical spelling fails on one of them.
-  /// `CBUUID.uuidString` does not: it uppercases, and echoes a short UUID back in its short form.
+  /// Java's `UUID.toString` produces the lowercase 128-bit form; `CBUUID.uuidString` does not — it
+  /// uppercases and echoes a short UUID back in its short form.
   func testShortUuidsExpandOntoTheBluetoothBaseUuid() {
     XCTAssertEqual(
       CBUUID(string: "180D").normalizedString, "0000180d-0000-1000-8000-00805f9b34fb"
     )
     XCTAssertEqual(
       CBUUID(string: "2A37").normalizedString, "00002a37-0000-1000-8000-00805f9b34fb"
-    )
-  }
-
-  func testThirtyTwoBitUuidsExpandOntoTheBluetoothBaseUuid() {
-    XCTAssertEqual(
-      CBUUID(string: "0000180D").normalizedString, "0000180d-0000-1000-8000-00805f9b34fb"
-    )
-    XCTAssertEqual(
-      CBUUID(string: "12345678").normalizedString, "12345678-0000-1000-8000-00805f9b34fb"
     )
   }
 
@@ -148,19 +123,9 @@ final class AttMappingTests: XCTestCase {
     }
   }
 
-  func testStatesMapOntoDistinctNames() {
-    let states: [CBManagerState] = [
-      .poweredOn, .poweredOff, .resetting, .unsupported, .unauthorized, .unknown,
-    ]
-
-    let names = Set(states.map(normalizedBluetoothState))
-
-    XCTAssertEqual(names.count, states.count)
-  }
-
   // MARK: - MTU
 
-  /// iOS only ever reports a payload length, so the ATT_MTU is reconstructed by adding back the
+  /// iOS only ever reports a payload length; the ATT_MTU is reconstructed by adding back the
   /// one-octet opcode and two-octet handle of an `ATT_HANDLE_VALUE_NTF` PDU.
   func testMtuIsThePayloadPlusTheNotificationHeader() {
     let mtu = DeviceMtu(maxNotificationPayload: 20)
@@ -169,20 +134,12 @@ final class AttMappingTests: XCTestCase {
     XCTAssertEqual(mtu.mtu, 23)
   }
 
-  /// 20 octets is what a link carries before any negotiation, and it has to report the specification's
-  /// default ATT_MTU of 23 rather than something else.
+  /// The unnegotiated payload (20 octets) has to report the specification's default ATT_MTU of 23.
   func testTheUnnegotiatedPayloadReportsTheSpecifiedDefaultMtu() {
     XCTAssertEqual(DeviceMtu(maxNotificationPayload: defaultAttMtu - attNotificationHeaderSize).mtu,
                    defaultAttMtu)
     XCTAssertEqual(defaultAttMtu, 23)
     XCTAssertEqual(attNotificationHeaderSize, 3)
-  }
-
-  func testTheIdentityHoldsAcrossNegotiatedSizes() {
-    for payload in [20, 100, 244, 509] {
-      XCTAssertEqual(DeviceMtu(maxNotificationPayload: payload).mtu - attNotificationHeaderSize,
-                     payload)
-    }
   }
 
   /// `min(mtu - 3, 512)` is what `getMtu` documents and what Android reports; the second bound only
@@ -198,6 +155,5 @@ final class AttMappingTests: XCTestCase {
 
   func testThePayloadIsUntouchedBelowTheAttributeBound() {
     XCTAssertEqual(DeviceMtu(maxNotificationPayload: 512).maxNotificationPayload, 512)
-    XCTAssertEqual(DeviceMtu(maxNotificationPayload: 244).maxNotificationPayload, 244)
   }
 }

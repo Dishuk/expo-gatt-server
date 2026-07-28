@@ -25,18 +25,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 private const val TAG = "ExpoGattServer"
 
-/**
- * Emits a debug line only when the tag is turned up, and builds the message only then.
- *
- * `Log.d` is not stripped from a release build, so tracing every ATT request unconditionally put a
- * connected central's Bluetooth address into the logcat of every app shipping this module — readable by
- * anything else running in that process, and captured verbatim by `adb bugreport`. The argument is a
- * lambda so the interpolation cost goes with it: these sit on the read, write and notify paths, which run
- * per PDU.
- *
- * Turn it on with `adb shell setprop log.tag.ExpoGattServer DEBUG`. Warnings and errors are not gated —
- * they report faults, and are rare by construction.
- */
+/** Emits debug logs only when enabled via `adb shell setprop log.tag.ExpoGattServer DEBUG`. */
 private inline fun logDebug(message: () -> String) {
   if (Log.isLoggable(TAG, Log.DEBUG)) {
     Log.d(TAG, message())
@@ -52,12 +41,7 @@ const val DEFAULT_ATT_MTU = 23
  */
 const val ATT_NOTIFICATION_HEADER_SIZE = 3
 
-/**
- * The longest an attribute value may be — Core Spec Vol 3, Part F, §3.2.9. It bounds a notification
- * independently of the link: `ATT_MTU - 3` reaches 514 on a link that negotiated the maximum 517, and
- * `BluetoothGattServer.notifyCharacteristicChanged` throws `IllegalArgumentException` above 512 rather
- * than returning a status, from whichever thread called it.
- */
+/** Max attribute value length — Core Spec Vol 3, Part F, §3.2.9. BluetoothGattServer.notifyCharacteristicChanged throws IllegalArgumentException above 512. */
 const val MAX_ATTRIBUTE_VALUE_LENGTH = 512
 
 /**
@@ -121,55 +105,13 @@ const val ATT_TRANSACTION_TIMEOUT_MS = 30_000
  */
 const val DEFAULT_REQUEST_TIMEOUT_MS = 10_000
 
-/**
- * How long one registration round may go unacknowledged before the publication is reported failed.
- *
- * `addService` is local bookkeeping that completes in milliseconds, so nothing healthy comes close to
- * this. It exists only so a round that can never finish is *reported*: `onServiceAdded` is the sole thing
- * that advances the queue, and an `addService` that returns true without ever calling back left
- * `createServer` and every caller parked in [GattServerManager.whenDatabasePublished] pending for the
- * life of the process. Deliberately generous, and matched on iOS.
- */
+/** Timeout for service registration. addService is async; callback never arriving parks the caller indefinitely without this bound. */
 private const val PUBLICATION_TIMEOUT_MS = 30_000L
 
-/**
- * How long a `startAdvertising` may go without an `AdvertiseCallback` before the start is reported
- * failed.
- *
- * The last unbounded wait in this file, and the one whose callback is most often reported missing:
- * `BluetoothLeAdvertiser.startAdvertising` returns void, and neither `onStartSuccess` nor
- * `onStartFailure` is guaranteed to follow it — an advertiser slot exhausted on an OEM stack, or a
- * Bluetooth process restart that produces no `STATE_OFF`/`STATE_ON` pair, leaves nothing to settle the
- * promise and nothing to notice. `isAdvertising` then reports false forever while the caller's `await`
- * never returns, with no recovery short of the application calling `stopAdvertising` itself.
- *
- * Same value and same reasoning as [PUBLICATION_TIMEOUT_MS]: nothing healthy comes close to it, and it
- * exists so a start that can never finish is *reported* rather than parked. Distinct from
- * `AdvertiseSettings.setTimeout`, which limits how long an advertisement that did start stays on the
- * air — see [GattServerManager.scheduleAdvertisingTimeout].
- */
+/** Timeout for advertising start. startAdvertising callback is not guaranteed to arrive; bounds unrecoverable hangs. */
 private const val ADVERTISING_START_TIMEOUT_MS = 30_000L
 
-/**
- * How long a notification handed to the stack may go without an `onNotificationSent` before the module
- * gives up on it.
- *
- * Every other asynchronous wait in this file is bounded, for the reason given at [PUBLICATION_TIMEOUT_MS]:
- * a platform callback that never arrives otherwise parks a promise for the life of the process. The
- * in-flight notification was the one that was not. `notifyCharacteristicChanged` returning success
- * without ever calling back wedged that device's queue permanently — its promise never settled, the next
- * 64 sends queued behind it, and every one after that rejected `ERR_NOTIFY_QUEUE_FULL`, with no recovery
- * short of a disconnect.
- *
- * Set *above* the ATT transaction timeout, which is the longest an indication can legitimately take to be
- * confirmed (Core Spec Vol 3, Part F, §3.3.3). Setting it to exactly that made this bound race the stack's
- * own report rather than outlive it: an unconfirmed indication expired here first, so the real
- * `onNotificationSent` — carrying the genuine failure status — arrived to an entry that had already been
- * settled and was discarded, and the recovery pumped the next entry while the stack still considered the
- * previous one in flight, which it refuses with `ERROR_GATT_WRITE_REQUEST_BUSY`, rejecting the whole
- * backlog in one sweep. This is the outer bound for a callback that never comes at all, so it has to be
- * the last thing to fire.
- */
+/** Timeout for onNotificationSent callback. Must exceed ATT transaction timeout (Core Spec Vol 3, Part F, §3.3.3) to avoid race with stack's own timeout. */
 private const val NOTIFICATION_TIMEOUT_MS = 35_000L
 
 /**
@@ -183,14 +125,7 @@ private const val NOTIFICATION_BUSY_RETRY_MS = 50L
 open class GattServerException(val code: String, message: String) : Exception(message)
 class MtuException(code: String, message: String) : GattServerException(code, message)
 
-/**
- * The stack refusing a send because it is still carrying the previous one — `ERROR_GATT_WRITE_REQUEST_BUSY`.
- *
- * Distinguished from every other refusal because it says nothing about the entry: the same payload
- * offered a moment later is accepted. Settling it as a failure and moving on made one refusal fatal to
- * the entire queue, since the next entry is offered while the stack is in exactly the state that
- * produced it — see [NOTIFICATION_TIMEOUT_MS], which describes that sweep.
- */
+/** ERROR_GATT_WRITE_REQUEST_BUSY: stack still sending previous notification. Transient; retry without settling as failure. */
 class NotifyBusyException(message: String) : GattServerException("ERR_NOTIFY", message)
 
 data class CharacteristicAddress(val service: UUID, val characteristic: UUID)
@@ -311,45 +246,28 @@ class GattServerManager(
     fun onServerPublicationFailed(code: String, message: String)
   }
 
-  // Set from the binding and cleared by `stop` on the JavaScript thread, then read from binder and main
-  // threads, so the write has to be visible to them.
+  // Written from JS thread, read from binder/main threads: visibility required.
   @Volatile
   var listener: Listener? = null
 
-  // `as?` rather than a cast: a device with no Bluetooth returns null from `getSystemService`, and a
-  // failed cast in a property initialiser throws out of the constructor — so the very device
-  // [bluetoothUnavailable] exists to report was answered with ERR_CREATE_SERVER and a
-  // ClassCastException message instead of the documented ERR_BLUETOOTH. `currentBluetoothState` already
-  // reads the service this way.
+  // Use as? to safely handle devices with no Bluetooth and avoid ClassCastException in constructor.
   private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
   private val bluetoothAdapter: BluetoothAdapter? = bluetoothManager?.adapter
   @Volatile
   private var gattServer: BluetoothGattServer? = null
-  // The advertising callbacks are posted to the main looper — `BluetoothLeAdvertiser` wraps them in
-  // `mHandler.post` — while starts arrive on the module's queue, `stopAdvertising` on the JS thread and the
-  // adapter teardown on the receiver's. So the callback and the completion are claimed atomically: without
-  // that, a start and a stop both read the same completion and settle one Promise twice, which throws.
+  // Callbacks posted to main looper; claimed atomically to prevent double-settling Promise.
   private val advertiser = AtomicReference<BluetoothLeAdvertiser?>(null)
   private val advertiseCallback = AtomicReference<AdvertiseCallback?>(null)
-  // Carries the callback it belongs to: held apart, a displaced start's callback settled whichever
-  // completion happened to be armed, so `onStartSuccess` could resolve a start never on the air.
+  // Pairs callback with result to prevent stale callback from settling wrong completion.
   private val pendingAdvertiseResult = AtomicReference<PendingAdvertiseStart?>(null)
 
-  // Bumped by every stop, so a start still waiting for the database can tell that the application asked
-  // for the opposite while it waited. Written from the JS thread and from the receiver's binder thread,
-  // read on whichever thread releases the parked caller.
+  // Bumped on stop to detect race: start knows if stop requested while waiting for database.
   private val advertisingGeneration = AtomicInteger(0)
 
-  // Answers public queries from the caller's thread while being written from the binder threads that
-  // deliver the adapter state broadcast and the advertising callbacks.
+  // Thread-safe state read from caller, written from binder threads.
   private val advertising = AtomicBoolean(false)
   private val advertisingTimeout = AtomicReference<Runnable?>(null)
-  // The bound on the *start*, as distinct from [advertisingTimeout], which bounds the airtime of an
-  // advertisement that did start. See [ADVERTISING_START_TIMEOUT_MS].
-  //
-  // Carries the callback it belongs to, so a start that has since been displaced cannot evict the bound
-  // of the one that displaced it. Starts overlap, and the displaced one still runs to the end of
-  // `beginAdvertising`.
+  // Timeout for start, paired with callback to prevent stale timeout from evicting replacement.
   private val advertisingStartTimeout = AtomicReference<Pair<AdvertiseCallback, Runnable>?>(null)
   // Set from the caller's thread, read again during a teardown that may be on another.
   private val originalAdapterName = AtomicReference<String?>(null)
@@ -373,16 +291,10 @@ class GattServerManager(
    */
   @Volatile
   private var lifecycleThread: HandlerThread? = null
-  // Android delivers one notification at a time: an application "must wait for this callback to be
-  // received before sending additional notifications" (onNotificationSent). Sends are therefore queued
-  // per device and handed to the stack one at a time. The map is touched from the caller's thread and
-  // from the binder thread that delivers the callback.
+  // Android: one notification at a time. Queue per device, touched from caller and binder threads.
   private val notificationQueues = ConcurrentHashMap<String, NotificationQueue>()
 
-  // "Each client's queued values are separate; the execution of one queue shall not affect the
-  // preparation or execution of any other client's queued values" (Core Spec Vol 3, Part F, §3.4.6.1),
-  // so the queue is keyed by device. Every mutation goes through `compute`, whose bin lock is what makes
-  // the lists safe against the binder threads that deliver prepares, executes and disconnects.
+  // Per-device queue — Core Spec Vol 3, Part F, §3.4.6.1. Bin lock synchronizes binder threads.
   private val preparedWrites = ConcurrentHashMap<String, MutableList<PreparedWrite>>()
 
   /**
@@ -423,24 +335,12 @@ class GattServerManager(
      * be committed while JavaScript may still reject the rest.
      */
     val deferredValues: Map<BluetoothGattCharacteristic, DeferredWrite> = emptyMap(),
-    /**
-     * The Client Characteristic Configuration changes the same execute carried, withheld for the same
-     * reason. Applying them up front let a rejected batch still leave the client subscribed — and its
-     * subscribe event already delivered — so the server and the central disagreed about an execute the
-     * central saw refused.
-     */
+    /** CCCD changes withheld until batch accepted to maintain queued-write atomicity. */
     val clientConfigurations: List<Pair<BluetoothGattDescriptor, Int>> = emptyList(),
-    /**
-     * The plain (non-CCCD) descriptor values the same execute carried, withheld for the same reason.
-     * These used to be applied while the batch was assembled, before delegation was even worked out, so
-     * a rejected execute still left a vendor descriptor holding the new value — the server and the
-     * central disagreeing about an execute the central saw refused, which is exactly what the
-     * queued-write procedure's atomicity forbids.
-     */
+    /** Non-CCCD descriptor values withheld until batch accepted to maintain queued-write atomicity. */
     val deferredDescriptors: Map<BluetoothGattDescriptor, DeferredWrite> = emptyMap(),
   ) {
-    // Assigned once, immediately after construction, because the expiry has to name the entry it expires.
-    // Volatile because it is armed on a binder thread and read from the main looper and the caller's.
+    // Assigned after construction; volatile for visibility across binder, main, and caller threads.
     @Volatile
     var timeout: Runnable? = null
   }
@@ -487,55 +387,23 @@ class GattServerManager(
     val waiting = ArrayDeque<QueuedNotification>()
     var inFlight: QueuedNotification? = null
 
-    /**
-     * How many `onNotificationSent` callbacks are owed to sends this queue has stopped waiting for.
-     *
-     * `onNotificationSent` names only the device, so the entry in flight is the only thing that says
-     * which send it reports. Once a bound abandons an entry the stack still owes a callback for it, and
-     * an unattributed one then settled whichever entry had taken its place — reporting the successor's
-     * characteristic with the abandoned send's status, and resolving a send the stack had dropped. The
-     * owed ones are spent instead, as the iOS manager spends a discarded round's acknowledgement.
-     */
+    /** Callbacks owed for abandoned sends. onNotificationSent names only device; spend excess to prevent misattribution. */
     var callbacksOwedToAbandonedSends = 0
   }
 
-  // "Each client has its own instantiation of the Client Characteristic Configuration" and reads and
-  // writes of it only concern that client (Core Spec Vol 3, Part G, §3.3.3.3). The framework hands out
-  // one shared BluetoothGattDescriptor per characteristic, so the per-client configuration is kept here
-  // instead: device address, then the characteristic's address, then the raw two-octet configuration
-  // bits.
-  //
-  // Keyed by service as well as characteristic, because GATT permits the same characteristic UUID in two
-  // services: under a UUID-only key one instance's configuration answered for the other's, so a send to a
-  // characteristic nobody had subscribed to passed the subscription check and went out over the air.
+  // Per-client CCCD — Core Spec Vol 3, Part G, §3.3.3.3. Keyed by device and characteristic address (not UUID alone) to avoid collisions.
   private val subscriptions =
     ConcurrentHashMap<String, ConcurrentHashMap<CharacteristicAddress, Int>>()
 
-  // `BluetoothGattCharacteristic.value` and `BluetoothGattDescriptor.value` are plain non-volatile fields
-  // the framework never synchronises, and the characteristic's is also — on the pre-33
-  // `notifyCharacteristicChanged` overload — the payload a send reads. So every access goes through this
-  // monitor, reads included: one only writers took would order nothing for the binder threads that answer
-  // reads. It is also what makes a read-modify-write a single step, which the pre-33 park-notify-restore
-  // sequence and the prepared-write assembly both need.
-  //
-  // A stored value is only ever replaced, never mutated in place, so a reference read under the monitor
-  // stays usable after it is released.
-  //
-  // Nothing that can re-enter the module runs under it: `sendResponse` and every listener callback happen
-  // after it is released. The pre-33 notify is the sole exception, because the framework takes the payload
-  // from the field and there is no other way to make that pair atomic.
+  // Framework fields (value) are non-volatile and unsynchronized. Monitor all access: reads included, both for ordering and atomicity of read-modify-write.
   private val attributeValueLock = Any()
 
-  // Delegation is fixed for the lifetime of a server but is read from the binder threads that deliver
-  // the GATT callbacks, so both maps are concurrent.
+  // Fixed for server lifetime; read from binder threads. Concurrent for thread-safety.
   private val delegations = ConcurrentHashMap<CharacteristicAddress, CharacteristicDelegation>()
-  // Fallback for a characteristic whose owning service cannot be identified. Only populated for
-  // characteristic UUIDs that occur exactly once in the configuration, so a hit is unambiguous.
+  // Fallback keyed by UUID alone; only for UUIDs occurring once, ensuring no ambiguity.
   private val delegationsByCharacteristic = ConcurrentHashMap<UUID, CharacteristicDelegation>()
 
-  // `BluetoothGattServer.addService` is asynchronous and documents "Do not add another service before
-  // this callback", so services are queued and added strictly one at a time. Both fields are touched
-  // from the caller's thread and from the binder thread that delivers `onServiceAdded`.
+  // addService is async and must be done one at a time. Touched from caller and binder threads.
   private val pendingServices = ConcurrentLinkedQueue<BluetoothGattService>()
   private val openCompletion = AtomicReference<((GattServerException?) -> Unit)?>(null)
 
@@ -552,37 +420,13 @@ class GattServerManager(
     FAILED,
   }
 
-  // The state, the callers parked on it and the round they belong to share one monitor, so a caller
-  // cannot be appended in the window just after the transition that would have released it, and a
-  // registration cannot advance a round that a teardown has already discarded. Every parked caller is
-  // invoked after it is released; `open`'s own completion and the publication-failed event are the only
-  // things that ever run under it, and neither re-enters the module.
+  // Serializes state transitions and parked caller notifications to prevent double-release.
   private val publicationLock = Any()
 
-  /**
-   * Serialises the four entry points that open or close the `BluetoothGattServer`: [open], [stop],
-   * [handleAdapterOn] and [handleAdapterOff].
-   *
-   * The class otherwise reads as if the server lifecycle were single-threaded, and it is not. [open]
-   * runs on Expo's `AsyncFunctionQueue` HandlerThread; the adapter handlers run on the main thread,
-   * because `registerReceiver` is called without one; [stop] runs on the JS thread, since `stopServer`
-   * is a synchronous `Function`. Nothing serialised them, so a `createServer` racing a `STATE_ON`
-   * broadcast could run `openGattServer` twice against the same shared callback — one of the two
-   * servers then had no reference left to close it, leaking a GATT interface registration for the life
-   * of the process while still serving a live copy of the database, and both rounds drove
-   * `addNextService` over the same `pendingServices`.
-   *
-   * Held across the binder calls into the Bluetooth process, which is what makes the pairing of
-   * `gattServer` with its round indivisible. Ordering with [publicationLock] is one-way — code holding
-   * this may take that, never the reverse — so the two cannot deadlock.
-   */
+  /** Serializes open/stop/handleAdapterOn/handleAdapterOff. open, handleAdapterOn (main), stop (JS) run concurrently without this. One-way ordering: this -> publicationLock. */
   private val serverLifecycleLock = Any()
 
-  /**
-   * Whether [stop] has run, so an [open] that lost the race against it cannot publish a server nothing
-   * holds a handle to. Written and read under [serverLifecycleLock], and never cleared: the module builds
-   * a fresh manager for every `createServer`.
-   */
+  /** Set once stop() runs; never cleared (manager rebuilt for each createServer). Prevents orphaned server. */
   private var stopped = false
   private var publication = DatabasePublication.IDLE
   private val readinessWaiters = mutableListOf<(GattServerException?) -> Unit>()
@@ -593,15 +437,10 @@ class GattServerManager(
   /** The bound on the current round. See [PUBLICATION_TIMEOUT_MS]. */
   private val publicationTimeout = AtomicReference<Runnable?>(null)
 
-  // The adapter being disabled invalidates the whole server, so the configuration is retained as a
-  // factory and fresh BluetoothGattService instances are built for every registration pass. Re-adding
-  // the previously registered instances would reuse the instance IDs the framework assigned them, which
-  // the platform does not document as supported.
+  // Factory builds fresh instances for each registration pass; reusing IDs is not documented as supported.
   private val serviceFactory = AtomicReference<(() -> List<BluetoothGattService>)?>(null)
 
-  // The instances the latest registration round built, retained past the server that held them so the
-  // values they accumulated can be carried onto the fresh instances the next round produces. Replaced as
-  // a whole, so a reference read here stays usable.
+  // Latest round's instances, retained past server closure to preserve values for next round.
   private val publishedServices = AtomicReference<List<BluetoothGattService>>(emptyList())
 
   /**
@@ -643,9 +482,7 @@ class GattServerManager(
     return CharacteristicAddress(owner.uuid, characteristic.uuid)
   }
 
-  /** Invoked for every adapter state change while the server is open. */
-  // As with `listener`: written from the JavaScript thread, read from the main thread's broadcast
-  // receiver.
+  /** Invoked for every adapter state change. Written from JS thread, read from main thread. */
   @Volatile
   var onStateChange: ((String) -> Unit)? = null
 
@@ -665,11 +502,7 @@ class GattServerManager(
     }
   }
 
-  /**
-   * Disabling the adapter tears down the Bluetooth stack, which invalidates the server interface this
-   * process registered. Closing it explicitly means the next power-on starts from a clean server rather
-   * than relying on undocumented survival of the old one.
-   */
+  /** Adapter teardown invalidates server; explicit close ensures clean restart on power-on. */
   @SuppressLint("MissingPermission")
   private fun handleAdapterOff(): Unit = synchronized(serverLifecycleLock) {
     logDebug { "Adapter off — closing GATT server" }
@@ -705,20 +538,15 @@ class GattServerManager(
   }
 
   private fun handleAdapterOn(): Unit = synchronized(serverLifecycleLock) {
-    // Guarded for the reason `open` is: this runs on the lifecycle HandlerThread, which has no uncaught
-    // handler, and `openServer` marks the publication IN_PROGRESS before arming that round's bound — so
-    // a raising `setName` or `openGattServer` took the process down and parked every later start.
+    // Exceptions here are fatal (no uncaught handler); guard before arming publication timeout.
     try {
-      // The later attempt [restoreAdapterName] logs about when it fails. `setName` cannot succeed while
-      // the adapter is off, which is exactly when a teardown is most likely to run, so a rename that
-      // `android.setAdapterName` made would otherwise survive the power cycle that prevented its undo.
+      // Undo name change before reopening; setName fails while adapter is off.
       restoreAdapterName()
       if (serviceFactory.get() == null) return
       logDebug { "Adapter on — reopening GATT server and re-registering services" }
       if (!openServer()) {
         Log.e(TAG, "Failed to reopen GATT server after the adapter was re-enabled")
-        // Nothing retries until the adapter cycles again, so anyone parked is told rather than left
-        // there.
+        // No retries until next cycle; inform parked callers.
         finishOpen(
           DatabasePublication.FAILED,
           GattServerException(
@@ -742,19 +570,14 @@ class GattServerManager(
     if (!stateReceiverRegistered.compareAndSet(false, true)) return
     val thread = HandlerThread("ExpoGattServerLifecycle").apply { start() }
     lifecycleThread = thread
-    // The four-argument overload is what keeps `onReceive` off the main thread. See [lifecycleThread].
+    // Four-argument overload delivers onReceive on thread's looper, not main thread.
     context.registerReceiver(
       stateReceiver,
       IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
       null,
       Handler(thread.looper),
     )
-    // Reported once up front, because `ACTION_STATE_CHANGED` only ever announces a *change*: an adapter
-    // that stays as it is broadcasts nothing, so a consumer that renders from `onBluetoothStateChanged`
-    // alone sat on its initial value until the user happened to toggle Bluetooth. iOS has no such gap —
-    // `peripheralManagerDidUpdateState` fires for the first state as well as every later one — so the
-    // one listener that works there worked nowhere here. Delivered on the same looper as the broadcasts
-    // that follow it, so it cannot arrive after one.
+    // ACTION_STATE_CHANGED only announces changes, not initial state. Report initial state manually for consistency with iOS.
     val initial = currentBluetoothState(context)
     Handler(thread.looper).post { onStateChange?.invoke(initial) }
   }
@@ -763,8 +586,7 @@ class GattServerManager(
     if (!stateReceiverRegistered.compareAndSet(true, false)) return
     runCatching { context.unregisterReceiver(stateReceiver) }
       .onFailure { Log.w(TAG, "Failed to unregister adapter state receiver", it) }
-    // `quitSafely` rather than `quit`, so a broadcast already being handled finishes rather than being
-    // abandoned holding [serverLifecycleLock].
+    // quitSafely: allow pending broadcasts to finish before releasing serverLifecycleLock.
     lifecycleThread?.quitSafely()
     lifecycleThread = null
   }
@@ -776,17 +598,7 @@ class GattServerManager(
   private fun lifecycleHandler(): Handler =
     lifecycleThread?.looper?.let { Handler(it) } ?: timeoutHandler
 
-  /**
-   * Builds the callback for one publication round.
-   *
-   * One instance per `openGattServer` rather than one shared across every server this manager opens, so
-   * a callback can tell which round it belongs to. `onServiceAdded` carries no server or round of its
-   * own, so a late acknowledgement from a server that an adapter power cycle already closed was
-   * indistinguishable from one belonging to the round now running — and being indistinguishable, it was
-   * acted on: a success popped an entry off the new round's queue out of turn, putting two `addService`
-   * calls in flight against the platform's "do not add another service before this callback" rule, and a
-   * failure tore down a healthy round.
-   */
+  /** One callback per round to identify stale onServiceAdded callbacks from closed servers. */
   private fun gattServerCallback(round: Int) = object : BluetoothGattServerCallback() {
     @SuppressLint("MissingPermission")
     override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
@@ -796,21 +608,16 @@ class GattServerManager(
         BluetoothGattServer.STATE_CONNECTED -> {
           connectedDevices[id] = device
           listener?.onDeviceConnected(id, device.name)
-          // The link starts at the specification default, and `onMtuChanged` arrives only if the central
-          // asks to exchange — many never do. So a consumer sizing its payloads from
-          // `onMtuChanged` alone was never told anything at all for such a central, while on iOS the
-          // first sample always differs from an empty cache and the event always arrives. Reported here
-          // so the same listener works on both, and so what it carries is what `getMtu` would return.
+          // Link starts at spec default. onMtuChanged only arrives if central requests exchange. Report initial MTU for iOS parity.
           listener?.onMtuChanged(id, DeviceMtu(deviceMtu[id] ?: DEFAULT_ATT_MTU))
         }
         BluetoothGattServer.STATE_DISCONNECTED -> {
           connectedDevices.remove(id)
           deviceMtu.remove(id)
           discardPendingRequests { it.deviceId == id }
-          // Losing every ATT bearer for a client clears its prepare queue without executing any of it
-          // (Core Spec Vol 3, Part F, §3.4.6.1).
+          // Bearer loss clears prepare queue without executing (Core Spec Vol 3, Part F, §3.4.6.1).
           preparedWrites.remove(id)
-          // Nothing will ever acknowledge these now, so fail them instead of leaking the queue.
+          // Fail queued notifications; no callback will arrive.
           failNotifications(id, GattServerException("ERR_DEVICE_DISCONNECTED", "Device $id disconnected"))
           clearSubscriptions(id)
           listener?.onDeviceDisconnected(id)
@@ -827,14 +634,11 @@ class GattServerManager(
         @Suppress("DEPRECATION")
         characteristic.value
       }
-      // An opted-in characteristic always reaches JS, however current the mirrored value looks.
+      // Delegated characteristic always reaches JS, regardless of current stored value.
       val delegated = delegationFor(characteristic).read
 
       if (!delegated && value != null) {
-        // An offset past the end is answered with `GATT_INVALID_OFFSET`, 0x07 (Core Spec Vol 3, Part F,
-        // §3.4.1.1), rather than handed to a listener the characteristic never opted in to, which left
-        // the central waiting for its ATT transaction to time out. An offset equal to the length is in
-        // range and answered with an empty value.
+        // Offset past end → GATT_INVALID_OFFSET (Core Spec Vol 3, Part F, §3.4.1.1). Offset == length is valid, returns empty.
         val responseValue = readSliceAt(value, offset)
         if (responseValue == null) {
           Log.w(TAG, "onCharacteristicReadRequest: device=${device.address} char=${characteristic.uuid} offset=$offset past end of ${value.size}-byte value, rejecting")
@@ -873,10 +677,7 @@ class GattServerManager(
         return
       }
 
-      // Bounded here rather than at the store below, because the limit is the specification's rule about
-      // the attribute and not about this module's cache: a delegated write must be refused too. The
-      // largest permitted ATT_MTU is 517, so an ATT_WRITE_REQ carries up to 514 octets — two past what an
-      // attribute may hold, which is why one PDU is not the bound it looks like.
+      // Bound here for spec compliance, not cache management; delegated writes must also be refused.
       if (exceedsAttributeLength(data.size)) {
         Log.w(TAG, "onCharacteristicWriteRequest: ${data.size} octets, past the $MAX_ATTRIBUTE_VALUE_LENGTH-octet limit, rejecting")
         if (responseNeeded) {
@@ -887,8 +688,7 @@ class GattServerManager(
         return
       }
 
-      // A write without a response cannot be answered at all, so it is never delegated even when the
-      // characteristic opted in — there is nothing for JavaScript to reply to.
+      // Write-without-response cannot be delegated; no reply for JS to send.
       val delegatesWrite = delegationFor(characteristic).write
       val delegated = delegatesWrite && responseNeeded
       logDebug { "onCharacteristicWriteRequest: device=${device.address} char=${characteristic.uuid} offset=$offset responseNeeded=$responseNeeded delegated=$delegated" }
@@ -896,12 +696,7 @@ class GattServerManager(
       if (delegated) {
         registerPendingRequest(requestId, device.address, offset, isRead = false)
       } else {
-        // Stored so a later read serves what was written, as it does on iOS. Replaced rather than
-        // spliced at `offset`: an unqueued write carries no offset — `ATT_WRITE_REQ` has only a handle
-        // and a value — and "the attribute value shall be truncated or lengthened to match the length
-        // of the Attribute Value parameter" (Core Spec Vol 3, Part F, §3.4.5.1), so a shorter write
-        // shortens the attribute. An opted-in characteristic keeps its value JavaScript's to commit
-        // with updateCharacteristicValue, including for a write-without-response nothing can answer.
+        // Store value for later read. Replaced (not spliced) per Core Spec Vol 3, Part F, §3.4.5.1.
         if (!delegatesWrite) {
           storeCharacteristicValue(characteristic, data)
         }
@@ -921,8 +716,7 @@ class GattServerManager(
       device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor,
       preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray?
     ) {
-      // The value's length rather than its bytes: a descriptor write carries whatever the central chose to
-      // send, and a trace is not the place to put it.
+      // Log length only (not bytes) to avoid exposing descriptor values in traces.
       logDebug { "onDescriptorWriteRequest: device=${device.address} desc=${descriptor.uuid} responseNeeded=$responseNeeded valueLen=${value?.size ?: 0}" }
 
       if (preparedWrite) {
@@ -945,8 +739,7 @@ class GattServerManager(
       }
 
       if (descriptor.uuid == CCCD_UUID) {
-        // The specification fixes the length at two octets, so anything else is malformed and rejected
-        // rather than parsed into a guess at what the client meant.
+        // Spec fixes length at two octets; anything else is malformed.
         if (offset != 0 || value == null || value.size != CCCD_VALUE_LENGTH) {
           Log.w(TAG, "onDescriptorWriteRequest: rejecting malformed CCCD write from ${device.address}")
           if (responseNeeded) {
@@ -979,10 +772,7 @@ class GattServerManager(
       device: BluetoothDevice, requestId: Int, offset: Int,
       descriptor: BluetoothGattDescriptor
     ) {
-      // A CCCD read "only shows the configuration for that client", so it is answered from this device's
-      // own configuration rather than from the descriptor instance every client shares.
-      // An address that cannot be named reads as the specified default of 0x0000, which is also what a
-      // client that never configured this characteristic is entitled to see.
+      // CCCD per client (Core Spec Vol 3, Part G, §3.3.3.3). Unknown address reads as 0x0000 (default).
       val value = if (descriptor.uuid == CCCD_UUID) {
         val bits = addressOf(descriptor.characteristic)
           ?.let { clientConfiguration(device.address, it) } ?: 0
@@ -993,9 +783,7 @@ class GattServerManager(
           descriptor.value
         } ?: BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
       }
-      // Sliced and bounds-checked exactly as a characteristic read is: a user description long enough to
-      // need a Read Blob continuation would otherwise be answered with the whole value again at every
-      // offset, and the central would reassemble a repeated prefix.
+      // Bounds-check as characteristic reads do to handle multi-blob descriptors correctly.
       val responseValue = readSliceAt(value, offset)
       if (responseValue == null) {
         Log.w(TAG, "onDescriptorReadRequest: device=${device.address} desc=${descriptor.uuid} offset=$offset past end of ${value.size}-byte value, rejecting")
@@ -1009,15 +797,12 @@ class GattServerManager(
     override fun onNotificationSent(device: BluetoothDevice, status: Int) {
       val deviceId = device.address
 
-      // The in-flight entry is the only thing that identifies which characteristic this callback belongs
-      // to: `onNotificationSent` reports the device but not the characteristic, and the queue holds
-      // exactly one send per device.
+      // onNotificationSent reports only device; in-flight entry identifies characteristic.
       val queue = notificationQueues[deviceId]
       var spentOwed = false
       val finished = queue?.let {
         synchronized(it) {
-          // Spent before the entry in flight is consulted: this callback may belong to a send a bound
-          // already gave up on, and the queue has moved on to another one since.
+          // Spend owed callbacks first to avoid misattributing abandoned send's callback to new send.
           if (it.callbacksOwedToAbandonedSends > 0) {
             it.callbacksOwedToAbandonedSends -= 1
             spentOwed = true
@@ -1043,20 +828,13 @@ class GattServerManager(
         }
         finished.onResult(error)
       } else {
-        // The queue was already torn down — by a disconnect or a stop racing this callback — so the
-        // characteristic it belonged to is unknowable, and a guess would be worse than nothing.
+        // Queue torn down by disconnect or stop; characteristic unknown.
         Log.w(TAG, "onNotificationSent: no in-flight notification for device=$deviceId status=$status")
       }
       pumpNotifications(deviceId)
     }
 
-    /**
-     * Applies or discards everything the device prepared, as the execute's flag directs.
-     *
-     * Either way the queue is cleared and a response must be sent, including when nothing was queued
-     * (Core Spec Vol 3, Part F, §3.4.6.3) — Android surfaces the flag as [execute] and requires the
-     * response like any other request.
-     */
+    /** Applies or discards prepared writes per execute flag. Always responds, even if queue was empty (Core Spec Vol 3, Part F, §3.4.6.3). */
     @SuppressLint("MissingPermission")
     override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
       val queued = preparedWrites.remove(device.address) ?: emptyList<PreparedWrite>()
@@ -1070,16 +848,14 @@ class GattServerManager(
     }
 
     override fun onServiceAdded(status: Int, service: BluetoothGattService) {
-      // A registration belonging to a round that has since been discarded says nothing about the one
-      // running now, and must not advance or fail it.
+      // Ignore callbacks from discarded rounds.
       if (publicationRound.get() != round) {
         logDebug { "onServiceAdded: ignoring service=${service.uuid} from discarded round $round" }
         return
       }
       if (status != BluetoothGatt.GATT_SUCCESS) {
         Log.e(TAG, "onServiceAdded: service=${service.uuid} failed with status=$status")
-        // Through the round, so a callback delivered just as a teardown discarded the round leaves the
-        // outcome that teardown chose alone. See [failPublicationRound].
+        // Re-check round to avoid overwriting outcome of concurrent teardown.
         failPublicationRound(round, GattServerException(
           "ERR_CREATE_SERVER", "Failed to add service ${service.uuid} (status $status)"
         ))
@@ -1098,49 +874,25 @@ class GattServerManager(
     }
   }
 
-  /**
-   * Opens the GATT server and registers the services produced by [buildServices]. [onReady] is invoked
-   * exactly once — with `null` once every service is confirmed registered, or with the first
-   * registration failure — and may be called on a binder thread.
-   *
-   * [buildServices] is retained and called again whenever the server has to be rebuilt, such as after
-   * the adapter is disabled and re-enabled, so it must return freshly constructed services.
-   */
+  /** Opens GATT server and registers services. onReady called once with null or first failure; may be called on binder thread. buildServices is retained and called on each rebuild. */
   fun open(
     onReady: (error: GattServerException?) -> Unit,
     buildServices: () -> List<BluetoothGattService>,
   ): Unit = synchronized(serverLifecycleLock) {
-    // A stop that landed between this manager being installed and this call refuses the open outright.
-    // `stopServer` is synchronous on the JavaScript thread while `createServer` runs on Expo's worker
-    // queue, so the two can arrive in that order; without this the open re-armed the service factory,
-    // re-registered the state receiver and published a GATT server that the module no longer holds a
-    // reference to — unreclaimable for the life of the process. A manager is never reused after `stop`,
-    // so this flag only ever refuses the call that lost the race.
+    // Refuse if stop() already ran; prevent orphaned server.
     if (stopped) {
       onReady(GattServerException("ERR_NO_SERVER", "Server was stopped before it finished opening"))
       return
     }
     openCompletion.set(onReady)
-    // Everything from here on owns the completion, so a throw has to settle it rather than escape.
-    // `registerReceiver` and `openGattServer` are both binder calls that can fail — a revoked permission,
-    // the per-process receiver limit — and an escaping exception rejected the caller's promise at the
-    // binding while leaving this completion armed and the publication `IN_PROGRESS` with no bound: every
-    // later `startAdvertising` then parked forever, and the next `stop` fired the stale completion,
-    // settling an already-rejected promise a second time.
+    // All exceptions must settle completion; binder calls can fail (revoked permission, receiver limit, etc).
     try {
-      // Both installed before the adapter is checked, so a server created while Bluetooth happens to be
-      // off still publishes itself when Bluetooth returns — which is what the module documents, and what
-      // iOS does by instantiating CBPeripheralManager regardless and publishing on the next `poweredOn`.
-      // Registering first also means the caller receives the state changes that tell it when to retry.
+      // Install before checking adapter so server publishes on next power-on, matching iOS behavior.
       serviceFactory.set(buildServices)
       registerStateReceiver()
 
       bluetoothUnavailable()?.let {
-        // IDLE rather than FAILED, as the adapter going down uses: a registration round is still
-        // expected, so a caller arriving between the STATE_ON broadcast and that round parks rather than
-        // being turned away. Nobody parks while the adapter is unusable — `whenDatabasePublished` checks
-        // that first — so a device with no adapter at all cannot be left waiting on a round that never
-        // comes.
+        // IDLE allows retry on power-on; FAILED would refuse parked callers.
         finishOpen(DatabasePublication.IDLE, it)
         return
       }
@@ -1165,25 +917,15 @@ class GattServerManager(
   @SuppressLint("MissingPermission")
   private fun openServer(): Boolean {
     val buildServices = serviceFactory.get() ?: return false
-    // Taken before the rebuild. The factory returns freshly constructed services carrying the configured
-    // initial values again, so without this every value a central or `updateCharacteristicValue` wrote
-    // would silently revert whenever the adapter was power-cycled — while iOS, which re-adds the very
-    // instances it built, keeps them. Nothing in the API says a power cycle empties the database.
+    // Retain values before rebuild to preserve writes across power cycles, matching iOS behavior.
     val retained = currentCharacteristicValues()
-    // Claimed before anything is torn down, so an acknowledgement the outgoing round is still owed is
-    // already stale. Claimed after the close, it found that round current with `gattServer` null, and
-    // failed it — rejecting `createServer` with `ERR_NO_SERVER` over a database that then published.
+    // Claim round before close to avoid stale acknowledgement overwriting current round.
     val round = synchronized(publicationLock) {
       publication = DatabasePublication.IN_PROGRESS
       pendingServices.clear()
       publicationRound.incrementAndGet()
     }
-    // A server this manager already holds is closed before another is opened over it. The lock
-    // serialises the callers of this function but does not stop two of them arriving: `open` registers
-    // the state receiver before it checks whether the adapter is usable, so an adapter that finishes
-    // turning on in that window has `handleAdapterOn` block here, then open a second server once `open`
-    // released the lock. The first was left unreferenced and never closed — a GATT interface
-    // registration leaked for the life of the process, still serving a live copy of the database.
+    // Close stale server before opening new one; serializes concurrent opens.
     gattServer?.let {
       logDebug { "Closing the GATT server already open before opening another" }
       it.close()
@@ -1204,16 +946,14 @@ class GattServerManager(
     return true
   }
 
-  /** Bounds the round that is about to start. See [PUBLICATION_TIMEOUT_MS]. */
+  /** Bound for service registration. Round id prevents stale timeout from failing replacement round. */
   private fun armPublicationTimeout(round: Int) {
     cancelPublicationTimeout()
-    // Stamped with the round, so a bound that fires just as an adapter power cycle starts a new round
-    // cannot fail the round now running.
+    // Stamped with round to ignore stale timeouts from power cycles.
     val timeout = Runnable {
       if (publicationRound.get() != round) return@Runnable
       Log.e(TAG, "No onServiceAdded within $PUBLICATION_TIMEOUT_MS ms; reporting the round as failed")
-      // The check above is only a log guard. A bound that lost its round between the two used to
-      // discard the round that had replaced it; [failPublicationRound] re-tests and ends it as one step.
+      // failPublicationRound re-checks round and applies atomically.
       failPublicationRound(
         round,
         GattServerException(
@@ -1232,11 +972,7 @@ class GattServerManager(
     publicationTimeout.getAndSet(null)?.let { timeoutHandler.removeCallbacks(it) }
   }
 
-  /**
-   * What every characteristic of the latest registration round holds now. Read from the retained service
-   * instances rather than through [gattServer], because the adapter going down closes that server long
-   * before the round that replaces it starts.
-   */
+  /** Current values of latest round's characteristics. Read from retained instances, not gattServer, which closes before next round starts. */
   private fun currentCharacteristicValues(): Map<CharacteristicAddress, ByteArray> {
     val services = publishedServices.get()
     if (services.isEmpty()) return emptyMap()
@@ -1273,38 +1009,7 @@ class GattServerManager(
     }
   }
 
-  /**
-   * Ends the current registration round for a reason other than its own completion, so that a
-   * registration still in flight cannot speak for it.
-   *
-   * Emptying [pendingServices] alone was not enough. [addNextService] reads an empty queue as "every
-   * service registered" and reports the database as published — and the round guard in `onServiceAdded`
-   * could not tell the difference, because the round was only ever advanced by [openServer]. An
-   * `onServiceAdded` delivered between a teardown's clear and its [finishOpen] therefore published a
-   * database that was about to be closed: `createServer` resolved successfully, the `ERR_BLUETOOTH` the
-   * teardown meant to report was dropped, and a stopped manager was left reporting `isServerRunning`.
-   */
-  /**
-   * Reports a publication that failed with nobody waiting to be told.
-   *
-   * Every transition to `STATE_ON` re-registers the services, and a round reports only through
-   * [openCompletion] and the callers parked in [whenDatabasePublished]. Once the original `createServer`
-   * has resolved there is neither, so a re-registration that failed left the database genuinely absent
-   * while no promise rejected and no event fired — an application that does not re-advertise from
-   * `onBluetoothStateChanged` learnt nothing until it happened to poll `isServerRunning`.
-   *
-   * Only [DatabasePublication.FAILED]: `IDLE` is the adapter going down, which `onBluetoothStateChanged`
-   * already reports, and a re-registration is coming for it. Only when nothing else carried the error,
-   * so an ordinary rejected `createServer` does not also look like a second, separate fault.
-   *
-   * And only for a round that ended on its own. [stop] settles the same round through [finishOpen], with
-   * the same `ERR_NO_SERVER` it gives a create that never finished, so reporting it here announced a
-   * failure for every ordinary teardown: an unmount, an `OnDestroy`, and the `stop` that `createServer`
-   * issues before publishing a replacement. The event documents itself as the signal to call
-   * `createServer` again, so a listener following that advice rebuilt the server the application had
-   * just asked to be rid of. iOS never had this: there the report is reachable only from the two paths
-   * on which a publication round actually fails, and `stop` is not one of them.
-   */
+  /** Reports publication failure only when round itself failed (FAILED state) and nobody else reported it. Prevents phantom errors. */
   private fun reportPublicationFailure(
     state: DatabasePublication,
     error: GattServerException?,
@@ -1320,22 +1025,7 @@ class GattServerManager(
     pendingServices.clear()
   }
 
-  /**
-   * Ends [round] as failed, and does nothing at all when [round] is no longer the one in flight.
-   *
-   * Discarding the round and recording the failure used to be two steps taken by callers that may have
-   * stopped owning the round in between. `addNextService` re-checks the round under [publicationLock]
-   * and then releases it for the `addService` binder call, which can take as long as the Bluetooth
-   * process needs; a teardown landing in that window discards the round, settles the caller and sets
-   * the publication state deliberately — [handleAdapterOff] chooses `IDLE` rather than `FAILED` so that
-   * a caller arriving before the re-registration parks instead of being refused. The stale round then
-   * wrote `FAILED` over it and, finding no completion and no parked caller left to tell, emitted
-   * `onServerPublicationFailed` for what was an ordinary Bluetooth power-off — the one case that event
-   * documents itself as never reporting.
-   *
-   * Both halves are taken together here, and `onlyIf` re-tests the state under the monitor for the
-   * narrower race where the teardown lands after the round check and before the transition.
-   */
+  /** Fails [round] as one atomic step under publicationLock to prevent stale round from overwriting current state. */
   private fun failPublicationRound(round: Int, error: GattServerException) {
     synchronized(publicationLock) {
       if (publicationRound.get() != round) {
@@ -1348,18 +1038,7 @@ class GattServerManager(
     finishOpen(DatabasePublication.FAILED, error, onlyIf = DatabasePublication.IN_PROGRESS)
   }
 
-  /**
-   * Only ever called from [open] or from `onServiceAdded`, so at most one `addService` is ever in
-   * flight — which is what the platform requires.
-   *
-   * [round] is re-checked here rather than trusted from the caller. `onServiceAdded` tests it and then
-   * calls this, and between the two a teardown on another thread can discard the round: the queue it
-   * cleared then reads as "every service registered", and this reported a database as `PUBLISHED` that
-   * had just been closed — `isServerRunning` said true, and a `startAdvertising` arriving next put a
-   * connectable advertisement on the air over an empty database and resolved successfully. The check,
-   * the poll and the decision the poll leads to are one step under [publicationLock] for that reason,
-   * with only the binder call left outside it.
-   */
+  /** Called from open or onServiceAdded to queue and register next service. Platform limits one in-flight add at a time. Round check/poll/decision atomic under publicationLock. */
   @SuppressLint("MissingPermission")
   private fun addNextService(round: Int) {
     val next = synchronized(publicationLock) {
@@ -1383,9 +1062,7 @@ class GattServerManager(
       polled to server
     }
     val (service, server) = next
-    // A false return means the registration was never initiated, so no callback will arrive. Reported
-    // through the round rather than directly: this call released `publicationLock` before entering the
-    // binder, so the round may have been torn down while it was in there. See [failPublicationRound].
+    // False return means add never initiated; no callback coming. Report through round in case it was torn down.
     if (!server.addService(service)) {
       Log.e(TAG, "addService: could not initiate registration of ${service.uuid}")
       failPublicationRound(round, GattServerException(
@@ -1394,25 +1071,16 @@ class GattServerManager(
     }
   }
 
-  /**
-   * Ends the current registration round: [state] is what later readiness checks see, and both `open`'s
-   * completion and everyone parked in [whenDatabasePublished] are settled with [error].
-   *
-   * [report] is what separates a round that failed from one the application ended on purpose. See
-   * [reportPublicationFailure].
-   */
+  /** Ends registration round, settles completion and parked callers. onlyIf: race-safe state check. report: false for app-initiated teardowns. */
   private fun finishOpen(
     state: DatabasePublication,
     error: GattServerException?,
     onlyIf: DatabasePublication? = null,
     report: Boolean = true,
   ) {
-    // The round is over however it ended, so its bound goes with it.
+    // Round complete; disarm timeout.
     cancelPublicationTimeout()
-    // `onlyIf` makes the test and the transition one step under the monitor, for callers that may be
-    // racing the round they are trying to end. Without it the publication bound could read
-    // `IN_PROGRESS`, lose the race to a registration completing on a binder thread, and still write
-    // `FAILED` over the `PUBLISHED` that had just been recorded.
+    // onlyIf makes check and transition atomic to prevent overwriting concurrent completion.
     var applied = true
     val parked = synchronized(publicationLock) {
       if (onlyIf != null && publication != onlyIf) {
@@ -1432,43 +1100,23 @@ class GattServerManager(
       reportPublicationFailure(state, error, reported = completion != null || parked.isNotEmpty())
     }
     if (parked.isEmpty()) return
-    // Released on the manager's own looper rather than on the binder thread that delivered the last
-    // `onServiceAdded`: a released caller goes straight on to make binder calls of its own — the
-    // advertising start, and possibly `setName` — and the GATT callback thread must not be held for
-    // those, since every later request on every connection queues behind it. Not the main thread
-    // either, for the same reason the adapter broadcasts are not: this is the same binder work, and
-    // enough of it to matter. See [lifecycleThread].
+    // Release on lifecycle looper, not GATT callback thread or main thread; both hold up later calls.
     val release = Runnable { parked.forEach { it(error) } }
-    // `post` returns false — dropping the message — once the looper it was taken from has been asked to
-    // quit, and the waiters were taken out of [readinessWaiters] before the handler was even obtained.
-    // A `stop` landing between the two therefore stranded them for good: this call had already emptied
-    // the list, so the `finishOpen` inside `stop` found nothing left to settle and the `startAdvertising`
-    // promises parked here never resolved either way. The main looper never quits, so the fallback
-    // always has somewhere to run; the direct call is only for the case where even that is refused.
+    // Fallback: post() fails once looper quits; main looper never quits.
     if (!lifecycleHandler().post(release) && !timeoutHandler.post(release)) {
       Log.w(TAG, "No looper accepted the release of ${parked.size} parked caller(s); running inline")
       release.run()
     }
   }
 
-  /**
-   * Invokes [onReady] once the configured services are registered, rather than sampling the state
-   * synchronously: `createServer` reopens the server and re-adds every service asynchronously, and the
-   * `poweredOn` broadcast that starts a re-registration is delivered before it — so a synchronous check
-   * refused calls that were only early, not wrong. Mirrors iOS, whose state is not even meaningful until
-   * `CBPeripheralManager` reports it.
-   *
-   * A registration still running parks the caller; an adapter that cannot serve one, or a round that
-   * already failed, settles it immediately. May be invoked on the caller's thread or on the main looper.
-   */
+  /** Invokes onReady once services registered; parks if registration in progress, settles immediately if failed or adapter unavailable. */
   private fun whenDatabasePublished(onReady: (error: GattServerException?) -> Unit) {
-    // Checked before the publication state, so a powered-off adapter is still reported as the Bluetooth
-    // problem it is instead of parking a caller nothing is going to release.
+    // Check adapter first to avoid parking caller on unavailable state.
     bluetoothUnavailable()?.let {
       onReady(it)
       return
     }
-    // Settled outside the monitor, so no caller ever runs while it is held.
+    // Release outside monitor; prevent blocking other updates.
     val failure = synchronized(publicationLock) {
       when (publication) {
         DatabasePublication.PUBLISHED -> null
@@ -1488,11 +1136,7 @@ class GattServerManager(
       "whether the database is still there, which a failed registration or Bluetooth going down undoes."
   )
 
-  /**
-   * The Bluetooth-level rejection that stops the server working at all, or `null` when it can work.
-   * `BluetoothAdapter.isEnabled` is annotated `@RequiresNoPermission`, so this is safe to call before any
-   * grant has been checked.
-   */
+  /** Bluetooth-level failure or null if usable. isEnabled is @RequiresNoPermission. */
   private fun bluetoothUnavailable(): GattServerException? {
     val adapter = bluetoothAdapter
       ?: return GattServerException("ERR_BLUETOOTH", BLUETOOTH_UNSUPPORTED_MESSAGE)
@@ -1502,23 +1146,11 @@ class GattServerManager(
     return null
   }
 
-  /**
-   * The rejection an absent [gattServer] warrants. Turning the adapter off closes the server, so that is
-   * reported as the Bluetooth problem it is rather than as a server nobody created — which is both what
-   * iOS reports for the same situation and what tells a consumer whether re-enabling Bluetooth will fix
-   * it.
-   */
+  /** Adapter off closes server; report as Bluetooth problem (not ERR_NO_SERVER) for user to enable Bluetooth. */
   private fun serverUnavailable(): GattServerException =
     bluetoothUnavailable() ?: GattServerException("ERR_NO_SERVER", "The GATT server is not open")
 
-  /**
-   * Advertises once the database is registered, holding the call until then rather than refusing it, and
-   * invokes [onResult] exactly once.
-   *
-   * A stop that lands while the call is held rejects it with the error a stop already gives a start in
-   * flight, so one stop means one thing: proceeding would put the radio on the air after the application
-   * explicitly asked for the opposite.
-   */
+  /** Advertises once database registered, holding call rather than refusing. onResult called exactly once. Stop races reject with single meaning: stop requested. */
   fun startAdvertising(options: AdvertiseOptions, onResult: (error: GattServerException?) -> Unit) {
     val generation = advertisingGeneration.get()
     whenDatabasePublished { error ->
@@ -1540,28 +1172,20 @@ class GattServerManager(
     }
   }
 
-  /**
-   * Android has no per-advertisement local name: `AdvertiseData.Builder` offers only
-   * `setIncludeDeviceName(boolean)`, and the name that includes is the adapter's own. So
-   * [AdvertiseOptions.localName] is never advertised as given; only [AdvertiseOptions.setAdapterName]
-   * makes the advertised name match it.
-   */
+  /** Android advertises only adapter name (not per-advertisement name). localName requires setAdapterName. */
   private fun beginAdvertising(
     options: AdvertiseOptions,
     generation: Int,
     onResult: (error: GattServerException?) -> Unit,
   ) {
-    // Re-checked here as well as in `open`: the adapter can be turned off in between, and iOS reports the
-    // same situation as ERR_BLUETOOTH from its own readiness check.
+    // Re-check: adapter can turn off between server check and start. Matches iOS error semantics.
     val adapter = bluetoothAdapter
       ?: throw GattServerException("ERR_BLUETOOTH", BLUETOOTH_UNSUPPORTED_MESSAGE)
     if (!adapter.isEnabled) {
       throw GattServerException("ERR_BLUETOOTH", BLUETOOTH_OFF_MESSAGE)
     }
 
-    // A half-built or empty database is still a database scanners can connect to and discover, and a
-    // registration that failed leaves exactly that behind. Checked after the adapter, so a powered-off
-    // one is still reported as the Bluetooth problem it is — the order iOS uses too.
+    // Server check after adapter check (iOS order) to report adapter problem as root cause.
     if (!isServerRunning()) {
       throw databaseNotPublished()
     }
@@ -1576,10 +1200,7 @@ class GattServerManager(
       applyAdapterName(adapter, options.localName)
     }
 
-    // Null only for an adapter with no multi-advertisement support, the enabled check above having ruled
-    // out the other cause. No amount of retrying makes it work, so it is reported as unsupported rather
-    // than as a failed advertisement. The name goes back first: it was applied for an advertisement that
-    // is now never going to start, and leaving it would rename the phone for good on a call that failed.
+    // Null only if no multi-ad support; enabled check ruled out adapter off. Undo name rename if start fails.
     val leAdvertiser = adapter.bluetoothLeAdvertiser ?: run {
       restoreAdapterName()
       throw GattServerException("ERR_UNSUPPORTED", "BLE advertising is not supported on this device")
@@ -1593,8 +1214,7 @@ class GattServerManager(
       .setTimeout(options.timeoutMs)
       .build()
 
-    // Anything a passive scanner has to see goes in the advertisement and shares its 31-byte budget; the
-    // name and transmit power go in the scan response so they do not compete for it.
+    // Advertisement payload: 31-byte budget for UUIDs, manufacturer and service data. Name/TX power in scan response to avoid budget competition.
     val advData = AdvertiseData.Builder()
       .setIncludeDeviceName(false)
       .setIncludeTxPowerLevel(false)
@@ -1609,11 +1229,7 @@ class GattServerManager(
       .build()
 
     val callback = object : AdvertiseCallback() {
-      /**
-       * Whether this callback is still the manager's. One that is not belongs to an advertisement already
-       * stopped or superseded, and must not touch the shared advertising state or the completion the call
-       * that displaced it installed.
-       */
+      /** Is this callback still current, or has it been displaced/stopped? Only current callbacks may touch shared state. */
       private fun current(): Boolean = advertiseCallback.get() === this
 
       override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
@@ -1622,17 +1238,14 @@ class GattServerManager(
         advertising.set(true)
         scheduleAdvertisingTimeout(options.timeoutMs)
         finishAdvertise(this, null)
-        // The test above is a read, not a claim, and `stopAdvertising` runs on another thread: a stop
-        // between the two left these writes re-arming an advertisement already off the air.
+        // Re-check: stop may have raced the state changes above (current() is read, not claim).
         if (!current()) {
           advertising.set(false)
           cancelAdvertisingTimeout()
         }
       }
       override fun onStartFailure(errorCode: Int) {
-        // Claimed rather than read: `restoreAdapterName` below must not run for a start a newer one has
-        // displaced, since that start owns the name now. A failed start is advertising nothing, so
-        // taking the callback back is what it was going to be anyway.
+        // Claim callback: only owner can restore adapter name; displaced start owns it.
         if (!advertiseCallback.compareAndSet(this, null)) return
         advertising.set(false)
         val msg = when (errorCode) {
@@ -1646,46 +1259,25 @@ class GattServerManager(
           else -> "Advertising failed (error $errorCode)"
         }
         Log.e(TAG, "Advertising failed: $msg")
-        // Nothing is on the air, so the rename this start applied has nothing left to justify it.
+        // Undo rename; start never reached air.
         restoreAdapterName()
         finishAdvertise(this, GattServerException("ERR_ADVERTISE", msg))
       }
     }
 
-    // Installed only once every rejection above is out of the way, so a start that threw cannot leave a
-    // completion behind for the next stop to settle a second time. The callback is swapped first,
-    // because it is what `current()` tests: swapping the completion first leaves a window in which a
-    // failure belonging to the displaced advertisement settles the completion this call just installed.
-    //
-    // Guarded from the swap rather than from the start alone: `stopAdvertising` below is a binder call
-    // that raises on a revoked BLUETOOTH_ADVERTISE, and a throw there escaped with this completion armed.
+    // Callback swapped first (it's what current() tests). Guarded from both swap and start binder call.
     val start = PendingAdvertiseStart(callback, onResult)
     try {
       val displaced = advertiseCallback.getAndSet(callback)
       pendingAdvertiseResult.getAndSet(start)
         ?.onResult?.invoke(GattServerException("ERR_ADVERTISE", "Advertising restarted"))
-      // `BluetoothLeAdvertiser` keys its advertising sets on callback identity — `mLegacyAdvertisers` is a
-      // map from the `AdvertiseCallback` to the set it started — so a start with a fresh callback adds a
-      // second advertisement rather than replacing the first, and the displaced one keeps broadcasting
-      // with nothing left able to stop it. Stopped before the new start, so it also frees the controller
-      // slot rather than counting towards ADVERTISE_FAILED_TOO_MANY_ADVERTISERS.
+      // Platform keys by callback identity; displaced callback must be stopped to free slot and stop broadcast.
       displaced?.let { leAdvertiser.stopAdvertising(it) }
-      // Only while this call still owns the radio. Two starts can be in `beginAdvertising` at once — the
-      // one released from `whenDatabasePublished` on the lifecycle thread and one the application issued
-      // straight afterwards on Expo's queue, which takes the synchronous path because the release is what
-      // published the database. The later one can already have installed its callback and armed its own
-      // limit by the time the earlier reaches here, and an unconditional cancel took that limit away: the
-      // platform then stopped its advertisement at `timeoutMs` with no callback, leaving `isAdvertising`
-      // reporting true and any `setAdapterName` rename on the phone for good. The same identity test the
-      // callback uses for `current()`.
+      // Only cancel if still owner; concurrent starts can displace while in beginAdvertising.
       if (advertiseCallback.get() === callback) {
         cancelAdvertisingTimeout()
       }
-      // Armed before the call rather than after it: the callback is posted to the main looper and can be
-      // delivered before this thread returns from the binder, and an arm that ran afterwards would then
-      // install a bound for a start that had already been settled. `finishAdvertise` cancels it, and the
-      // expiry checks that the start it belongs to is still the outstanding one, so a bound left behind by
-      // either ordering is inert.
+      // Arm before start so callback delivered immediately still finds armed timeout. Expiry re-checks start identity.
       armAdvertisingStartTimeout(start)
       leAdvertiser.startAdvertising(settings, advData.build(), scanResponse, callback)
     } catch (e: Exception) {
@@ -1751,18 +1343,9 @@ class GattServerManager(
 
   @SuppressLint("MissingPermission")
   fun stopAdvertising() {
-    // Bumped before anything else, so a start released from `whenDatabasePublished` in the meantime still
-    // sees this stop rather than reaching the radio behind it.
+    // Bump generation so waiting starts know stop was requested.
     advertisingGeneration.incrementAndGet()
-    // Claimed before any other state is published, because it is the only thing `AdvertiseCallback.current`
-    // tests. Clearing `advertising` first left a window in which `onStartSuccess` — delivered on the main
-    // looper, so it can land mid-way through this method — still recognised itself as current, set the flag
-    // back to `true`, re-armed the timeout and settled the start as a success. The stop then took the
-    // callback and really did stop the advertisement, leaving `isAdvertising` reporting an advertisement
-    // that is not running for the rest of the process, and a `startAdvertising` that resolved where the
-    // caller had asked for the opposite. Taken rather than read for the same reason as before: only the
-    // caller that claims it hands it to the platform, and a start still in flight learns from its absence
-    // that it has to stop the advertisement it just created.
+    // Claim callback first (it's what current() tests); clearing advertising first let onStartSuccess re-arm a stopped ad.
     val callback = advertiseCallback.getAndSet(null)
     cancelAdvertisingTimeout()
     advertising.set(false)
@@ -1773,20 +1356,13 @@ class GattServerManager(
 
   private fun advertisingStopped() = GattServerException("ERR_ADVERTISE", "Advertising stopped")
 
-  /**
-   * Settles the outstanding start exactly once, whichever thread gets there first. The outcome carries a
-   * code as well as a message, so a start abandoned by something other than the advertiser — Bluetooth
-   * going down, the server being stopped — is not reported as an advertising failure.
-   */
+  /** Settles outstanding start once, unconditionally. Error code distinguishes ads failure from Bluetooth/server failures. */
   private fun finishAdvertise(error: GattServerException?) {
     cancelAdvertisingStartTimeout()
     pendingAdvertiseResult.getAndSet(null)?.onResult?.invoke(error)
   }
 
-  /**
-   * Settles the outstanding start only while it is still [callback]'s. A report from a displaced start
-   * settles nothing: the start that displaced it carries its own [armAdvertisingStartTimeout].
-   */
+  /** Settles outstanding start only if it still belongs to [callback]; displaced starts are ignored. */
   private fun finishAdvertise(callback: AdvertiseCallback, error: GattServerException?) {
     val start = pendingAdvertiseResult.get() ?: return
     if (start.callback !== callback) return
@@ -1795,19 +1371,7 @@ class GattServerManager(
     start.onResult(error)
   }
 
-  /**
-   * Bounds the wait for [callback]'s `onStartSuccess` or `onStartFailure`. See
-   * [ADVERTISING_START_TIMEOUT_MS].
-   *
-   * The expiry settles the start *and* takes the radio back, because the two cannot be separated here:
-   * the platform may still be about to start advertising, and rejecting the promise while leaving an
-   * advertisement running — with the only handle able to stop it discarded — would be worse than the
-   * hang this replaces. Stopping a callback that never started is documented as harmless.
-   *
-   * Identity-checked against the outstanding start rather than trusted to have been cancelled, on the
-   * same grounds as `AdvertiseCallback.current`: starts overlap, and a bound belonging to one that has
-   * since been displaced must not settle the one that displaced it.
-   */
+  /** Bounds start callback wait. Expiry both settles promise and stops radio (cannot separate them). Stops all cbs even if none started (platform-safe). */
   @SuppressLint("MissingPermission")
   private fun armAdvertisingStartTimeout(start: PendingAdvertiseStart) {
     val callback = start.callback
@@ -2902,13 +2466,9 @@ class GattServerManager(
   fun stop(): Unit = synchronized(serverLifecycleLock) {
     stopped = true
     serviceFactory.set(null)
-    // Dropped only here, not when the adapter goes down: a power cycle rebuilds the services from the
-    // factory and carries these values across, whereas a stop ends the database for good.
+    // Clear only on stop (not adapter off); power cycles preserve values via factory.
     publishedServices.set(emptyList())
-    // Before the receiver goes, because this is what restores an `android.setAdapterName` rename, and the
-    // receiver is the only thing that could retry it. The retry still cannot outlive this call — nothing
-    // re-registers afterwards — so a stop issued while the adapter is off leaves the name changed; that
-    // is a documented limit of `setAdapterName`, not something the ordering here can fix.
+    // Stop advertising before unregistering receiver; receiver retries restoreAdapterName.
     stopAdvertising()
     unregisterStateReceiver()
     onStateChange = null
@@ -2918,8 +2478,7 @@ class GattServerManager(
       GattServerException("ERR_NO_SERVER", "Server was stopped before it finished opening"),
       report = false,
     )
-    // Answered rather than dropped, and before `close()` takes the server and the device handles the
-    // response needs with it. `stop` disconnects nobody, so these transactions are still live.
+    // Answer pending reads/writes before close() takes device handles.
     answerAndDiscardPendingRequests(ATT_ERROR_UNLIKELY_ERROR) { true }
     gattServer?.close()
     gattServer = null
@@ -2930,17 +2489,7 @@ class GattServerManager(
     subscriptions.clear()
     delegations.clear()
     delegationsByCharacteristic.clear()
-    // Last, so everything above still reports through it — the disconnects a teardown raises are the
-    // consumer's signal that the centrals are gone.
-    //
-    // Cleared at all because `close()` disconnects nobody and the callback stays registered until it
-    // completes, so a `STATE_DISCONNECTED` or a late `onNotificationSent` can still arrive on a binder
-    // thread afterwards. A manager this call displaced would then emit those to JavaScript
-    // indistinguishably from the server that replaced it, and one whose module has since been destroyed
-    // would reach `sendEvent` on a torn-down `AppContext`, which throws where nothing catches. The
-    // Only the listener, and not `timeoutHandler`'s queue: [finishOpen] above posts the release of
-    // everyone parked in [whenDatabasePublished] to that looper, so clearing it here would strand the
-    // very `startAdvertising` promises the stop is meant to settle.
+    // Clear last. close() doesn't disconnect; STATE_DISCONNECTED or onNotificationSent may arrive after close(). Only clear listener, not timeoutHandler queue (finishOpen posts to it).
     listener = null
   }
 }

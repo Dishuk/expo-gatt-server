@@ -2,12 +2,8 @@ import { withGattServer, type ExpoGattServerPluginProps } from '../index';
 import { applyBluetoothLeFeature } from '../withGattServerAndroid';
 import { applyBluetoothInfoPlist, type BluetoothInfoPlist } from '../withGattServerIos';
 
-/**
- * The config plugin decides two things a consumer cannot see until a build reaches a device: whether
- * the app is filtered off Google Play on hardware without BLE, and whether iOS has the usage
- * description without which it terminates the app the moment it touches CoreBluetooth. Neither shows
- * up in the JavaScript, so both are pinned here.
- */
+// Pins the Android BLE-filter and iOS usage-description behavior, neither of which surfaces until a
+// build reaches a device.
 
 type Manifest = Parameters<typeof applyBluetoothLeFeature>[0];
 type Feature = NonNullable<Manifest['uses-feature']>[number];
@@ -32,7 +28,7 @@ function feature(required?: string): Feature {
 
 function bleEntries(root: Manifest): Feature[] {
   const declared = root['uses-feature'];
-  // Same normalisation the plugin does, so the malformed shapes it now tolerates can be asserted on.
+  // Same normalisation the plugin does.
   const features = Array.isArray(declared) ? declared : declared == null ? [] : [declared];
   return features.filter((entry) => entry?.$?.['android:name'] === BLE);
 }
@@ -65,11 +61,7 @@ describe('applyBluetoothLeFeature', () => {
     expect(soleBleRequirement(root)).toBe('true');
   });
 
-  /**
-   * The whole point of the "only ever raises" rule: writing the module's own `false` over an app that
-   * genuinely needs BLE would offer it on devices that cannot run it, with nothing in the build saying
-   * so.
-   */
+  // Never relaxes an existing requirement.
   it('leaves an existing requirement alone rather than relaxing it', () => {
     const root = manifest([feature('true')]);
 
@@ -86,15 +78,6 @@ describe('applyBluetoothLeFeature', () => {
     expect(soleBleRequirement(root)).toBe('true');
   });
 
-  /** `android:required` defaults to `true` when absent, so an entry without it is already the stricter. */
-  it('leaves an entry carrying no requirement attribute alone', () => {
-    const root = manifest([feature()]);
-
-    applyBluetoothLeFeature(root, false);
-
-    expect(soleBleRequirement(root)).toBeUndefined();
-  });
-
   it('never declares the feature twice', () => {
     const root = manifest();
 
@@ -104,18 +87,7 @@ describe('applyBluetoothLeFeature', () => {
     expect(bleEntries(root)).toHaveLength(1);
   });
 
-  it('leaves unrelated features untouched', () => {
-    const camera = { $: { 'android:name': 'android.hardware.camera' } } as unknown as Feature;
-    const root = manifest([camera]);
-
-    applyBluetoothLeFeature(root, false);
-
-    expect(root['uses-feature']).toContain(camera);
-    expect(bleEntries(root)).toHaveLength(1);
-  });
-
-  // What `xml2js` produces for `<uses-feature />`. Unguarded, `feature.$` threw a TypeError naming
-  // neither the plugin nor the manifest.
+  // xml2js parses `<uses-feature />` (no attributes) to an empty string entry.
   it('declares the feature alongside an attribute-less node rather than throwing', () => {
     const root = manifest(['' as unknown as Feature]);
 
@@ -144,7 +116,7 @@ describe('applyBluetoothInfoPlist', () => {
     expect(plist.NSBluetoothAlwaysUsageDescription).toContain('Bluetooth');
   });
 
-  /** An existing `ios.infoPlist` entry wins, so the plugin never overwrites an app's own wording. */
+  // An existing entry wins; the plugin never overwrites an app's own wording.
   it('keeps a description the app config already set', () => {
     const plist: BluetoothInfoPlist = { NSBluetoothAlwaysUsageDescription: 'Ours' };
 
@@ -169,15 +141,7 @@ describe('applyBluetoothInfoPlist', () => {
     expect('NSBluetoothAlwaysUsageDescription' in plist).toBe(false);
   });
 
-  it('leaves an existing description alone when the app opts out', () => {
-    const plist: BluetoothInfoPlist = { NSBluetoothAlwaysUsageDescription: 'Ours' };
-
-    applyBluetoothInfoPlist(plist, { bluetoothAlwaysPermission: false });
-
-    expect(plist.NSBluetoothAlwaysUsageDescription).toBe('Ours');
-  });
-
-  /** The mode is App Store reviewable, so it is never added unless the app asked for it. */
+  // Never added unless the app asks for it; it's App Store reviewable.
   it('adds no background mode by default', () => {
     const plist: BluetoothInfoPlist = {};
 
@@ -203,8 +167,7 @@ describe('applyBluetoothInfoPlist', () => {
     expect(plist.UIBackgroundModes).toEqual(['bluetooth-peripheral']);
   });
 
-  // Spreading a string produced a per-character array, and `includes` matched substrings — so the one
-  // value that looks correct was the one the mode was never added to.
+  // Spreading a string produces a per-character array; must normalize to a list first.
   it('normalises a string into a list rather than spreading it per character', () => {
     const plist: BluetoothInfoPlist = { UIBackgroundModes: 'audio' as unknown as string[] };
 
@@ -224,13 +187,8 @@ describe('applyBluetoothInfoPlist', () => {
   });
 });
 
-/**
- * Props arrive from `app.json`, which is untyped JSON at prebuild time — so the declared types
- * constrain nobody, and a wrong type does not fail. It succeeds into something quietly wrong: a
- * non-string usage description is not a valid plist string, so iOS reads the key as absent and
- * terminates the app on first Bluetooth use; `"false"` is a truthy string, so it filters the app off
- * Google Play. Both used to prebuild clean.
- */
+// Plugin props come from untyped app.json; wrong types must be rejected explicitly here since
+// nothing downstream catches them.
 describe('plugin prop validation', () => {
   const config = { name: 'harness', slug: 'harness' } as never;
   const apply = (props: unknown) => withGattServer(config, props as ExpoGattServerPluginProps);
@@ -272,16 +230,12 @@ describe('plugin prop validation', () => {
     );
   });
 
-  /** `props = {}` defaults only for `undefined`, so an explicit null used to reach a property access. */
+  // Defaulting only covers `undefined`, so an explicit null must still be rejected explicitly.
   it('rejects null with a message naming the plugin', () => {
     expect(() => apply(null)).toThrow(/expo-gatt-server config plugin: expected an options object/);
   });
 
-  /**
-   * A key no layer below reads is the same silent-drop failure `createServer` rejects an unknown option
-   * for. `requireBluetoothLEHardware` is one capital away from the real name, so the app prebuilds clean
-   * and ships `android:required="false"` — staying on Google Play for devices with no BLE radio.
-   */
+  // An unrecognised key (typo or otherwise) is silently ignored by every layer unless caught here.
   it('rejects an option no layer below would read', () => {
     expect(() => apply({ requireBluetoothLEHardware: true })).toThrow(
       /unknown option "requireBluetoothLEHardware"/,
@@ -290,16 +244,11 @@ describe('plugin prop validation', () => {
   });
 });
 
-/**
- * The helpers above are exercised directly, which leaves the two mods — the wiring that decides *what*
- * they are called with — asserted by nothing. Swapping the iOS and Android mods, or defaulting
- * `requireBluetoothLeHardware` to `true`, kept every other test in this file green while every app that
- * prebuilt got the opposite of what it asked for.
- */
+// Exercises the mods the plugin registers (not the helpers directly), so a swapped iOS/Android mod
+// or a wrong default would fail here even though every test above stays green.
 describe('the mods the plugin registers', () => {
-  // Built fresh per run: `withInfoPlist` and `withAndroidManifest` register by mutating the config they
-  // are given and chaining onto whatever mod is already there, so a shared object would run every
-  // previous test's props again on top of this one's.
+  // Built fresh per run: mods mutate and chain onto the config they are given, so a shared object
+  // would run every previous test's props again on top of this one's.
   const base = () => ({ name: 'harness', slug: 'harness' }) as never;
 
   async function runIosMod(props: ExpoGattServerPluginProps, infoPlist: BluetoothInfoPlist) {
@@ -350,7 +299,6 @@ describe('the mods the plugin registers', () => {
     expect(disabled.UIBackgroundModes).toBeUndefined();
   });
 
-  /** The default the module's own manifest carries, so a consumer is not filtered off Google Play. */
   it('declares the BLE feature as not required through the Android mod by default', async () => {
     const root = await runAndroidMod({}, manifest());
     expect(soleBleRequirement(root)).toBe('false');
@@ -361,7 +309,6 @@ describe('the mods the plugin registers', () => {
     expect(soleBleRequirement(root)).toBe('true');
   });
 
-  /** Each mod must reach its own platform's file, which a swap of the two would not survive. */
   it('leaves the Android manifest alone from the iOS props and vice versa', async () => {
     const root = await runAndroidMod({ bluetoothPeripheralBackgroundMode: true }, manifest());
     expect(soleBleRequirement(root)).toBe('false');

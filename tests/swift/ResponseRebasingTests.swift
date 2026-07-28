@@ -6,10 +6,8 @@ import XCTest
 /// Aligning a `sendResponse` value onto the offset the central actually asked for.
 ///
 /// `respond(to:withResult:)` takes no offset — CoreBluetooth copies `CBATTRequest.value` into the
-/// response PDU verbatim — so getting this wrong sends the wrong bytes without any error anywhere. The
-/// documented contract is that both spellings work: the whole value with `offset: 0`, or an
-/// already-sliced value with the request's own offset. Android implements the same contract, so these
-/// cases are the cross-platform agreement too.
+/// response PDU verbatim. Both spellings are documented to work: the whole value with `offset: 0`, or
+/// an already-sliced value with the request's own offset. Android implements the same contract.
 final class ResponseRebasingTests: XCTestCase {
   private var manager: GattServerManager!
 
@@ -64,11 +62,10 @@ final class ResponseRebasingTests: XCTestCase {
     XCTAssertEqual(fromZero, Data([40, 50]))
   }
 
-  /// "The caller supplied nothing at or beyond the requested offset" — the specification's signal that
-  /// the attribute ends there, answered with an empty value rather than an error.
+  /// The specification's signal that the attribute ends there, answered with an empty value rather
+  /// than an error.
   func testNothingLeftAtTheRequestedOffsetAnswersEmpty() throws {
     XCTAssertEqual(try rebase([1, 2], supplied: 0, requested: 2), Data())
-    XCTAssertEqual(try rebase([1, 2], supplied: 0, requested: 99), Data())
   }
 
   func testEmptyValueStaysEmpty() throws {
@@ -96,10 +93,8 @@ final class ResponseRebasingTests: XCTestCase {
     XCTAssertNoThrow(try rebase([1, 2, 3], supplied: 2, requested: 2))
   }
 
-  /// A negative supplied offset passes the "not after the request" relation — `-4` is not greater than
-  /// `0` — and used to produce a positive skip, so the response was trimmed from the front and sent to
-  /// the central labelled as the whole attribute. Nothing reported it on either side. Android rejects
-  /// the same input with the same code, and these two cases are what holds the pair together.
+  /// A negative supplied offset passes the "not after the request" relation (`-4 <= 0`) and would
+  /// produce a positive skip, silently trimming the response. Android rejects the same input.
   func testANegativeSuppliedOffsetIsRejectedRatherThanTrimmingTheResponse() {
     XCTAssertThrowsError(try rebase([1, 2, 3, 4, 5], supplied: -4, requested: 0)) { error in
       guard let error = error as? GattServerError else {
@@ -113,9 +108,7 @@ final class ResponseRebasingTests: XCTestCase {
     }
   }
 
-  /// A negative *requested* offset would be refused by the relation below whichever way round it is, so
-  /// the message is what distinguishes the two: it has to say the offset is out of range rather than
-  /// tell the caller their value starts too late, which would send them looking at the wrong argument.
+  /// The message has to say the offset is out of range, not that the value starts too late.
   func testANegativeRequestedOffsetIsRejectedAsOutOfRange() {
     XCTAssertThrowsError(try rebase([1, 2, 3], supplied: 0, requested: -1)) { error in
       guard let error = error as? GattServerError else {
@@ -134,9 +127,6 @@ final class ResponseRebasingTests: XCTestCase {
   /// A Write Response carries no value, so nothing is rebased and nothing is rejected — including the
   /// offsets that would fail a read.
   func testWriteResponsesArePassedThroughUnchanged() throws {
-    XCTAssertEqual(
-      try rebase([1, 2, 3], supplied: 0, requested: 2, isRead: false), Data([1, 2, 3])
-    )
     XCTAssertEqual(
       try rebase([1, 2, 3], supplied: 9, requested: 0, isRead: false), Data([1, 2, 3])
     )

@@ -22,8 +22,7 @@ android {
 
   sourceSets {
     main {
-      // The module's own sources, compiled in place rather than copied, so the suite can never drift
-      // from what ships.
+      // Sources compiled in place, not copied.
       java.srcDirs = ['../../android/src/main/java']
       manifest.srcFile '../../android/src/main/AndroidManifest.xml'
     }
@@ -45,21 +44,15 @@ android {
   }
 }
 
-// `ExpoGattServerModule.kt` is the only source that imports Expo, and it is a thin binding: it reads
-// arguments off the bridge, checks runtime permissions and forwards. Everything it used to decide now
-// lives in `GattConfiguration.kt`, so excluding it here costs no coverage and keeps this project free
-// of the Expo Gradle plugin, which cannot resolve outside a host app build.
+// ExpoGattServerModule excluded (thin Expo binding; would require expo-module-gradle-plugin and host app).
 android.sourceSets.main.java.filter.exclude '**/ExpoGattServerModule.kt'
-// The Kotlin plugin collects its sources separately from the AGP source set, so the exclusion has to
-// be repeated on the compile task or the binding is compiled anyway.
+// Kotlin plugin requires separate exclusion.
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
   exclude '**/ExpoGattServerModule.kt'
 }
 
 dependencies {
   testImplementation 'junit:junit:4.13.2'
-  // Runs the real android.bluetooth classes on the JVM. BluetoothGattCharacteristic, its descriptors
-  // and the permission and property constants are ordinary framework classes, so the attributes these
-  // tests build are the same objects the server would publish — not stubs returning defaults.
+  // Runs real Android Bluetooth framework classes (not stubs).
   testImplementation 'org.robolectric:robolectric:4.16.1'
 }

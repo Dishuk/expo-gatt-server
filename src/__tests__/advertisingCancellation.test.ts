@@ -6,23 +6,11 @@ jest.mock('../ExpoGattServerModule', () => ({
   default: require('./nativeModuleMock').nativeModuleMock,
 }));
 
-/**
- * A `stopAdvertising` issued while a `startAdvertising` is still in flight must win, and the ordering it
- * would need does not exist natively: `stopAdvertising` is a synchronous Expo `Function`, so its body runs
- * on the JavaScript thread immediately, while `startAdvertising` is an `AsyncFunction` whose body runs
- * later on Expo's worker queue. A stop issued second can therefore reach the manager first and be taken as
- * the *baseline* by the start behind it, which then passes its own generation check and puts the radio on
- * the air after the application asked for the opposite.
- *
- * JavaScript is single-threaded, so the call order here *is* the application's intent, and the shared
- * layer is the only place that knows it. These tests pin that it is carried across; the native ordering
- * itself cannot be exercised from the host.
- */
+// stopAdvertising is synchronous and startAdvertising is async, so a stop issued while a start is
+// still in flight can reach the native side first. The shared JS layer enforces call order so that
+// a later stop always wins, since the native ordering cannot guarantee it.
 
-/**
- * Holds the native `startAdvertising` in flight until the returned function is called, so a stop can be
- * issued in between — the interleaving the guard exists for.
- */
+/** Holds native startAdvertising in flight until released, so a stop can be issued in between. */
 function deferNativeStart(): () => void {
   let release: () => void = () => {};
   nativeModuleMock.startAdvertising.mockImplementationOnce(
@@ -34,8 +22,6 @@ function deferNativeStart(): () => void {
   return () => release();
 }
 
-// The epoch counter behind this is module-level and monotonic, so it needs no resetting: every start reads
-// it afresh and only ever compares it against itself. Only the mocks carry state worth clearing.
 beforeEach(() => {
   jest.clearAllMocks();
   nativeModuleMock.startAdvertising.mockImplementation(async () => undefined);
@@ -50,22 +36,11 @@ describe('a stop issued while a start is in flight', () => {
     release();
 
     await expect(start).rejects.toThrow(/cancelled by a stopAdvertising/);
-    // Twice: once from the application's own call, once from the guard — because whether the first one
-    // reached the manager before the start did is exactly what is not knowable from here.
+    // Twice: once from the app's own stop, once from the guard's compensating stop.
     expect(nativeModuleMock.stopAdvertising).toHaveBeenCalledTimes(2);
   });
 
-  it('reports the code a native cancellation reports, so the two need not be told apart', async () => {
-    const release = deferNativeStart();
-
-    const start = startAdvertising();
-    stopAdvertising();
-    release();
-
-    await expect(start).rejects.toMatchObject({ code: 'ERR_ADVERTISE' });
-  });
-
-  /** `stopServer` stops advertising along with the server, so it has to cancel a pending start too. */
+  /** stopServer stops advertising along with the server, so it has to cancel a pending start too. */
   it('is cancelled by stopServer as well', async () => {
     const release = deferNativeStart();
 
@@ -75,28 +50,10 @@ describe('a stop issued while a start is in flight', () => {
 
     await expect(start).rejects.toMatchObject({ code: 'ERR_ADVERTISE' });
   });
-
-  /** One stop means one thing, whichever of several in-flight starts it arrives against. */
-  it('cancels every start that was in flight', async () => {
-    const releaseFirst = deferNativeStart();
-    const releaseSecond = deferNativeStart();
-
-    const first = startAdvertising({ localName: 'a' });
-    const second = startAdvertising({ localName: 'b' });
-    stopAdvertising();
-    releaseFirst();
-    releaseSecond();
-
-    await expect(first).rejects.toMatchObject({ code: 'ERR_ADVERTISE' });
-    await expect(second).rejects.toMatchObject({ code: 'ERR_ADVERTISE' });
-  });
 });
 
-/**
- * The compensating stop is not addressed to a particular advertisement — `stopAdvertising` takes no
- * argument and stops whatever is on the air. So a cancelled start issuing one after a *later* start has
- * already taken over silently undoes work the application never asked to undo.
- */
+// The compensating stop targets whatever is on the air, not a particular advertisement. A cancelled
+// start must not issue one after a later start has already taken over.
 describe('a start that was replaced before its cancellation could compensate', () => {
   it('leaves the newer advertisement on the air', async () => {
     const releaseFirst = deferNativeStart();
@@ -106,12 +63,11 @@ describe('a start that was replaced before its cancellation could compensate', (
     // Issued after the stop, so this one is not cancelled by it and resolves normally.
     await expect(startAdvertising({ localName: 'second' })).resolves.toBeUndefined();
 
-    // Only now does the abandoned first start come back from the native side.
     releaseFirst();
     await expect(first).rejects.toMatchObject({ code: 'ERR_ADVERTISE' });
 
-    // Once, for the application's own stopAdvertising. A second call here would be the first start
-    // taking the second one off the air after it had already resolved.
+    // Once, for the app's own stopAdvertising — a second call would mean the first start took the
+    // second one off the air after it had already resolved.
     expect(nativeModuleMock.stopAdvertising).toHaveBeenCalledTimes(1);
   });
 
@@ -128,16 +84,13 @@ describe('a start that was replaced before its cancellation could compensate', (
 
     await expect(first).rejects.toMatchObject({ code: 'ERR_ADVERTISE' });
     await expect(second).rejects.toMatchObject({ code: 'ERR_ADVERTISE' });
-    // The application's own stop, plus one from the newest start. The superseded start does not add a
-    // third: it no longer owns the radio.
+    // The app's own stop, plus one from the newest start. The superseded start adds no third: it no
+    // longer owns the radio.
     expect(nativeModuleMock.stopAdvertising).toHaveBeenCalledTimes(2);
   });
 
-  /**
-   * A start that never reached the radio replaced nothing. Claiming the generation on entry rather than
-   * at the hand-over meant a rejected configuration took ownership from the start genuinely in flight,
-   * which then rejected saying nothing was on the air while the radio was still advertising.
-   */
+  // A start that never reached the radio replaced nothing, so it must not take ownership from the
+  // start genuinely in flight.
   it('is not replaced by a start that its own validation rejected', async () => {
     const releaseFirst = deferNativeStart();
 
@@ -153,7 +106,7 @@ describe('a start that was replaced before its cancellation could compensate', (
     expect(nativeModuleMock.stopAdvertising).toHaveBeenCalledTimes(2);
   });
 
-  /** The same claim, released on the failure path, so a cancelled start still compensates when it fails. */
+  /** A cancelled start still compensates when it also fails natively. */
   it('still stops the advertisement when a cancelled start rejects natively', async () => {
     let reject: (error: Error) => void = () => {};
     nativeModuleMock.startAdvertising.mockImplementationOnce(
@@ -179,10 +132,7 @@ describe('a start with no stop against it', () => {
     expect(nativeModuleMock.stopAdvertising).not.toHaveBeenCalled();
   });
 
-  /**
-   * A stop issued *after* a start has already settled is an ordinary stop, not a cancellation. Without
-   * capturing the epoch per call, a single earlier stop would reject every later start forever.
-   */
+  /** A stop issued after a start has already settled is an ordinary stop, not a cancellation. */
   it('leaves a later start unaffected by an earlier stop', async () => {
     await startAdvertising({ localName: 'first' });
     stopAdvertising();

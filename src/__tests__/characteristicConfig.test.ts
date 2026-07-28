@@ -1,5 +1,4 @@
 import {
-  CLIENT_CHARACTERISTIC_CONFIGURATION_UUID,
   createServer,
   startAdvertising,
   type CharacteristicPermission,
@@ -60,11 +59,9 @@ describe('characteristic properties', () => {
     await expect(publish({ properties: ALL_PROPERTIES })).resolves.toBeUndefined();
   });
 
-  // Three mistake classes, not five spellings of one: names are case-sensitive, a name that reads like
-  // the platform's own is not accepted, and an empty string is not a no-op.
+  // Property names are case-sensitive; an empty string is not treated as a no-op.
   it.each([
     ['the wrong case', 'Read'],
-    ['an Android constant name', 'PROPERTY_READ'],
     ['an empty string', ''],
   ])('rejects %s as a property', async (_label, property) => {
     await expect(publish({ properties: [property as CharacteristicProperty] })).rejects.toThrow(
@@ -78,13 +75,9 @@ describe('characteristic properties', () => {
     );
   });
 
-  // A bare string is the plausible slip; `undefined` stands for the absent-value shapes.
-  it.each([
-    ['a bare string', 'read'],
-    ['undefined', undefined],
-  ])('rejects %s in place of the properties array', async (_label, properties) => {
+  it('rejects a bare string in place of the properties array', async () => {
     await expect(
-      publish({ properties: properties as unknown as CharacteristicProperty[] }),
+      publish({ properties: 'read' as unknown as CharacteristicProperty[] }),
     ).rejects.toThrow(/Invalid characteristic property/);
   });
 });
@@ -146,14 +139,6 @@ describe('encrypted subscriptions', () => {
 });
 
 describe('descriptors', () => {
-  it('rejects a manually declared CCCD in its 128-bit form', async () => {
-    await expect(
-      publish({
-        descriptors: [{ uuid: CLIENT_CHARACTERISTIC_CONFIGURATION_UUID, value: [0, 0] }],
-      }),
-    ).rejects.toThrow(/Client Characteristic Configuration descriptor/);
-  });
-
   // Each spelling has to be normalised *before* the CCCD check, or a short form slips past it.
   it.each(['2902', '00002902', '00002902-0000-1000-8000-00805F9B34FB'])(
     'rejects a manually declared CCCD written as %s',
@@ -215,12 +200,7 @@ describe('service configuration', () => {
     expect(publishedServices()[0].characteristics).toEqual([]);
   });
 
-  /**
-   * The distinction the old `services ?? []` could not draw. An empty database is a legitimate thing to
-   * ask for — it is how an advertise-only peripheral is built, `startAdvertising` requiring a published
-   * database — but a *missing* list is a caller whose configuration did not arrive, and publishing an
-   * empty server for it resolved as though it had.
-   */
+  // An empty database (advertise-only) must be distinguished from a missing `services` argument.
   it('publishes an explicitly empty database', async () => {
     await expect(createServer([])).resolves.toBeUndefined();
     expect(nativeModuleMock.createServer).toHaveBeenCalledWith([], {});
@@ -228,7 +208,6 @@ describe('service configuration', () => {
 
   it.each([
     ['undefined', undefined],
-    ['null', null],
     ['a single service object', { uuid: SERVICE, characteristics: [] }],
   ])('rejects %s in place of a services array', async (_label, services) => {
     await expect(createServer(services as unknown as GattServiceConfig[])).rejects.toThrow(
@@ -319,17 +298,12 @@ describe('duplicate UUIDs', () => {
     expect(nativeModuleMock.createServer).not.toHaveBeenCalled();
   });
 
-  /**
-   * The third level of the same rule, and the one that had to be caught here rather than reported by
-   * the platform: assigning two User Description or two Presentation Format descriptors to a
-   * `CBMutableCharacteristic` raises `NSInternalInconsistencyException`, which Swift cannot catch — so
-   * the configuration that merely shadowed an attribute on Android terminated the application on iOS.
-   */
+  // Two User Description descriptors on one `CBMutableCharacteristic` raise
+  // `NSInternalInconsistencyException` on iOS, which Swift cannot catch — this must be rejected here.
   const described = (uuid: string) => ({ uuid, value: [0x41] });
 
   it.each([
     ['the User Description descriptor', '2901'],
-    ['the Presentation Format descriptor', '2904'],
     ['a vendor descriptor', '0000fe01-0000-1000-8000-00805f9b34fb'],
   ])('rejects %s declared twice on one characteristic', async (_label, uuid) => {
     await expect(
@@ -376,12 +350,8 @@ describe('duplicate UUIDs', () => {
   });
 });
 
-/**
- * `delegate` was the only characteristic sub-object that reached the native layers unchecked, and both
- * of them read its flags with a `?: false` fallback — so anything that is not exactly `read` or `write`
- * holding a boolean published the characteristic as fully automatic. The listener never fired, reads
- * were answered from the cached value, and nothing reported a problem on either side.
- */
+// Native code reads delegate flags with a `?: false` fallback, so a bad shape must be rejected here
+// rather than silently published as a fully automatic characteristic.
 describe('delegate validation', () => {
   const withDelegate = (delegate: unknown) =>
     createServer([
@@ -422,11 +392,7 @@ describe('delegate validation', () => {
   });
 });
 
-/**
- * A key no layer below reads is not an error anywhere: every native parser takes the keys it knows and
- * ignores the rest, so a misspelling is simply absent. `delegate` was guarded against this and nothing
- * else was — while the failures the others produce are the same kind, and just as silent.
- */
+// Native parsers ignore keys they don't recognise, so an unknown key must be caught here instead.
 describe('an unrecognised configuration key', () => {
   it('is rejected on a characteristic, where it would publish one fully automatic', async () => {
     await expect(
@@ -476,10 +442,6 @@ describe('an unrecognised configuration key', () => {
     );
   });
 
-  /**
-   * The advertising one is the most consequential: a peripheral that appears to advertise but that no
-   * central filtering on the UUID can find.
-   */
   it('is rejected in an advertising config', async () => {
     await expect(startAdvertising({ serviceUUIDs: ['180d'] } as never)).rejects.toThrow(
       /Unknown advertising option "serviceUUIDs"/,

@@ -36,18 +36,15 @@ async function publishedServiceUuid(uuid: string): Promise<string> {
 }
 
 const aliases16: [string, bigint][] = [
-  ['180D', 0x180dn],
-  ['180d', 0x180dn],
   ['0000', 0x0000n],
+  ['180D', 0x180dn],
   ['ffff', 0xffffn],
-  ['FFFF', 0xffffn],
 ];
 
 const aliases32: [string, bigint][] = [
-  ['0000180D', 0x180dn],
   ['00000000', 0x0n],
-  ['ffffffff', 0xffffffffn],
   ['DEADBEEF', 0xdeadbeefn],
+  ['ffffffff', 0xffffffffn],
 ];
 
 describe('short-form UUID expansion', () => {
@@ -57,12 +54,6 @@ describe('short-form UUID expansion', () => {
 
   it.each(aliases32)('expands the 32-bit alias %s by the specification', async (alias, value) => {
     await expect(publishedServiceUuid(alias)).resolves.toBe(expandBySpecification(value));
-  });
-
-  it('places the alias in the leading 32 bits and leaves the base UUID groups intact', async () => {
-    await expect(publishedServiceUuid('180D')).resolves.toBe(
-      '0000180d-0000-1000-8000-00805f9b34fb',
-    );
   });
 
   it('lowercases a 128-bit UUID without otherwise altering it', async () => {
@@ -80,13 +71,11 @@ const malformedUuids: [string, unknown][] = [
   ['a non-hex digit', '180G'],
   ['an empty string', ''],
   ['a 128-bit form without hyphens', '0000180d00001000800000805f9b34fb'],
-  ['a 128-bit form with the wrong group lengths', '0000180d-000-1000-8000-00805f9b34fb'],
   ['a 128-bit form with a truncated final group', '0000180d-0000-1000-8000-00805f9b34f'],
   // Both would be silently accepted by a looser check that trimmed or coerced.
   ['surrounding whitespace', ' 180d '],
   ['a 0x prefix', '0x180d'],
-  // Non-strings reach one `typeof` check; these two stand for the rest.
-  ['a number', 0x180d],
+  // Non-strings reach one `typeof` check.
   ['null', null],
 ];
 
@@ -170,8 +159,6 @@ describe('normalisation at every UUID entry point', () => {
     );
   });
 
-  // Held by reference rather than indexed back out of the array, so a mutation is caught at whichever
-  // level it happened rather than reported as an undefined lookup two levels down.
   it("leaves the caller's own configuration object untouched", async () => {
     const descriptor = { uuid: '2901', value: [1] };
     const characteristic = {

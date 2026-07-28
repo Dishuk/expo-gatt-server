@@ -1,25 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-  <!--
-    Only what a GATT peripheral actually needs, since every consuming app inherits these by manifest
-    merging. Advertising takes BLUETOOTH_ADMIN / BLUETOOTH_ADVERTISE and the server takes
-    BLUETOOTH / BLUETOOTH_CONNECT, per the framework's own @RequiresLegacyBluetooth*Permission
-    annotations. No location permission: that is a scanning concern, and this module never scans.
-  -->
+  <!-- GATT peripheral: BLUETOOTH_* and BLUETOOTH_ADVERTISE for advertising/server; no location (scanning not needed). -->
   <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
   <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
   <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
-  <!--
-    Neither is required, so a dependency cannot filter its consumer off Google Play on a device without
-    the hardware. An app that genuinely cannot work without BLE overrides these with required="true";
-    `android:required` merges by OR, so raising one in the app manifest wins.
-
-    `android.hardware.bluetooth` is declared as well as the BLE one because Google Play *implies* it,
-    with required="true", from the BLUETOOTH and BLUETOOTH_ADMIN permissions above — so leaving it
-    undeclared did exactly what the note about not filtering consumers says it must not: every app
-    depending on this module was hidden from devices with no Bluetooth hardware at all.
-  -->
+  <!-- Both marked required=false (can be overridden to true by consuming app via OR merge). BLUETOOTH_* permissions cause Google Play to infer android.hardware.bluetooth with required=true; must declare both features explicitly to prevent filtering. -->
   <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
   <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 </manifest>

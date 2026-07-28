@@ -2,9 +2,9 @@ import { createServer, getBluetoothState, isSupported } from '../index';
 
 jest.mock('../ExpoGattServerModule', () => ({ __esModule: true, default: null }));
 
-// The web and node Jest projects are not run — this package declares no web platform — so the web
-// branch of the guard is reached by overriding the only value the module reads from
-// `expo-modules-core`. The rest of the module has to stay real: `expo` itself loads through it.
+// This package declares no web platform, so the web branch of the guard is reached by overriding
+// the only value the module reads from expo-modules-core; the rest stays real since expo loads
+// through it.
 jest.mock('expo-modules-core', () => ({
   ...jest.requireActual('expo-modules-core'),
   Platform: { OS: 'web' },

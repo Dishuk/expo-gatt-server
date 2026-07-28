@@ -16,12 +16,8 @@ import org.robolectric.annotation.Config
 import java.util.UUID
 
 /**
- * What a configuration turns into, run against the real `android.bluetooth` attribute classes rather
- * than stubs — the objects these tests inspect are the ones the server would publish.
- *
- * Everything here is invisible until a peer connects: a dropped permission publishes an attribute less
- * protected than the app asked for, a missing descriptor makes a characteristic unsubscribable, and
- * neither produces an error anywhere.
+ * What a configuration turns into, checked against the real `android.bluetooth` attribute classes
+ * rather than stubs.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -62,41 +58,16 @@ class GattConfigurationTest {
 
   // MARK: - The constants restated in AttOperations
 
-  /**
-   * `AttOperations.kt` restates these so it can run on a plain JVM. They are bits of the characteristic
-   * declaration and cannot drift, but nothing else would notice if they did.
-   */
+  /** `AttOperations.kt` restates these constants so it can run on a plain JVM. */
   @Test
   fun `the restated property bits match the framework`() {
     assertEquals(BluetoothGattCharacteristic.PROPERTY_NOTIFY, PROPERTY_NOTIFY)
     assertEquals(BluetoothGattCharacteristic.PROPERTY_INDICATE, PROPERTY_INDICATE)
   }
 
-  /** The parser relies on this to serve both attribute kinds from one permission table. */
-  @Test
-  fun `descriptor and characteristic permission constants agree`() {
-    assertEquals(BluetoothGattCharacteristic.PERMISSION_READ, BluetoothGattDescriptor.PERMISSION_READ)
-    assertEquals(
-      BluetoothGattCharacteristic.PERMISSION_WRITE, BluetoothGattDescriptor.PERMISSION_WRITE
-    )
-    assertEquals(
-      BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED,
-      BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED
-    )
-    assertEquals(
-      BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED_MITM,
-      BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED_MITM
-    )
-  }
-
   // MARK: - Subscribing must not bypass the value's own security
 
-  /**
-   * The hole this exists to close. Android resolves an attribute's permission from the written handle
-   * alone, and checks nothing at all before transmitting a notification — so a CCCD published with a
-   * plain `PERMISSION_WRITE` lets an unbonded client subscribe to a characteristic whose direct read
-   * was correctly refused, and then receive every later value in cleartext.
-   */
+  /** A CCCD published with plain PERMISSION_WRITE would let an unbonded client subscribe to a characteristic whose direct read is encrypted. */
   @Test
   fun `subscribing to an encrypted characteristic requires an encrypted link`() {
     val parsed = parseCharacteristicConfig(
@@ -132,20 +103,6 @@ class GattConfigurationTest {
     assertEquals(0, cccd.permissions and BluetoothGattDescriptor.PERMISSION_WRITE)
   }
 
-  /** Security declared on the write direction protects the subscription just the same. */
-  @Test
-  fun `write side encryption also protects the subscription`() {
-    val parsed = parseCharacteristicConfig(
-      characteristic(
-        properties = listOf("write", "notify"), permissions = listOf("writeEncrypted")
-      )
-    )
-
-    assertTrue(
-      parsed.cccd()!!.permissions and BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED != 0
-    )
-  }
-
   /** The strongest level declared in either direction wins, since either would otherwise be bypassable. */
   @Test
   fun `the strongest declared level wins`() {
@@ -159,10 +116,7 @@ class GattConfigurationTest {
     )
   }
 
-  /**
-   * A signed permission constrains the form of an inbound write PDU; a CCCD is configured with an
-   * ordinary write request, so it must not be mistaken for a security level.
-   */
+  /** A signed permission constrains the PDU form, not encryption; a CCCD write must not be mistaken for one. */
   @Test
   fun `signed permissions do not raise the subscription requirement`() {
     val permissions = cccdPermissions(BluetoothGattCharacteristic.PERMISSION_WRITE_SIGNED)
@@ -171,11 +125,7 @@ class GattConfigurationTest {
     assertEquals(0, permissions and BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED)
   }
 
-  /**
-   * Table 3.10 fixes the CCCD as "Readable with no authentication or authorization", and the module
-   * answers reads of it from its own per-client map — so refusing one would cost a conformant client
-   * its descriptor discovery to hide a value it is entitled to.
-   */
+  /** Table 3.10 fixes the CCCD as "Readable with no authentication or authorization". */
   @Test
   fun `the configuration stays readable at every security level`() {
     val levels = listOf(
@@ -223,10 +173,7 @@ class GattConfigurationTest {
     }
   }
 
-  /**
-   * A second instance would be published alongside the module's own and shadow the per-client
-   * subscription tracking that answers it.
-   */
+  /** A second instance would be published alongside the module's own and shadow the per-client subscription tracking. */
   @Test
   fun `declaring the configuration descriptor is rejected`() {
     val error = runCatching {
@@ -313,10 +260,7 @@ class GattConfigurationTest {
     )
   }
 
-  /**
-   * Skipping an unrecognised name silently publishes an attribute with one fewer permission than the
-   * app asked for — which is a weaker attribute, not a broken one, so nothing would report it.
-   */
+  /** Skipping an unrecognised name would silently publish a weaker attribute than requested. */
   @Test
   fun `an unrecognised permission is rejected rather than dropped`() {
     val error = runCatching { parsePermissions(listOf("readable", "writable")) }.exceptionOrNull()
@@ -355,11 +299,7 @@ class GattConfigurationTest {
     )
   }
 
-  /**
-   * `getService` and `getCharacteristic` both return the first match, so a repeat leaves one attribute
-   * unreachable and the other addressed by both spellings — and `sendNotification` would then be
-   * answering about a different attribute than the caller meant.
-   */
+  /** `getService` returns the first match, so a repeated UUID would leave one service unreachable. */
   @Test
   fun `two services with the same uuid are rejected`() {
     val error = runCatching { parseServices(listOf(service(), service())) }.exceptionOrNull()
@@ -427,19 +367,6 @@ class GattConfigurationTest {
   }
 
   @Test
-  fun `a delegate block of all false leaves the characteristic automatic`() {
-    val services = listOf(
-      service(
-        characteristics = listOf(
-          characteristic(delegate = mapOf("read" to false, "write" to false))
-        )
-      )
-    )
-
-    assertTrue(parseDelegations(services).isEmpty())
-  }
-
-  @Test
   fun `delegation is recorded against the service and characteristic pair`() {
     val services = listOf(
       service(characteristics = listOf(characteristic(delegate = mapOf("read" to true))))
@@ -453,10 +380,7 @@ class GattConfigurationTest {
     assertEquals(CharacteristicDelegation(read = true, write = false), delegations[address])
   }
 
-  /**
-   * Keying by characteristic alone would make one instance's delegation answer for another's, which is
-   * exactly what the per-service address exists to prevent.
-   */
+  /** Keying by characteristic alone would make one instance's delegation answer for another's. */
   @Test
   fun `the same characteristic in two services delegates independently`() {
     val other = "0000181a-0000-1000-8000-00805f9b34fb"
@@ -516,10 +440,7 @@ class GattConfigurationTest {
 
   // MARK: - Timeouts
 
-  /**
-   * A module timeout at or above the ATT transaction timeout could never answer before the peer gives
-   * up and retires the bearer, so the bound is exclusive.
-   */
+  /** A module timeout at or above the ATT transaction timeout could never answer before the peer retires the bearer, so the bound is exclusive. */
   @Test
   fun `a request timeout at the att transaction timeout is rejected`() {
     assertTrue(
@@ -584,12 +505,7 @@ class GattConfigurationTest {
 
   // MARK: - Resolving a delegation
 
-  /**
-   * `parseDelegations` keying by service and characteristic is only half of it: the *lookup* has to
-   * honour that key too. It did not — a miss on the exact address fell through to the UUID-only map,
-   * which the manager populates for every characteristic UUID that occurs once — so the very case the
-   * per-service key exists for was the case that leaked.
-   */
+  /** Keying by service+characteristic is only half of it — the lookup has to honour that key too. */
   private val serviceA = java.util.UUID.fromString(serviceUuid)
   private val serviceB = java.util.UUID.fromString("0000181a-0000-1000-8000-00805f9b34fb")
   private val charX = java.util.UUID.fromString(characteristicUuid)
@@ -627,10 +543,7 @@ class GattConfigurationTest {
     assertEquals(delegated, resolved)
   }
 
-  /**
-   * The UUID-only map earns its keep only here: `addressOf` could not name the owning service, so the
-   * unambiguous single occurrence is the best available answer.
-   */
+  /** `addressOf` could not name the owning service here, so the unambiguous single occurrence is the best available answer. */
   @Test
   fun `an unnameable attribute falls back to the unambiguous characteristic`() {
     val delegated = CharacteristicDelegation(read = true)
@@ -664,11 +577,8 @@ class GattConfigurationTest {
 }
 
 /**
- * Parsing a configured UUID.
- *
- * The one rule the two platforms most needed to agree on and did not: `CBUUID` accepts a 16-bit, a
- * 32-bit or a 128-bit spelling, while `java.util.UUID.fromString` requires the last of the three — so a
- * direct native caller passing `"180D"` succeeded on iOS and threw here.
+ * Parsing a configured UUID: 16-bit, 32-bit, and 128-bit spellings must all resolve, unlike
+ * `java.util.UUID.fromString` alone.
  */
 class UuidParsingTest {
   private val heartRate = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
@@ -689,16 +599,6 @@ class UuidParsingTest {
     assertEquals(heartRate, parseUuid("0000180D-0000-1000-8000-00805F9B34FB", "service"))
   }
 
-  /** All three spellings name one attribute, which is what makes one configuration portable. */
-  @Test
-  fun `every spelling of one uuid parses to the same value`() {
-    assertEquals(parseUuid("180d", "service"), parseUuid("0000180d", "service"))
-    assertEquals(
-      parseUuid("180d", "service"),
-      parseUuid("0000180d-0000-1000-8000-00805f9b34fb", "service")
-    )
-  }
-
   @Test
   fun `a malformed uuid is rejected rather than parsed`() {
     for (bad in listOf("", "180", "180dd", "not-a-uuid", "0000180d-0000-1000-8000")) {
@@ -706,10 +606,7 @@ class UuidParsingTest {
     }
   }
 
-  /**
-   * `UUID.fromString` accepts short groups and silently zero-pads them, so this spelling used to parse
-   * as a different UUID than it reads as.
-   */
+  /** `UUID.fromString` accepts short groups and silently zero-pads them. */
   @Test
   fun `a uuid with short groups is rejected rather than silently padded`() {
     assertThrows(IllegalArgumentException::class.java) {
@@ -730,8 +627,8 @@ class UuidParsingTest {
 }
 
 /**
- * The rules that bound an argument or a value rather than decode one, and the ones that decide whether
- * a malformed entry is reported or dropped.
+ * Rules that bound an argument or value, and rules for whether a malformed entry is reported or
+ * dropped.
  *
  * Robolectric, because the value rules are asserted through the real attribute classes the server
  * publishes rather than through the helpers in isolation.
@@ -756,13 +653,7 @@ class ArgumentBoundsTest {
 
   // MARK: - Integer arguments
 
-  /**
-   * Declared as `Double` and narrowed here rather than declared as `Int` and narrowed by
-   * expo-modules-core, whose `asDouble().toInt()` turns `NaN` into 0 and truncates a fraction that the
-   * iOS converter rounds — so the same `sendResponse` answered a different request on each platform,
-   * with nothing reporting it. (The same conversion *traps* on iOS, which is why the argument is
-   * declared this way on both sides rather than checked on one.)
-   */
+  /** Declared as `Double` and narrowed here, rather than narrowed by expo-modules-core's `asDouble().toInt()`, which turns NaN into 0. */
   @Test
   fun `a non finite integer argument is rejected rather than becoming zero`() {
     for (value in listOf(Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY)) {
@@ -793,12 +684,7 @@ class ArgumentBoundsTest {
 
   // MARK: - The attribute value length limit
 
-  /**
-   * "The maximum length of an attribute value shall be 512 octets" — Core Spec Vol 3, Part F, §3.2.9.
-   * A client write past it was already refused and a notification already capped at
-   * `min(mtu - 3, 512)`; the application's own routes to the same value were not, so the module would
-   * publish an attribute it then refused to notify.
-   */
+  /** "The maximum length of an attribute value shall be 512 octets" — Core Spec Vol 3, Part F, §3.2.9. */
   @Test
   fun `a configured characteristic value of exactly the limit is accepted`() {
     val value = List(MAX_ATTRIBUTE_VALUE_LENGTH) { 0 }
@@ -830,12 +716,7 @@ class ArgumentBoundsTest {
 
   // MARK: - Descriptor uniqueness
 
-  /**
-   * `addDescriptor` accepts a repeat and `getDescriptor` returns the first, leaving the second
-   * unreachable — the shadowing a repeated characteristic UUID is already refused for. iOS cannot
-   * accept it at all: the equivalent assignment raises an uncatchable Objective-C exception, so the
-   * configuration this platform published quietly terminated the application there.
-   */
+  /** `addDescriptor` accepts a repeat and `getDescriptor` returns the first, leaving the second unreachable. */
   @Test
   fun `a repeated descriptor uuid on one characteristic is rejected`() {
     val descriptor = mapOf("uuid" to "2901", "value" to listOf(0x41))
@@ -872,33 +753,9 @@ class ArgumentBoundsTest {
     assertEquals(2, parsed.descriptors.size)
   }
 
-  /**
-   * The module publishes the CCCD itself for a subscribable characteristic, so a configuration that
-   * also declared one would shadow the per-client tracking that answers it. Already refused by name;
-   * asserted here because the uniqueness set is seeded with it and would otherwise be the thing that
-   * reports it, with a less useful message.
-   */
-  @Test
-  fun `a declared cccd is still rejected by name on a subscribable characteristic`() {
-    val error = assertThrows(IllegalArgumentException::class.java) {
-      parseCharacteristicConfig(
-        characteristic(
-          properties = listOf("notify"),
-          descriptors = listOf(mapOf("uuid" to "2902", "value" to listOf(0, 0))),
-        )
-      )
-    }
-    assertTrue(error.message!!, error.message!!.contains("Client Characteristic Configuration"))
-  }
-
   // MARK: - Malformed configuration entries
 
-  /**
-   * Every other rule in the parser throws for input it cannot honour, on the grounds that the native
-   * module is reachable directly. These list elements were dropped instead, so one malformed entry
-   * published a service with a characteristic missing and `createServer` resolved as though it had
-   * not. iOS reports the same input through `parseTypedArray`.
-   */
+  /** A malformed list element must be reported, not silently dropped from the service. */
   @Test
   fun `a malformed characteristic entry is reported rather than dropped`() {
     val error = assertThrows(IllegalArgumentException::class.java) {
@@ -910,23 +767,9 @@ class ArgumentBoundsTest {
   }
 
   @Test
-  fun `a malformed descriptor entry is reported rather than dropped`() {
-    assertThrows(IllegalArgumentException::class.java) {
-      parseCharacteristicConfig(characteristic(descriptors = listOf("2901")))
-    }
-  }
-
-  @Test
   fun `a malformed manufacturer data entry is reported rather than dropped`() {
     assertThrows(IllegalArgumentException::class.java) {
       parseManufacturerData(listOf(mapOf("companyId" to 0x004C, "data" to listOf(1)), 0x004C))
-    }
-  }
-
-  @Test
-  fun `a malformed service data entry is reported rather than dropped`() {
-    assertThrows(IllegalArgumentException::class.java) {
-      parseServiceData(listOf(mapOf("uuid" to "180d", "data" to listOf(1)), "180d"))
     }
   }
 

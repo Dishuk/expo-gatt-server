@@ -10,21 +10,15 @@ import expo.modules.kotlin.modules.ModuleDefinition
 
 class ExpoGattServerModule : Module() {
   /**
-   * Written by `createServer` on Expo's `AsyncFunctionQueue` and read by the synchronous `stopServer`
-   * and `stopAdvertising` on the JavaScript thread, so the write has to be published across them.
-   * Without `@Volatile` a `stopServer()` issued shortly after `createServer` could read a stale `null`
-   * and silently do nothing, leaking the `BluetoothGattServer`, its broadcast receiver and any live
-   * advertisement.
+   * Written on `AsyncFunctionQueue`, read on JavaScript thread. Volatile publishes across threads
+   * to prevent a stale `null` from leaking the server and broadcast receiver.
    */
   @Volatile
   private var manager: GattServerManager? = null
 
   /**
-   * The rejection [permission] warrants, as a code and message, or `null` when it is held.
-   *
-   * A missing React context is an error rather than a pass: with nothing to check the grant against,
-   * assuming it was granted only defers the failure to a `SecurityException` from the Bluetooth stack,
-   * which surfaces as an unrelated crash rather than as a permission problem.
+   * Returns rejection code and message if [permission] is not granted, or null. Checks React context
+   * first: missing context is an error (not a pass) to avoid deferring the failure to a Bluetooth SecurityException.
    */
   private fun permissionError(permission: String, requiredBy: String? = null): Pair<String, String>? {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
@@ -133,11 +127,6 @@ class ExpoGattServerModule : Module() {
 
       try {
         val requestTimeoutMs = parseRequestTimeout(options["requestTimeoutMs"])
-        // Parsed before the running server is touched, so a malformed configuration rejects without
-        // having torn down a working one. Stopping first also left `manager` referencing the stopped
-        // instance — non-null, so no later call reported ERR_NO_SERVER, and every one of them addressed
-        // a server that no longer existed. The same parse is handed over as a factory below, for the
-        // rebuild that follows a power cycle.
         parseServices(services)
         val delegations = parseDelegations(services)
 
@@ -149,8 +138,7 @@ class ExpoGattServerModule : Module() {
         }
         mgr.setDelegations(delegations)
         manager = mgr
-        // Resolves only once every service is confirmed registered — until then the server has no
-        // attributes to expose and advertising it would be meaningless.
+        // Resolves after services are confirmed registered.
         mgr.open({ error ->
           if (error != null) {
             promise.reject(error.code, error.message, error)
@@ -161,8 +149,7 @@ class ExpoGattServerModule : Module() {
           parseServices(services)
         }
       } catch (e: GattServerException) {
-        // Keeps a specific code such as ERR_BLUETOOTH, which the generic catch below would flatten into
-        // ERR_CREATE_SERVER.
+        // Preserve GattServerException codes (e.g. ERR_BLUETOOTH) instead of flattening to ERR_CREATE_SERVER.
         promise.reject(e.code, e.message, e)
       } catch (e: Exception) {
         promise.reject("ERR_CREATE_SERVER", e.message, e)
@@ -201,9 +188,7 @@ class ExpoGattServerModule : Module() {
       try {
         val options = AdvertiseOptions(
           localName = localName,
-          // Every entry parsed rather than the non-strings dropped: silently advertising one fewer
-          // service UUID than the caller asked for makes the peripheral undiscoverable to a central
-          // filtering on it, with nothing anywhere reporting why.
+          // Parse every entry; silently dropping non-strings would lose service UUIDs and make discovery fail silently.
           serviceUuids = (config["serviceUuids"] as? List<*>)
             ?.map { parseUuid(it, "service") }
             ?: emptyList(),
@@ -217,10 +202,7 @@ class ExpoGattServerModule : Module() {
           manufacturerData = parseManufacturerData(config["manufacturerData"]),
           serviceData = parseServiceData(config["serviceData"]),
         )
-        // Waits for the services to be registered rather than sampling the state: `createServer` and
-        // the re-registration that follows a `poweredOn` event both finish asynchronously, which
-        // rejected perfectly healthy calls made straight after either. iOS parks the same way, and on
-        // both the manager does the waiting, because only it can tell a stop from a genuine release.
+        // Waits for services to be registered rather than sampling state; createServer and power-on reregistration are asynchronous.
         mgr.startAdvertising(options) { error ->
           if (error != null) {
             promise.reject(error.code, error.message, error)
@@ -271,11 +253,8 @@ class ExpoGattServerModule : Module() {
       }
     }
 
-    // The three numbers are declared as `Double` and narrowed by [parseIntArgument], matching iOS.
-    // Declared as `Int`, expo-modules-core produces them with `asDouble().toInt()`, which turns `NaN`
-    // into request 0 and truncates a fraction the iOS converter rounds — so the same call answered a
-    // different request on each platform, and neither reported it. (On iOS the same conversion *traps*,
-    // which is what made this the argument to fix rather than to document.)
+    // Declared as Double and narrowed by parseIntArgument to match iOS.
+    // If declared as Int, expo-modules-core would use asDouble().toInt(), which loses NaN and truncates fractions differently per platform.
     AsyncFunction("sendResponse") {
       deviceId: String,
       rawRequestId: Double,
@@ -300,11 +279,7 @@ class ExpoGattServerModule : Module() {
         promise.reject("ERR_RESPONSE", e.message, e)
         return@AsyncFunction
       }
-      // `REQUEST_NOT_FOUND` rather than `ERR_NO_SERVER`, matching iOS and what `docs/api.md` documents
-      // for both. Answering a request the module no longer holds is a missing request either way: with no
-      // server there are no pending requests at all — `stop` answered and discarded them — so the lookup
-      // below could only have failed anyway. A handler that resolves after the server was stopped, which
-      // is the ordinary unmount race, therefore gets one code to branch on rather than one per platform.
+      // REQUEST_NOT_FOUND (not ERR_NO_SERVER) so unmount-race handlers get one code to branch on across platforms.
       val mgr = manager ?: run {
         promise.reject(
           "REQUEST_NOT_FOUND", "Request $requestId not found or already responded", null
@@ -332,8 +307,7 @@ class ExpoGattServerModule : Module() {
         return@AsyncFunction
       }
       try {
-        // The same bound a configured value gets: this is the other way an application sets an
-        // attribute's value, and the specification bounds the attribute rather than the route to it.
+        // Respects the same attribute value bound as configuration.
         mgr.updateCharacteristicValue(
           serviceUuid, characteristicUuid, parseAttributeValue(value, "characteristic")
         )
@@ -345,17 +319,8 @@ class ExpoGattServerModule : Module() {
       }
     }
 
-    // Synchronous, which is what makes the shared layer's ordering work: `stopServer` has to be the
-    // `Function` whose body runs on the JavaScript thread the moment it is called, so a stop issued
-    // after a `createServer` is known to have been issued after it. See `serverStopEpoch` in
-    // `src/index.ts`.
-    //
-    // The cost is that [GattServerManager.stop] runs there too, and it takes `serverLifecycleLock` and
-    // then makes binder calls — `setName`, `unregisterReceiver`, `close`. An adapter power cycle holding
-    // that lock inside `openGattServer` will therefore block the JavaScript thread until the Bluetooth
-    // process answers. Moving the teardown to the lifecycle looper would fix that and is not done here
-    // because it would also stop `stopServer` from being ordered against anything, which is the property
-    // the whole cancellation mechanism is built on.
+    // Synchronous to preserve ordering against createServer (see serverStopEpoch in src/index.ts).
+    // This runs on the JavaScript thread and takes serverLifecycleLock; a power cycle will block until the Bluetooth process responds.
     Function("stopServer") {
       manager?.stop()
       manager = null

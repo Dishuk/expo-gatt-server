@@ -124,11 +124,7 @@ function nativeModule(): ExpoGattServerModuleType {
   return ExpoGattServerModule;
 }
 
-/**
- * Stands in for a real subscription when there is no native module to subscribe to. Returned rather
- * than thrown: a listener registered in an effect is paired with a `remove()` in that effect's
- * teardown, which would otherwise crash on a value it never received.
- */
+// Returned instead of thrown: listener teardown calls remove() even when module is absent.
 const NOOP_SUBSCRIPTION: EventSubscription = { remove() {} };
 
 function addListener<EventName extends keyof GattServerEvents>(
@@ -148,17 +144,9 @@ const LONG_UUID_RE =
 const BLUETOOTH_BASE_UUID = '00000000-0000-1000-8000-00805f9b34fb';
 
 /**
- * Validates a UUID and returns it as the lowercase 128-bit form, expanding a 16-bit or 32-bit alias
- * onto the Bluetooth Base UUID. The specification defines the aliases as
- * `short_value * 2^96 + Bluetooth_Base_UUID` (Vol 3, Part B, §2.5.1), which lands the value in the
- * leading 32 bits — so the expansion is exactly a left-pad to eight hex digits plus the base UUID's
- * remaining groups.
- *
- * Normalising here rather than per platform is what makes one configuration portable: `CBUUID`
- * accepts all three forms, but Java's `UUID.fromString` requires the 8-4-4-4-12 form, so `'180D'`
- * used to be accepted on iOS and throw on Android. The specification also requires the conversion
- * before comparing UUIDs of different sizes, so the long form is the only spelling in which the
- * module's own lookups and a consumer's `===` against an event payload agree.
+ * Validates and normalizes UUID to lowercase 128-bit form. Core Spec Vol 3, Part B, §2.5.1.
+ * Expansion: `short_value * 2^96 + Bluetooth_Base_UUID`. CBUUID accepts all three forms;
+ * Java UUID.fromString requires 8-4-4-4-12 only. Both code and events use normalized form.
  */
 function normalizeUuid(uuid: unknown, field: string): string {
   if (typeof uuid !== 'string' || (!SHORT_UUID_RE.test(uuid) && !LONG_UUID_RE.test(uuid))) {
@@ -191,14 +179,8 @@ function assertValidBytes(value: unknown, field: string): void {
 }
 
 /**
- * The bytes of a value the module will hold as an attribute, which the specification bounds at
- * `MAX_ATTRIBUTE_VALUE_LENGTH` however it came to be set.
- *
- * Both platforms already refuse a *client* write that assembles past that bound, and both cap a
- * notification at `min(mtu - 3, 512)` — but neither bounded a value the application supplied itself, so
- * a configured `value` or an `updateCharacteristicValue` could publish an attribute longer than any
- * attribute may be: readable only through a conformant Read Blob, and impossible to notify. Every path
- * that stores an attribute value goes through here so the one rule is applied once.
+ * Enforces MAX_ATTRIBUTE_VALUE_LENGTH. Core Spec Vol 3, Part F, §3.2.9.
+ * Platforms cap notifications but do not bound app-supplied values; every path through here.
  */
 function assertValidAttributeValue(value: unknown, field: string): void {
   assertValidBytes(value, field);
@@ -223,12 +205,8 @@ function assertArrayOrAbsent(value: unknown, field: string): void {
 }
 
 /**
- * Rejects a value of the wrong primitive type where an optional one belongs.
- *
- * Both natives read these as `as? Boolean ?: default` / `as? String`, so a wrong type is not an error
- * there — it is simply absent, and the call resolves having quietly done something else. `connectable`
- * is the one that matters most: a truthy `'false'` advertises a connectable peripheral for an app that
- * asked for a beacon, and iOS never reaches the `ERR_UNSUPPORTED` it documents for it.
+ * Rejects wrong type for optional fields. Natives read as `as? Boolean ?: default` / `as? String`,
+ * silently absent if wrong type; prevents `'false'` string advertising as connectable=true.
  */
 function assertTypeOrAbsent(value: unknown, field: string, expected: 'boolean' | 'string'): void {
   if (value !== undefined && typeof value !== expected) {
@@ -237,15 +215,8 @@ function assertTypeOrAbsent(value: unknown, field: string, expected: 'boolean' |
 }
 
 /**
- * A whole number the native side will receive in a parameter declared as an integer.
- *
- * Every such argument is validated here rather than only where it happens to be used, because the
- * conversion is not forgiving and the two platforms fail differently: expo-modules-core turns a JS
- * number into a native `Int` with `Int(double.rounded())` on iOS — which *traps* on `NaN` or an
- * infinity, killing the process rather than rejecting the promise — and with `asDouble().toInt()` on
- * Android, which maps `NaN` to 0 and truncates a fraction. So an unvalidated argument is a crash on one
- * platform and a silently different value on the other. The natives re-check the same bounds, since the
- * module is reachable directly.
+ * Validates all integer arguments before native pass. iOS: Int(double.rounded()) traps on NaN/∞.
+ * Android: asDouble().toInt() maps NaN→0, truncates fractions. Must validate before native side.
  */
 function assertValidInteger(
   value: unknown,
@@ -286,10 +257,6 @@ const CHARACTERISTIC_PERMISSIONS: CharacteristicPermission[] = [
   'writeSignedMitm',
 ];
 
-/**
- * Both platforms used to ignore a name they did not recognise, so a typo published an attribute with
- * one fewer property or — far worse — one fewer permission than the app asked for, silently.
- */
 function assertEachOneOf<T extends string>(values: unknown, allowed: T[], field: string): void {
   if (!Array.isArray(values)) {
     throw new Error(`Invalid ${field} ${JSON.stringify(values)}. Expected an array.`);
@@ -300,14 +267,8 @@ function assertEachOneOf<T extends string>(values: unknown, allowed: T[], field:
 }
 
 /**
- * Rejects a `delegate` that would silently do nothing.
- *
- * Both native layers read the two flags as `delegate["read"] as? Boolean ?: false`, so a typo or a
- * non-boolean is not an error there — it is simply absent. The characteristic then publishes as fully
- * automatic: the listener never fires, reads are answered from whatever value is cached, and nothing
- * anywhere reports a problem. `delegate` was the only sub-object `normalizeCharacteristic` passed
- * through unchecked, which is exactly the silent-drop failure `assertEachOneOf` exists to prevent for
- * properties and permissions.
+ * Rejects delegate with typo or non-boolean flags. Natives read as `as? Boolean ?: false`,
+ * silently absent if wrong type. Must validate to catch silent failures.
  */
 function assertValidDelegate(delegate: unknown, characteristicUuid: string): void {
   if (delegate === undefined) return;
@@ -335,18 +296,10 @@ function assertValidDelegate(delegate: unknown, characteristicUuid: string): voi
 }
 
 /**
- * Rejects a key no layer below will read.
- *
- * The same silent-drop failure `assertValidDelegate` exists for, generalised: every native parser reads
- * the keys it knows and ignores the rest, so a misspelling is not an error anywhere — it is simply
- * absent. `delegat` publishes a characteristic as fully automatic, `descriptor` publishes none,
- * `serviceUUIDs` advertises no service UUIDs and leaves a central filtering on one unable to find the
- * peripheral, and `requestTimeoutMS` silently keeps the default. None of them reports a problem, and
- * `delegate` was the only object guarded against it.
+ * Rejects unrecognized keys. Natives ignore unknown keys silently; misspelling causes silent failure.
  */
 function assertNoUnknownKeys(value: unknown, allowed: readonly string[], what: string): void {
-  // Checked here rather than left to `Object.keys`, which reports a null as `Cannot convert undefined or
-  // null to object` — naming neither the option nor the fix, which is the whole point of this function.
+  // Check before Object.keys: null reports "Cannot convert" with no field name.
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error(
       `Invalid ${what} options ${JSON.stringify(value)}. Expected an object with any of ` +
@@ -430,25 +383,10 @@ function normalizeCharacteristic(
 }
 
 /**
- * Rejects a configuration in which one name would identify more than one attribute, at every level of
- * the database.
- *
- * `sendNotification` and `updateCharacteristicValue` address an attribute by service and
- * characteristic UUID, and each platform resolves that pair to exactly one attribute — Android's
- * `getService` and `getCharacteristic` to the first match, iOS to the last service added — so a repeat
- * leaves the two platforms answering the same call about different attributes. This is the same
- * shadowing that already rejects a manually declared Client Characteristic Configuration descriptor.
- *
- * A repeated *descriptor* UUID within one characteristic belongs to the same rule and is far less
- * forgiving: `CBMutableCharacteristic.descriptors` raises `NSInternalInconsistencyException` for a
- * second User Description or Presentation Format descriptor, and an Objective-C exception cannot be
- * caught from Swift — so the configuration that merely shadowed an attribute on Android terminated the
- * application on iOS. Checking all three levels here is what makes that unreachable, rather than
- * checking the two levels that happened to be reported.
- *
- * The same characteristic UUID in *different* services stays legal: the specification permits it, and
- * the pair of UUIDs still names one attribute. The same descriptor UUID on *different* characteristics
- * is legal for the same reason.
+ * Rejects duplicate UUIDs: service UUIDs globally, characteristic UUIDs per service, descriptor UUIDs
+ * per characteristic. Shadows resolve to first (Android) or last (iOS) match; CBMutableCharacteristic
+ * raises NSInternalInconsistencyException for duplicate User Description/Presentation Format descriptors.
+ * Same UUID in different services or different characteristics is legal.
  */
 function assertUniqueUuids(
   services: {
@@ -498,26 +436,12 @@ function assertUniqueUuids(
 }
 
 /**
- * Bumped by everything that asks the server to stop, and read by `createServer` before it hands over — the
- * same hazard `advertisingStopEpoch` covers, for the same reason.
- *
- * `stopServer` is a synchronous Expo `Function`, so its body runs on the JavaScript thread the moment it is
- * called, while `createServer` is an `AsyncFunction` whose body runs later on Expo's worker queue. A stop
- * issued *second* therefore reaches the native side first, finds no manager to stop, and the create behind
- * it then publishes the whole database anyway — leaving a server the application explicitly asked not to
- * have. Neither platform can tell the two apart, because neither is told which call the application made
- * first; JavaScript is single-threaded, so this is the only place that knows.
- *
- * iOS carries a `serverStopEpoch` of its own, but it is read inside the `AsyncFunction` body — after the
- * JavaScript call has already returned — so it only ever catches a stop that lands while the configuration
- * is still being parsed, not the ordinary mount/unmount case. Android has no equivalent at all.
+ * Race condition guard: stopServer is sync, createServer is async. Stop issued second reaches
+ * native first; this epoch lets createServer detect and honor out-of-order calls.
  */
 let serverStopEpoch = 0;
 
-/**
- * Counts `createServer` calls, so only the most recent one may issue the compensating stop that a cancelled
- * create uses to undo itself — the same rule, and for the same reason, as `advertisingStartEpoch`.
- */
+// Only most recent createServer may issue compensating stop for cancellation.
 let serverStartEpoch = 0;
 
 /** Carries `ERR_NO_SERVER`, the code both platforms already reject a stopped-before-published create with. */
@@ -534,14 +458,11 @@ export async function createServer(
   services: GattServiceConfig[],
   options: CreateServerOptions = {},
 ): Promise<void> {
-  // Read before anything else, so every stop issued from here on counts as having come after this call.
+  // Read before anything else; stops after this call are detected as out-of-order.
   const epoch = serverStopEpoch;
   // Rebuilt rather than mutated, so the caller's own configuration object is left as they wrote it.
   assertNoUnknownKeys(options, CREATE_SERVER_KEYS, 'createServer');
-  // `services ?? []` silently turned a missing list into an empty database, so a `loadServices()` that
-  // returned `undefined` on a failure path published a server with nothing in it and resolved. An
-  // *explicitly* empty list stays legal — it is how an advertise-only peripheral is built, since
-  // `startAdvertising` requires a published database — but it now has to be written.
+  // Empty array is legal for advertise-only peripheral; undefined must be rejected.
   if (!Array.isArray(services)) {
     throw new Error(
       `Invalid services ${JSON.stringify(services)}. Expected an array of service configurations. ` +
@@ -555,9 +476,7 @@ export async function createServer(
     if (service.type !== undefined) {
       assertOneOf(service.type, SERVICE_TYPES, 'service type');
     }
-    // Required for the reason `services` is, one level down: `?? []` turned a loader that returned
-    // `undefined` on its failure path into a service published with nothing in it, which a central
-    // discovers and finds empty. `[]` stays legal and has to be written.
+    // Empty characteristics array is legal; undefined must be rejected.
     if (!Array.isArray(service?.characteristics)) {
       throw new Error(
         `Invalid service characteristics ${JSON.stringify(service?.characteristics)} for service ` +
@@ -571,8 +490,7 @@ export async function createServer(
       characteristics: service.characteristics.map(normalizeCharacteristic),
     };
   });
-  // Checked on the normalised UUIDs, so a service written as `180d` and another as its 128-bit
-  // expansion are recognised as the one UUID they are.
+  // Checked on normalized UUIDs so `180d` and its 128-bit form are recognized as the same.
   assertUniqueUuids(normalizedServices);
   if (options.requestTimeoutMs !== undefined) {
     if (
@@ -588,40 +506,16 @@ export async function createServer(
       );
     }
   }
-  // Claimed here rather than on entry, so only a call that actually reaches the native side takes
-  // ownership. Claiming it first meant a create rejected by the validation above — which never reached
-  // any server — still counted as the most recent one, and the check below then refused the compensating
-  // stop to the create genuinely in flight. That create rejected saying the database was not published
-  // while it was, which is the exact outcome this whole mechanism exists to prevent.
+  // Claim here, not on entry, so only validated calls reach native and take ownership.
   const generation = ++serverStartEpoch;
   try {
     await nativeModule().createServer(normalizedServices, options);
-    // Bumped once the native side has accepted, not before it is called: both natives stop advertising
-    // as part of *accepting* a new server, so a `startAdvertising` still in flight has had the radio
-    // taken and must not resolve as though it were on the air. A create rejected before that — a denied
-    // permission, a configuration the native parser refuses — took nothing, and bumping regardless
-    // rejected the in-flight start naming a `stopAdvertising` the application never issued, then had its
-    // `finally` stop a working advertisement for real. `stopServer` bumps this for the same reason.
+    // Bump once native accepts; platforms stop advertising as part of accepting new server.
     advertisingStopEpoch += 1;
   } finally {
-    // In a `finally`, so a create whose native call rejects still releases its claim. Left to the
-    // success path alone, a rejected create stayed the most recent one for good and every later
-    // cancellation silently stopped compensating.
+    // If stop came in while create was in flight, stop again now (out-of-order detection).
+    // Only most recent create should issue stop. Also bumps advertisingStopEpoch.
     if (serverStopEpoch !== epoch && serverStartEpoch === generation) {
-      // The application asked to stop while this create was in flight, and the native side may or may
-      // not have seen the two in that order — so the server is stopped again here rather than left to an
-      // ordering nothing guarantees.
-      //
-      // Only the most recent create may do that: `stopServer` is not addressed to a particular server,
-      // so a later create that already replaced this one — and resolved — would be torn down by a stop
-      // meant to undo a call the application had abandoned. That create owns the server now, and cancels
-      // itself the same way if it needs to.
-      //
-      // Counted as a stop of the advertisement as well, because it is one: both platforms stop
-      // advertising as part of stopping the server, which is why the public `stopServer` bumps both
-      // epochs. This path calls the native module directly and so bypassed that, leaving a
-      // `startAdvertising` issued after the application's stop — and still in flight when this one lands
-      // — to resolve as though it were on the air while this stop had just taken the radio from it.
       advertisingStopEpoch += 1;
       ExpoGattServerModule?.stopServer();
     }
@@ -631,43 +525,19 @@ export async function createServer(
   }
 }
 
-/**
- * The longest duration `AdvertiseSettings.Builder.setTimeout` accepts, applied on both platforms so
- * one configuration behaves the same either side.
- */
+// AdvertiseSettings.Builder.setTimeout max, applied to both platforms for consistent behavior.
 const MAX_ADVERTISING_TIMEOUT_MS = 180_000;
 
 /**
- * Bumped by everything that asks for advertising to stop. `startAdvertising` reads it before calling in
- * and again once the native call has resolved, so a stop the application issued while the start was in
- * flight is honoured whichever order the two reach the native side in.
- *
- * **That order is not guaranteed.** `stopAdvertising` is a synchronous Expo `Function`, so its body runs
- * on the JavaScript thread the moment it is called, while `startAdvertising` is an `AsyncFunction`, whose
- * body runs later on Expo's own worker queue. A stop issued *second* can therefore reach the manager
- * first — and be read as the baseline by the start that follows it, which then passes its own
- * generation check and puts the radio on the air after the application explicitly asked for the
- * opposite. Neither platform can tell the two apart, because neither is told which call the application
- * made first; JavaScript is single-threaded, so this is the only place that knows.
+ * Race condition guard: stopAdvertising is sync, startAdvertising is async. Stop issued second
+ * reaches native first; this epoch lets startAdvertising detect and honor out-of-order calls.
  */
 let advertisingStopEpoch = 0;
 
-/**
- * Counts `startAdvertising` calls, so only the most recent one may issue the compensating stop that a
- * cancelled start uses to undo itself.
- *
- * Without it that stop is unconditional, and stops whatever is on the air rather than "the
- * advertisement this call put there". In `start(A); stop(); await start(B);` the stop cancels A, B
- * reads the bumped epoch and resolves normally — and then A's native call finally returns, sees the
- * epoch moved, and issues a stop that takes B off the air. The caller awaited B, B resolved, nothing
- * is advertising, and no promise ever reported a failure.
- */
+// Only most recent startAdvertising may issue compensating stop for cancellation.
 let advertisingStartEpoch = 0;
 
-/**
- * Carries `ERR_ADVERTISE`, the code a stop already gives a start it cancelled natively, so a consumer
- * branching on the code cannot tell the two apart — the outcome is the same either way.
- */
+// Error code ERR_ADVERTISE for cancelled startAdvertising.
 function advertisingCancelledError(): Error {
   const error: Error & { code?: string } = new Error(
     '[expo-gatt-server] startAdvertising was cancelled by a stopAdvertising issued while it was still ' +
@@ -691,29 +561,17 @@ function assertOneOf<T extends string>(value: unknown, allowed: T[], field: stri
 }
 
 /**
- * Begins advertising the published GATT database.
- *
- * Rejects with `ERR_NO_SERVER` unless a database is actually published — before `createServer`, after a
- * service failed to publish, and while Bluetooth is down. Advertising a half-built or empty database
- * would expose it to scanners, which is worse than not advertising. `isServerRunning` reports the same
- * condition.
- *
- * A publication still in flight is waited for on both platforms, so the call is safe before
- * `createServer` resolves and from a `poweredOn` event handler. A wait is settled rather than left
- * pending if the publication fails, the server is stopped, or Bluetooth goes off.
- *
- * Calling it again replaces the current advertisement rather than adding a second one.
+ * Begins advertising the published GATT database. Rejects with ERR_NO_SERVER if no database
+ * published. Safe before createServer resolves; waits for in-flight publication. Replaces
+ * current advertisement rather than adding a second one.
  */
 export async function startAdvertising(config: AdvertiseConfig = {}): Promise<void> {
-  // Read before anything else, so every stop issued from here on counts as having come after this call.
+  // Read before anything else; stops after this call are detected as out-of-order.
   const epoch = advertisingStopEpoch;
-  // Expanded here so both platforms are addressed with one spelling. It costs nothing on the wire:
-  // Android encodes an advertised UUID as "the shortest representation" and sizes the 31-byte budget
-  // the same way, and iOS — where `CBUUID` would otherwise advertise the full sixteen octets it was
-  // built from — contracts it back in `beginAdvertising`. See `CBUUID.advertisedForm`.
+  // Expand UUIDs here so both platforms use one spelling. Android encodes shortest form in 31-byte
+  // budget; iOS contracts CBUUID in beginAdvertising. Both platforms' advertising form are aligned.
   assertNoUnknownKeys(config, ADVERTISE_KEYS, 'advertising');
-  // `!= null`, so `Platform.OS === 'android' ? { … } : null` reads as absent, which is how both
-  // natives already read a missing block.
+  // != null check treats Platform.OS === 'android' ? {...} : null as absent, same as natives.
   if (config.android != null) {
     assertNoUnknownKeys(config.android, ANDROID_ADVERTISE_KEYS, 'advertising android');
   }
@@ -752,7 +610,7 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
   }
   assertArrayOrAbsent(config.manufacturerData, 'advertising manufacturerData');
   for (const entry of config.manufacturerData ?? []) {
-    // 16-bit field, so a wider value cannot be transmitted; Android only rejects negative ids.
+    // Bluetooth SIG Company Identifier is 16-bit; Android rejects only negatives natively.
     if (!Number.isInteger(entry?.companyId) || entry.companyId < 0 || entry.companyId > 0xffff) {
       throw new Error(
         `Invalid manufacturer company id ${JSON.stringify(entry?.companyId)}. A Bluetooth SIG ` +
@@ -770,8 +628,7 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
     return { ...entry, uuid };
   });
   if (Platform.OS === 'ios') {
-    // Warned about rather than rejected: these only tune the radio, so failing the call would force
-    // a platform branch on every caller. The options iOS cannot express at all reject natively.
+    // Warn rather than reject: iOS cannot express mode/txPowerLevel/includeTxPowerLevel.
     const ignored = (
       [
         ['mode', config.mode],
@@ -789,23 +646,14 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
       );
     }
   }
-  // Claimed here rather than on entry, and released in a `finally`, for the same reasons as
-  // `createServer`'s: a start rejected by the validation above never reached the radio and must not
-  // take ownership of it from the start that did, and a start whose native call rejects must not keep
-  // that ownership for good.
+  // Claim here, not on entry, so only validated calls reach native and take ownership.
   const generation = ++advertisingStartEpoch;
   try {
     await nativeModule().startAdvertising({ ...config, serviceUuids, serviceData });
   } finally {
     if (advertisingStopEpoch !== epoch && advertisingStartEpoch === generation) {
-      // The application asked to stop while this start was in flight, and the native side may or may
-      // not have seen the two in that order — so the advertisement is stopped again here rather than
-      // left to an ordering nothing guarantees. One stop means one thing.
-      //
-      // Only the most recent start may do that, though: `stopAdvertising` is not addressed to a
-      // particular advertisement, so a later start that already replaced this one — and resolved —
-      // would be taken off the air by a stop meant to undo a call the application had abandoned. That
-      // start owns the radio now, and cancels itself the same way if it needs to.
+      // If stop came in while start was in flight, stop again now (out-of-order detection).
+      // Only most recent start should issue stop.
       ExpoGattServerModule?.stopAdvertising();
     }
   }
@@ -815,11 +663,7 @@ export async function startAdvertising(config: AdvertiseConfig = {}): Promise<vo
 }
 
 /**
- * Does nothing when the module is unsupported: nothing can be advertising, and a teardown path is the
- * wrong place to raise a configuration error the setup path already reported.
- *
- * Cancels a `startAdvertising` still in flight, whichever order the two reach the native side in — see
- * `advertisingStopEpoch`.
+ * Does nothing when module is unsupported. Cancels in-flight startAdvertising via advertisingStopEpoch.
  */
 export function stopAdvertising(): void {
   advertisingStopEpoch += 1;
@@ -827,50 +671,12 @@ export function stopAdvertising(): void {
 }
 
 /**
- * Sends a notification, or an indication when `confirm` is set, to a connected central.
- *
- * The characteristic must declare the matching property — `indicate` for `confirm: true`, `notify`
- * for `confirm: false` — or the call rejects with `ERR_CONFIRM_UNSUPPORTED`. The Core Specification
- * permits each transmission only when its property is set (Vol 3, Part G, Table 3.5) and lets a
- * client enable the corresponding descriptor bit only then (Table 3.11), so a mismatch could never
- * have been legitimately requested by any client.
- *
- * **iOS never receives the flag**: `updateValue(_:for:onSubscribedCentrals:)` has no confirm
- * parameter, and CoreBluetooth derives notification versus indication from the declared properties
- * alone. A characteristic declaring exactly one of the two therefore behaves identically either side;
- * one declaring **both** is the case iOS cannot honour, since Android sends what `confirm` asks for
- * while iOS sends whatever CoreBluetooth chooses.
- *
- * The promise settles later than the call reaching the Bluetooth stack, but **what it reports differs
- * by platform, and the difference cannot be removed**:
- *
- * - **Android** resolves it from `onNotificationSent`, which the platform delivers once the stack has
- *   finished transmitting — and, for an indication, once the central has confirmed. A device may have
- *   only one notification outstanding at a time, so sends issued while an earlier one is in flight are
- *   queued in order rather than dropped, and awaiting the promise paces a stream against the link.
- * - **iOS** resolves it once CoreBluetooth accepts the payload for transmission. The peripheral role
- *   has no delivery callback at all — `peripheralManagerIsReady(toUpdateSubscribers:)` reports only
- *   that the transmit queue has space — so a resolved promise there means *queued*, not *delivered*,
- *   and an indication's confirmation is never surfaced. Awaiting still paces a stream, because a
- *   payload the queue cannot take is held until it can.
- *
- * So treat a resolution as "the platform took it" rather than "the central has it", and do not build
- * an application-level acknowledgement out of it — have the central write back instead.
- *
- * Rejects with `ERR_NO_SUBSCRIBER` when the device has not enabled the transmission on the
- * characteristic. See `options.requireSubscription` to send anyway where the platform allows it.
- *
- * **Queueing is per central on Android and shared on iOS**, because the platforms are. Android allows
- * one notification in flight per device and the module keeps a queue for each, so a link that has gone
- * quiet holds up only its own sends. CoreBluetooth has a single transmit queue for the peripheral and
- * one `peripheralManagerIsReady(toUpdateSubscribers:)` to say it has drained, so a payload it will not
- * take parks every later send behind it whichever central it was addressed to — for at most 35 s, after
- * which the parked entry is abandoned and the queue moves on. The 64-entry bound is counted per central
- * on both.
- *
- * **Does not change the value a read returns.** Pushing a value to subscribers and setting the value
- * an ATT Read is answered from are separate operations; `updateCharacteristicValue` does the latter,
- * so call both when a value should be pushed *and* readable.
+ * Sends notification (confirm=false) or indication (confirm=true). Characteristic must declare
+ * matching property (Core Spec Vol 3, Part G, Table 3.5). iOS ignores confirm flag; CoreBluetooth
+ * chooses based on properties alone. Promise settles at stack acceptance (Android: delivery +
+ * central confirm for indications; iOS: queued not delivered). Rejects ERR_NO_SUBSCRIBER if
+ * device not subscribed; see requireSubscription option. Queueing is per-central on Android,
+ * shared on iOS. Does not change ATT Read value; call updateCharacteristicValue separately.
  */
 export async function sendNotification(
   deviceId: string,
@@ -902,20 +708,10 @@ export async function sendNotification(
 }
 
 /**
- * Answers a pending read or write request.
- *
- * `offset` states where `value` begins within the attribute, and the response is rebased onto the
- * offset the request actually asked for. Passing `offset: 0` with the whole value therefore answers
- * a Read Blob continuation correctly, and passing the request event's own `offset` with an
- * already-sliced value works too. Both platforms honour this identically.
- *
- * Rejects with `REQUEST_NOT_FOUND` when the request is unknown or already answered,
- * `REQUEST_DEVICE_MISMATCH` when the request belongs to a different device, and
- * `ERR_RESPONSE_OFFSET` when `offset` is past the offset the request asked for, which would leave
- * the requested bytes missing.
- *
- * `value` is not size-checked against the MTU: a read response longer than one PDU can carry is
- * normal ATT, and the central continues it with a Read Blob request.
+ * Answers pending read or write request. Offset rebases response onto the request's offset;
+ * offset=0 with whole value answers Read Blob correctly. Rejects REQUEST_NOT_FOUND,
+ * REQUEST_DEVICE_MISMATCH, ERR_RESPONSE_OFFSET. Value not size-checked against MTU; central
+ * continues via Read Blob if longer than PDU.
  */
 export async function sendResponse(
   deviceId: string,
@@ -924,10 +720,7 @@ export async function sendResponse(
   offset: number,
   value: number[],
 ): Promise<void> {
-  // Every one of the three numbers is checked, not only the two whose misuse produces a wrong
-  // *answer*. `requestId` was the argument nothing validated, and it is the one that fails worst: on
-  // iOS `NaN` reaches `Int(double.rounded())` inside expo-modules-core and traps, killing the process
-  // before this module sees the call, while on Android the same value silently becomes request 0.
+  // Validate all three: requestId NaN traps on iOS; status wider than byte truncates on Android.
   assertValidInteger(
     requestId,
     'response request id',
@@ -935,11 +728,7 @@ export async function sendResponse(
     Number.MAX_SAFE_INTEGER,
     'A request id is the whole number the matching request event carried.',
   );
-  // Android narrows the status to a byte on its way into the Bluetooth stack, so a wider value would
-  // be truncated into an unrelated ATT error rather than rejected.
   assertValidInteger(status, 'response status', 0, 255, 'An ATT error code is a single byte.');
-  // A negative offset would be rebased into a slice beyond the value's end on both platforms rather
-  // than reported.
   assertValidInteger(
     offset,
     'response offset',
@@ -952,15 +741,8 @@ export async function sendResponse(
 }
 
 /**
- * Replaces the value a read of this characteristic is answered from. Does not notify anybody, and
- * `sendNotification` does not do this — use both to push a value and make it readable.
- *
- * A value stored here is never overwritten by a delegated write batch that was already outstanding: the
- * value that batch held for this characteristic is dropped instead.
- *
- * Rejects with `ERR_CHARACTERISTIC_NOT_FOUND` when the pair of UUIDs names nothing in the published
- * database, and with `ERR_NO_SERVER` when no server exists, rather than resolving silently and
- * leaving a mistyped UUID indistinguishable from a working update.
+ * Replaces value returned by ATT Read; does not notify. Call both this and sendNotification to
+ * push and make readable. Rejects ERR_CHARACTERISTIC_NOT_FOUND, ERR_NO_SERVER; never silent.
  */
 export async function updateCharacteristicValue(
   serviceUuid: string,
@@ -976,10 +758,7 @@ export async function updateCharacteristicValue(
 }
 
 /**
- * Does nothing when the module is unsupported, for the same reason as `stopAdvertising`.
- *
- * Stopping the server stops advertising with it on both platforms, so this cancels a `startAdvertising`
- * still in flight too.
+ * Does nothing when module is unsupported. Stops advertising as well (both platforms).
  */
 export function stopServer(): void {
   advertisingStopEpoch += 1;
@@ -988,78 +767,53 @@ export function stopServer(): void {
 }
 
 /**
- * Reads the current Bluetooth adapter state. Safe to call before `createServer`, though iOS cannot
- * report anything more specific than `unknown` or `unauthorized` until a server exists, because
- * `CBPeripheralManager.state` requires an instantiated manager.
- *
- * Resolves to `unsupported` where the native module is absent, which is what that state already means,
- * so a consumer branching on the state needs no separate check.
+ * Reads Bluetooth adapter state. Safe before createServer. iOS reports unknown/unauthorized only
+ * until server exists (CBPeripheralManager.state requires instantiated manager). Returns unsupported
+ * where module is absent.
  */
 export async function getBluetoothState(): Promise<BluetoothState> {
   return ExpoGattServerModule?.getBluetoothState() ?? 'unsupported';
 }
 
 /**
- * Reads the current ATT MTU for a connected device, so payloads can be sized before they are sent.
- *
- * Rejects with `ERR_DEVICE_DISCONNECTED` when the device is not connected, and with `ERR_NO_SERVER`
- * when no server exists. A device that has not negotiated an MTU reports the specification default of
- * 23 rather than failing — that default is what the link carries until a negotiation happens.
+ * Reads ATT MTU for connected device. Rejects ERR_DEVICE_DISCONNECTED, ERR_NO_SERVER.
+ * Non-negotiated devices report spec default 23.
  */
 export async function getMtu(deviceId: string): Promise<DeviceMtu> {
   return nativeModule().getMtu(deviceId);
 }
 
 /**
- * Lists the centrals the module currently considers connected. Resolves to an empty array when no
- * server exists, and where the native module is absent.
- *
- * See `ConnectedDevice` for what "connected" means on each platform — Android reports connections
- * directly, while iOS can only derive them from ATT activity, so the two are not equivalent.
+ * Lists currently connected centrals. Returns empty array when no server or module absent.
+ * See ConnectedDevice: Android reports connections directly; iOS derives from ATT activity.
  */
 export async function getConnectedDevices(): Promise<ConnectedDevice[]> {
   return ExpoGattServerModule?.getConnectedDevices() ?? [];
 }
 
 /**
- * Drops a connected central. **Android only.**
- *
- * Android calls `BluetoothGattServer.cancelConnection`, which reports no outcome, so the promise
- * resolves once the request has been handed to the Bluetooth stack, not once the central is gone —
- * wait for `onDeviceDisconnected` for that.
- *
- * **iOS rejects with `ERR_UNSUPPORTED`, because CoreBluetooth cannot do this at all.** No
- * `CBPeripheralManager` method drops a central, and `cancelPeripheralConnection(_:)` is a
- * `CBCentralManager` method taking a `CBPeripheral`, so it belongs to the central role. Nothing is
- * approximated: `stopServer` is not documented as disconnecting anybody.
- *
- * Rejects with `ERR_DEVICE_DISCONNECTED` when the device is not connected and `ERR_NO_SERVER` when
- * no server exists.
+ * Drops connected central. Android only: calls BluetoothGattServer.cancelConnection; promise
+ * resolves when request reaches stack, not when disconnected (wait for onDeviceDisconnected).
+ * iOS rejects ERR_UNSUPPORTED (no CBPeripheralManager method exists; cancelPeripheralConnection
+ * is CBCentralManager only). Rejects ERR_DEVICE_DISCONNECTED, ERR_NO_SERVER.
  */
 export async function disconnectDevice(deviceId: string): Promise<void> {
   return nativeModule().disconnectDevice(deviceId);
 }
 
 /**
- * Whether a GATT database is currently published and usable.
- *
- * `false` before `createServer`, after `stopServer`, while Bluetooth is not powered on — both
- * platforms destroy the published database when the adapter goes down — and where the native module
- * is absent. The module re-publishes on the next transition to `poweredOn`, at which point this
- * becomes `true` again without any further call, so it is the right thing to check before advertising
- * rather than remembering whether `createServer` was called.
+ * Whether GATT database is currently published. False before createServer, after stopServer,
+ * while Bluetooth is off (platforms destroy on adapter down), and where module is absent.
+ * Module re-publishes on poweredOn transition automatically; check this before advertising.
  */
 export async function isServerRunning(): Promise<boolean> {
   return ExpoGattServerModule?.isServerRunning() ?? false;
 }
 
 /**
- * Whether the peripheral is currently advertising.
- *
- * iOS reads `CBPeripheralManager.isAdvertising`. Android exposes no equivalent query, so the module
- * tracks it from `AdvertiseCallback` and additionally clears it when an `AdvertiseConfig.timeoutMs`
- * elapses, because the platform stops advertising at that limit without reporting it. Also `false`
- * where the native module is absent.
+ * Whether peripheral is advertising. iOS reads CBPeripheralManager.isAdvertising. Android
+ * tracks via AdvertiseCallback and clears on AdvertiseConfig.timeoutMs (platform doesn't report).
+ * False where module is absent.
  */
 export async function isAdvertising(): Promise<boolean> {
   return ExpoGattServerModule?.isAdvertising() ?? false;
@@ -1145,12 +899,8 @@ export function addCharacteristicUnsubscribedListener(
 }
 
 /**
- * Fires whenever the Bluetooth adapter state changes. Delivered only while a server exists,
- * since state monitoring is tied to the server lifecycle on both platforms.
- *
- * The state as it stands is reported once when the server is created, so a consumer that renders from
- * this event alone starts from the truth rather than from a placeholder. Android otherwise said nothing
- * until the user happened to toggle Bluetooth, because `ACTION_STATE_CHANGED` announces only changes.
+ * Fires when Bluetooth adapter state changes. Delivered only while server exists; state reported
+ * once on server creation (Android: ACTION_STATE_CHANGED announces changes only).
  */
 export function addBluetoothStateChangedListener(
   listener: (event: BluetoothStateChangedEvent) => void,
@@ -1159,11 +909,8 @@ export function addBluetoothStateChangedListener(
 }
 
 /**
- * Fires when the published database goes away for a reason no promise reported — a re-publication that
- * failed after `createServer` had already resolved. See `ServerPublicationFailedEvent`.
- *
- * This is the signal to call `createServer` again: nothing retries a failed registration, and
- * `isServerRunning` stays `false` until something does.
+ * Fires when published database disappears unexpectedly (re-publication failed after createServer
+ * resolved). Signal to call createServer again; isServerRunning stays false until then.
  */
 export function addServerPublicationFailedListener(
   listener: (event: ServerPublicationFailedEvent) => void,

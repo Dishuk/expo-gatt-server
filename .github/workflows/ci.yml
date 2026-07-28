@@ -24,32 +24,14 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
-      # Both build outputs are published but not committed, so a break in either only ever surfaces at
-      # `npm publish` otherwise.
-      #
-      # Built *before* the example is type-checked, because that is what the example now reads: the
-      # emitted declarations, exactly as a consumer installing the package gets them. Nothing else in
-      # this build type-checks `build/index.d.ts` at all.
       - run: npm run build
       - run: npm run build:plugin
-      # The example is the only consumer-facing usage of the public API, and `expo prebuild` in the
-      # integration jobs does not typecheck it — so until this ran, the app the guides point readers at
-      # could break against the API it demonstrates and still ship green.
       - run: npm ci
         working-directory: example
       - run: npx tsc --noEmit -p tsconfig.json
         working-directory: example
-      # Linted as well as type-checked, and for the same reason. `expo-module lint` hardcodes its target
-      # to `src`, so `npm run lint` never reached the example — which meant the rules the package fails
-      # its own build over were unenforced in the one place a reader is pointed at, and it had accumulated
-      # real errors while CI stayed green.
       - run: npx eslint . --max-warnings 0
         working-directory: example
-      # Packed for real and read back out of the archive, rather than listed from `npm pack --json`:
-      # `--ignore-scripts` does not suppress `prepare` on npm 10, so that stdout carried the build's own
-      # logging into the file `JSON.parse` then read, and the one failure this exists to catch —
-      # `expo-module build plugin` skipping and exiting 0 — surfaced as a SyntaxError. The tarball is
-      # also what a consumer actually installs, so nothing here has to model what `npm publish` includes.
       - name: Check the tarball contents
         run: |
           rm -rf "$RUNNER_TEMP/pack" && mkdir -p "$RUNNER_TEMP/pack"
@@ -64,8 +46,7 @@ jobs:
               "app.plugin.js",
               "plugin/build/index.js",
               "expo-module.config.json",
-              // What autolinking resolves the native code through: without these the install
-              // succeeds and the app throws `Cannot find native module ExpoGattServer` on import.
+              // Required by autolinking; consumers see "Cannot find native module ExpoGattServer" if missing.
               "ios/ExpoGattServer.podspec",
               "android/build.gradle",
               "ios/GattServerManager.swift",
@@ -73,13 +54,6 @@ jobs:
             ];
             const missing = required.filter((f) => !files.includes(f));
             if (missing.length) throw new Error("missing from the tarball: " + missing.join(", "));
-            // Tests, the host-side harnesses and raw TypeScript have no business in a consumers
-            // install. `__tests__` is matched anywhere: the realistic leak is a tsconfig losing its
-            // exclude and emitting `build/__tests__`, which a prefix check would not have seen.
-            // `ios/` ships as a whole `files` entry, which overrides `.gitignore` — so a local `Pods/`
-            // or `build/` left in the tree is published, and the podspec globs `**/*.{h,m,swift}` into
-            // the pod target of every consumer. No apostrophes in here: this block is a single-quoted
-            // shell string, and one closes it and hands the rest of the script to bash.
             const forbidden = files.filter(
               (f) =>
                 f.startsWith("src/") ||
@@ -109,8 +83,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      # The harness commits its own `gradle-wrapper.jar`, which the wrapper needs before it can verify
-      # anything itself. This is the check that it is the jar Gradle actually published.
+      # Verify the committed gradle-wrapper.jar is from Gradle's official release.
       - uses: gradle/actions/wrapper-validation@v4
       - uses: gradle/actions/setup-gradle@v4
       - run: npm run test:android
@@ -139,52 +112,20 @@ jobs:
         working-directory: example
       - run: npx expo prebuild --platform android --no-install
         working-directory: example
-      # The unit-test harness deliberately leaves `ExpoGattServerModule.kt` out, because the Expo
-      # Gradle plugin only resolves inside a host app's build. This is the job that compiles it — so a
-      # binding that no longer matches the parsers or the manager fails here rather than in someone's
-      # app.
       - run: ./gradlew :expo-gatt-server:compileReleaseKotlin --console=plain
         working-directory: example/android
 
   ios-integration:
     name: iOS module builds against Expo
-    # `macos-15` tops out at Xcode 26.3, and every Xcode on that image compiles Expo's packages either
-    # not at all or wrongly — see the toolchain note below. The Swift that does build them only ships
-    # with a `macos-26` image, so the runner is part of the pin, not an incidental choice.
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v5
-      # Expo's toolchain window is bounded at both ends, so neither the runner default nor the oldest
-      # installed Xcode works.
-      #
-      # Too old: Xcode 16.x, whose Swift tools are 6.1, and one of the packages Expo's prebuilt React
-      # Native artefacts resolve declares `swift-tools-version: 6.2` — SwiftPM refuses the whole
-      # dependency graph and the build dies in `ExpoModulesJSI` before it reaches this module's sources.
-      #
-      # Also too old: Xcode 26.2 (Swift 6.2.3) and 26.3 (Swift 6.2.4) both fail to type-check
-      # `JavaScriptCodable+Date.swift` inside that same package — `abs(milliseconds) <=
-      # maxJavaScriptDateMilliseconds` is reported as ambiguous. Swift 6.3.2 (Xcode 26.5) compiles the
-      # identical sources and headers, so this is a 6.2.x type-checker defect that got fixed upstream,
-      # not something the package or this repository can be changed to work around.
-      #
-      # So the version is pinned rather than discovered. Taking whatever the image defaults to was what
-      # let a runner image update change the compiler under this job and turn it red on something this
-      # repository does not own. 26.5 is the only version this build has been observed to pass under;
-      # newer ones are deliberately not listed as fallbacks, because an unverified fallback is how the
-      # previous pin went green in the workflow file and red on the runner. If the image drops 26.5,
-      # this fails loudly with the installed list rather than quietly building under something else.
-      - name: Select an Xcode within Expo's supported Swift range
+      # Xcode 26.5 required: ExpoModulesJSI Swift 6.2 type-checking fails on older versions; no fallback.
+      - name: Select Xcode 26.5
         run: |
           candidate="/Applications/Xcode_26.5.app"
           if [ ! -d "$candidate" ]; then
-            echo "The known-good Xcode (26.5) is not installed on this runner image." >&2
-            echo "Installed: $(ls -d /Applications/Xcode_*.app 2>/dev/null | tr '\n' ' ')" >&2
-            echo "GitHub rotates versions off its images, so this is expected to happen eventually" >&2
-            echo "and it blocks every pull request until someone acts, since the failure has nothing" >&2
-            echo "to do with the change under test. To fix it: run this build locally under each" >&2
-            echo "installed version listed above, and move the pin to the lowest one that compiles" >&2
-            echo "Expo's packages — see the toolchain note above ci.yml's ios-integration job for why" >&2
-            echo "an unverified fallback is not added here instead." >&2
+            echo "Xcode 26.5 not found. Installed: $(ls -d /Applications/Xcode_*.app 2>/dev/null | tr '\n' ' ')" >&2
             exit 1
           fi
           sudo xcode-select -s "$candidate"
@@ -201,11 +142,6 @@ jobs:
         working-directory: example
       - run: pod install
         working-directory: example/ios
-      # The counterpart of `android-integration`, and for the same reason: `Package.swift` compiles
-      # `GattServerManager.swift` alone, because `ExpoGattServerModule.swift` imports ExpoModulesCore and
-      # has no host build — so until this job existed, a third of the iOS source was compiled by nothing
-      # in CI and a binding that no longer matched the manager would have shipped. Only the module's own
-      # pod target is built, not the whole app, which is all it takes to catch that.
       - name: Compile the ExpoGattServer pod target
         working-directory: example/ios
         run: |

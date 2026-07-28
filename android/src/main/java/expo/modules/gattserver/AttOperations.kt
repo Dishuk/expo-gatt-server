@@ -3,26 +3,13 @@ package expo.modules.gattserver
 import java.util.UUID
 
 /**
- * The ATT-level arithmetic the server runs on every request: assembling a written value, aligning a
- * response, reading and writing a Client Characteristic Configuration, and refusing a transmission the
- * link or the declaration cannot carry.
- *
- * Free functions over plain values rather than methods on [GattServerManager], because none of it
- * depends on any server state and all of it is directly visible to a peer — a mistake here sends wrong
- * bytes and reports nothing. Keeping it separable is what lets it be exercised on the JVM, without the
- * Android framework and without a device. The iOS peripheral implements the same contracts.
+ * ATT-level arithmetic for assembling values, aligning responses, reading/writing CCCD, and refusing
+ * transmissions the link cannot carry. Free functions to allow JVM-only testing without Android framework.
  */
 
 /**
- * Merges one written part into [current] at [offset], or returns `null` for an offset beyond the
- * current end — which the specification answers with "Invalid Offset". An offset exactly at the end
- * appends and is in range.
- *
- * The octets past the part are preserved: a queued write's part goes at "the offset of the first octet
- * where the Part Attribute Value parameter is to be written" (Core Spec Vol 3, Part F, §3.4.6.1), which
- * says nothing about the rest. An unqueued `ATT_WRITE_REQ` is *not* assembled through here — it
- * replaces the value outright, because "the attribute value shall be truncated or lengthened to match
- * the length of the Attribute Value parameter" (§3.4.5.1).
+ * Merges one written part into [current] at [offset], or null for offset beyond end (Core Spec Vol 3, Part F, §3.4.6.1).
+ * Preserves octets past the part; unqueued ATT_WRITE_REQ replaces the value outright (§3.4.5.1).
  */
 internal fun spliceAt(current: ByteArray, offset: Int, part: ByteArray): ByteArray? {
   if (offset > current.size) return null
@@ -32,30 +19,14 @@ internal fun spliceAt(current: ByteArray, offset: Int, part: ByteArray): ByteArr
 }
 
 /**
- * Whether an assembled attribute value is longer than an attribute is allowed to hold.
- *
- * "The maximum length of an attribute value shall be 512 octets" (Core Spec Vol 3, Part F, §3.2.9), and
- * the specification answers a write that would exceed it with "Invalid Attribute Value Length".
- *
- * Asked separately from [spliceAt] rather than folded into it: that merges one part and knows nothing
- * about the rest of the batch, and the offset it does bound is a different fault carrying a different
- * ATT error.
- *
- * Both write paths reach it. A queued write assembles past the limit from parts that each fit, and a
- * single `ATT_WRITE_REQ` carries `ATT_MTU - 3` octets — 514 at the largest MTU the specification
- * permits, two more than an attribute may hold.
+ * Checks if value exceeds max attribute length (512 octets, Core Spec Vol 3, Part F, §3.2.9).
+ * Separate from spliceAt because they check different ATT errors.
  */
 internal fun exceedsAttributeLength(size: Int): Boolean = size > MAX_ATTRIBUTE_VALUE_LENGTH
 
 /**
- * The bytes a read of [value] from [offset] is answered with, or `null` for an offset past the end —
- * which the specification answers with "Invalid Offset" (Core Spec Vol 3, Part F, §3.4.1.1). An offset
- * exactly at the end is in range and reads as empty.
- *
- * The stack copies the value into the response PDU verbatim rather than slicing it by the offset, so the
- * alignment has to happen here. Shared by the characteristic and the descriptor read paths, which had
- * otherwise drifted: the descriptor one answered every Read Blob with the whole value again, so a
- * central reassembling a value longer than one PDU saw its prefix repeated.
+ * Returns bytes from [value] at [offset], or null for offset past end (Core Spec Vol 3, Part F, §3.4.1.1).
+ * Stack copies value verbatim to PDU; alignment must happen here.
  */
 internal fun readSliceAt(value: ByteArray, offset: Int): ByteArray? {
   if (offset > value.size) return null
@@ -64,15 +35,8 @@ internal fun readSliceAt(value: ByteArray, offset: Int): ByteArray? {
 }
 
 /**
- * Rebases a response value supplied from [suppliedOffset] onto [requestedOffset], the offset the
- * request actually asked for.
- *
- * The stack copies the value into the response PDU verbatim — it does not slice it by the offset, which
- * for a read response is never even transmitted — so the alignment has to happen here. Both documented
- * spellings therefore work: the whole value with offset 0, or an already-sliced value with the
- * request's own offset. iOS honours the same contract.
- *
- * A write response carries no value, so [isRead] `false` passes it through untouched.
+ * Rebases response value from [suppliedOffset] to [requestedOffset]. Stack copies verbatim to PDU;
+ * alignment here. Supports both whole value (offset 0) and pre-sliced value. iOS honors same contract.
  */
 internal fun rebasedResponseValue(
   value: ByteArray,
@@ -83,11 +47,7 @@ internal fun rebasedResponseValue(
 ): ByteArray {
   if (!isRead) return value
 
-  // Re-checked here rather than trusted from the TypeScript layer, on the same grounds the duplicate
-  // UUID and byte-range checks in `GattConfiguration.kt` are: the native module is reachable directly.
-  // A negative supplied offset passed the relation below — `-4` is not greater than `0` — and produced a
-  // positive `skip`, so the response was silently trimmed from the front and sent to the central
-  // labelled as the whole attribute. Nothing reported it on either side.
+  // Check negative offsets here: native module is reachable directly. Negative offset silently trimmed response and sent incorrect data.
   if (suppliedOffset < 0 || requestedOffset < 0) {
     throw GattServerException(
       "ERR_RESPONSE_OFFSET",
@@ -107,8 +67,7 @@ internal fun rebasedResponseValue(
   }
   val skip = requestedOffset - suppliedOffset
   if (skip == 0) return value
-  // The caller supplied nothing at or beyond the requested offset, which is the specification's
-  // signal that the attribute ends there.
+  // Caller supplied nothing at or beyond requested offset; attribute ends there per spec.
   if (skip >= value.size) return ByteArray(0)
   return value.copyOfRange(skip, value.size)
 }
@@ -145,19 +104,8 @@ internal fun cccdEnables(bits: Int, confirm: Boolean): Boolean {
 }
 
 /**
- * Refuses a payload the link cannot carry in one notification, before anything is transmitted. The
- * platform silently truncates an oversized notification rather than failing it, and a notification has
- * no continuation mechanism — unlike a read, which the central can finish with a Read Blob request —
- * so sending it would lose the tail with nothing to recover it.
- *
- * [negotiatedMtu] is `null` for a link that has not negotiated one, which still carries the
- * specification default.
- *
- * The bound is the smaller of what the link can carry and [MAX_ATTRIBUTE_VALUE_LENGTH]. A link that
- * negotiated the maximum ATT_MTU of 517 leaves 514 octets for the value, which is more than an
- * attribute may hold — and `notifyCharacteristicChanged` answers that by throwing rather than by
- * reporting a status, which on the queue-draining paths means an exception on a binder thread. iOS
- * needs no equivalent: `CBCentral.maximumUpdateValueLength` is already bounded.
+ * Refuses payload exceeding link MTU or attribute limit (512 octets, Core Spec Vol 3, Part F, §3.2.9).
+ * Platform silently truncates oversized notifications with no recovery. [negotiatedMtu] null means default ATT MTU.
  */
 internal fun mtuErrorFor(negotiatedMtu: Int?, size: Int): MtuException? {
   val mtu = negotiatedMtu ?: DEFAULT_ATT_MTU
@@ -169,8 +117,6 @@ internal fun mtuErrorFor(negotiatedMtu: Int?, size: Int): MtuException? {
   } else {
     ""
   }
-  // Named separately when the attribute bound is the binding one, so a caller on a maximum-MTU link
-  // is not told to consult an ATT_MTU that is not what refused the payload.
   val limit = if (maxPayload == MAX_ATTRIBUTE_VALUE_LENGTH) {
     "an attribute value may hold (Core Spec Vol 3, Part F, §3.2.9)"
   } else {
@@ -183,10 +129,8 @@ internal fun mtuErrorFor(negotiatedMtu: Int?, size: Int): MtuException? {
 }
 
 /**
- * Refuses a transmission type the characteristic never declared. The specification permits each
- * transmission only when its property is set (Core Spec Vol 3, Part G, Table 3.5) and lets a client
- * enable the matching CCCD bit only then (Table 3.11). Android's `notifyCharacteristicChanged` checks
- * neither, so without this the stack would emit a PDU no client could legally have asked for.
+ * Refuses transmission type not declared on characteristic (Core Spec Vol 3, Part G, Table 3.5 & 3.11).
+ * Android's notifyCharacteristicChanged checks neither; this prevents illegal PDUs.
  */
 internal fun confirmError(
   properties: Int,
@@ -208,10 +152,8 @@ internal fun confirmError(
 }
 
 /**
- * `BluetoothGattCharacteristic.PROPERTY_NOTIFY` and `PROPERTY_INDICATE`, restated so this file stays
- * free of the framework and runs on a plain JVM. Both are `public static final` bits of the
- * characteristic declaration (Core Spec Vol 3, Part G, Table 3.5), so they cannot drift; the Robolectric
- * suite asserts they still agree with the platform's own.
+ * BluetoothGattCharacteristic properties from Core Spec Vol 3, Part G, Table 3.5.
+ * Restated to keep this file JVM-only. Robolectric suite asserts they match the platform.
  */
 internal const val PROPERTY_NOTIFY = 0x10
 internal const val PROPERTY_INDICATE = 0x20

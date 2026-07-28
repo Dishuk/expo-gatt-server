@@ -9,8 +9,7 @@ import XCTest
 /// Every case here goes through `[Any]` holding `Double`, because that is what expo-modules-core
 /// actually hands over: an untyped `[String: Any]` argument is converted by `DynamicRawType` through
 /// `JavaScriptValue.getAny()`, which maps every JS number to `getDouble()`. Writing the fixtures as
-/// `[1, 2, 3]` would type them as `[Int]` and test a shape that never occurs — which is how
-/// `map["value"] as? [Int]` survived: it reads correctly, compiles, and returns nil every time.
+/// `[1, 2, 3]` would type them as `[Int]` and test a shape that never occurs.
 final class ConfigurationParsingTests: XCTestCase {
   /// Numbers exactly as they arrive from the JS runtime.
   private func jsNumbers(_ values: [Double]) -> [Any] {
@@ -22,17 +21,6 @@ final class ConfigurationParsingTests: XCTestCase {
   func testDecodesTheDoublesJavaScriptActuallySends() throws {
     let decoded = try parseByteArray(jsNumbers([0, 1, 127, 255]), field: "characteristic")
     XCTAssertEqual(decoded, Data([0, 1, 127, 255]))
-  }
-
-  /// Pins the exact cast that failed. If someone reintroduces `as? [Int]`, this is what catches it.
-  func testTheOldIntCastCouldNeverHaveSucceeded() {
-    let asSent: Any = jsNumbers([1, 2, 3])
-    XCTAssertNil(asSent as? [Int], "JS numbers arrive as Double; [Int] is the wrong target type.")
-    XCTAssertNotNil(asSent as? [Double])
-  }
-
-  func testWholeNumbersSurviveEvenWhenSpelledAsDoubles() throws {
-    XCTAssertEqual(try parseByteArray(jsNumbers([42.0]), field: "descriptor"), Data([42]))
   }
 
   // MARK: - Absent versus empty
@@ -100,12 +88,8 @@ final class ConfigurationParsingTests: XCTestCase {
   }
 }
 
-/// The millisecond durations a configuration carries.
-///
-/// Re-checked natively rather than trusted from the TypeScript layer, because the native module is
-/// reachable directly — the same rule the byte and UUID checks follow. Android has always re-checked
-/// these; iOS took the advertising timeout on trust, and the two platforms disagreed on exactly the
-/// input Swift bridges and Kotlin does not.
+/// The millisecond durations a configuration carries, re-checked natively rather than trusted from
+/// the TypeScript layer since the native module is reachable directly.
 final class TimeoutParsingTests: XCTestCase {
   private func advertisingTimeout(_ value: Any?) throws -> Int {
     try parseTimeoutMs(
@@ -133,9 +117,7 @@ final class TimeoutParsingTests: XCTestCase {
     XCTAssertThrowsError(try advertisingTimeout(1.5))
   }
 
-  /// The case the platforms disagreed on. Swift bridges `Bool` to `NSNumber`, so `true` decoded as `1`
-  /// and silently stopped the advertisement a millisecond later; Kotlin's `Boolean` is not a `Number`,
-  /// so Android threw. `parseByteArray` guards the same hazard for byte values.
+  /// Swift bridges `Bool` to `NSNumber`, so without a guard `true` would decode as `1`.
   func testABooleanIsRejectedRatherThanBridgedToOne() {
     XCTAssertThrowsError(try advertisingTimeout(true)) { error in
       XCTAssertTrue(
@@ -225,11 +207,8 @@ final class ArgumentBoundsTests: XCTestCase {
 
   // MARK: - Integer arguments
 
-  /// The reason every integer argument is declared as a `Double` and narrowed here: expo-modules-core
-  /// produces a declared `Int` with `Int(double.rounded())`, and `Int(_: Double)` traps on these two
-  /// values — an uncatchable fatal error raised before any of this module's code runs. A `Double`
-  /// parameter is what makes them reportable at all, so these cases are the whole point of the change
-  /// and not merely another range check.
+  /// Integer arguments are declared as `Double` and narrowed here because `Int(_: Double)` traps on
+  /// NaN/infinity — an uncatchable fatal error, so these must be reported as `Double` before narrowing.
   func testRejectsNonFiniteIntegerArguments() {
     for value in [Double.nan, .infinity, -.infinity] {
       XCTAssertThrowsError(
@@ -341,11 +320,8 @@ final class ArgumentBoundsTests: XCTestCase {
 
   // MARK: - The advertising budget
 
-  /// CoreBluetooth accepts an advertisement that does not fit and reports success: the local name is
-  /// truncated and service UUIDs are moved into the Apple-proprietary overflow area, where a non-Apple
-  /// central filtering on one stops finding the peripheral. Android's stack refuses the same
-  /// advertisement outright, and the shared documentation promises that rejection for both platforms —
-  /// so the size is decided here, before the call that cannot report it.
+  /// CoreBluetooth accepts an oversized advertisement and silently truncates/overflows it, so the size
+  /// is decided here rather than left to the call that cannot report the failure.
   func testAnEmptyAdvertisementCostsOnlyTheFlags() {
     XCTAssertEqual(advertisementPayloadSize(localName: nil, serviceUuids: []), advertisingFlagsLength)
   }

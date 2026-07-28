@@ -1,34 +1,12 @@
-/**
- * Per-characteristic opt-in delegation of ATT request handling to JavaScript. Every flag defaults to
- * `false`, which keeps the module answering the request itself.
- */
+/** Opt-in delegation of ATT request handling to JavaScript. Defaults to automatic responses. */
 export interface CharacteristicDelegateConfig {
-  /**
-   * Always emit `onCharacteristicReadRequest` and wait for `sendResponse`, even when the
-   * characteristic already has a value to serve. Computed or dynamic reads need this: without it the
-   * module answers from the last known value as soon as one exists, so the event stops firing.
-   */
+  /** Emit `onCharacteristicReadRequest` even when a value exists, for computed/dynamic reads. */
   read?: boolean;
   /**
-   * Do not acknowledge writes automatically. `onCharacteristicWriteRequest` carries a live
-   * `requestId` and the write stays unanswered until `sendResponse` is called with `GATT_SUCCESS` or
-   * an `ATT_ERROR_*` code — the only way to reject a write.
-   *
-   * Android never delegates a Write Without Response, which carries nothing to answer; iOS cannot tell
-   * one apart and delegates it like any other write. See `CharacteristicWriteRequestEvent`.
-   *
-   * Decided per characteristic, so a plain characteristic written in the same batch as a delegated one
-   * still has its value applied. Because that batch is atomic, the plain characteristic's value is held
-   * until the batch is answered with `GATT_SUCCESS`, discarded if it is rejected, and dropped if
-   * `updateCharacteristicValue` or another central wrote that characteristic while the batch was
-   * outstanding — a newer value is never reverted to what the batch assembled.
-   *
-   * Apple requires exactly one response per write callback, taken from the first request of the
-   * batch, so on iOS every event produced by one batch shares a single `requestId` and one
-   * `sendResponse` answers the whole batch. Exactly one of those events carries
-   * `responseNeeded: true`; a second delegated characteristic in the same batch is still reported and
-   * can commit its value with `updateCharacteristicValue`, but must not answer again. An Android
-   * execute of a reliable write behaves the same way, since the execute is a single request.
+   * Do not acknowledge writes automatically. `onCharacteristicWriteRequest` carries a live `requestId`.
+   * Android never delegates Write Without Response; iOS cannot tell them apart, so both delegate.
+   * On iOS, one `sendResponse` answers all events in an atomic batch; on Android, per-request.
+   * See `CharacteristicWriteRequestEvent`.
    */
   write?: boolean;
 }
@@ -37,66 +15,35 @@ export interface GattCharacteristicConfig {
   uuid: string;
   properties: CharacteristicProperty[];
   permissions: CharacteristicPermission[];
-  /**
-   * The value reads are answered from until something replaces it. Omit it to delegate every read to
-   * JavaScript instead. `[]` is a configured value, not an absent one: it declares a present but
-   * zero-length attribute, which both platforms answer reads from with an empty value.
-   */
+  /** Value that reads are answered from. Omit to delegate all reads. `[]` is present but zero-length. */
   value?: number[];
-  /**
-   * Descriptors to publish beyond the Client Characteristic Configuration descriptor the module adds
-   * itself. See `GattDescriptorConfig` for the types each platform can express.
-   */
+  /** Additional descriptors beyond Client Characteristic Configuration. See `GattDescriptorConfig`. */
   descriptors?: GattDescriptorConfig[];
   /** Opt out of the module's automatic responses for this characteristic. */
   delegate?: CharacteristicDelegateConfig;
 }
 
 /**
- * Client Characteristic Configuration descriptor (Core Spec Vol 3, Part G, §3.3.3.3), in the 128-bit
- * form both platforms compare against.
- *
- * The module publishes it for every characteristic declaring `notify` or `indicate`, and owns its
- * value: the specification gives each client its own instantiation, so the configuration bits are
- * tracked per device rather than in the single descriptor object the platform hands out. Declaring it
- * in `descriptors` is therefore rejected.
+ * Core Spec Vol 3, Part G, §3.3.3.3. Module publishes it for `notify`/`indicate` characteristics.
+ * Do not declare it in `descriptors`.
  */
 export const CLIENT_CHARACTERISTIC_CONFIGURATION_UUID = '00002902-0000-1000-8000-00805f9b34fb';
 
 /**
- * A descriptor to publish on a characteristic.
- *
- * **iOS accepts only two descriptor types**: `CBMutableDescriptor` is documented as supporting "only
- * the `Characteristic User Description` and `Characteristic Presentation Format` descriptors" —
- * 0x2901 and 0x2904 — so any other UUID is rejected there with `ERR_UNSUPPORTED`. Android publishes
- * whatever it is given. `CLIENT_CHARACTERISTIC_CONFIGURATION_UUID` is rejected on both platforms.
+ * iOS accepts only 0x2901 (User Description, UTF-8) and 0x2904 (Presentation Format).
+ * `CLIENT_CHARACTERISTIC_CONFIGURATION_UUID` is rejected on both platforms.
  */
 export interface GattDescriptorConfig {
   uuid: string;
-  /**
-   * Required on both platforms, to keep one configuration portable, because iOS documents a
-   * descriptor's value as "required and cannot be updated dynamically once the parent service has
-   * been published".
-   *
-   * For 0x2901 the bytes must be valid UTF-8, since iOS models that descriptor's value as an
-   * `NSString`. Every other supported descriptor takes them verbatim.
-   */
+  /** Required and immutable once published. For 0x2901, must be valid UTF-8. */
   value: number[];
-  /**
-   * Android only, and defaults to `['readable']`. `CBMutableDescriptor` has no permissions
-   * parameter — CoreBluetooth decides them from the descriptor type — so this is ignored on iOS.
-   */
+  /** Android only, defaults to `['readable']`. Ignored on iOS. */
   permissions?: CharacteristicPermission[];
 }
 
 /**
- * Characteristic properties, as declared in the characteristic's declaration (Core Spec Vol 3,
- * Part G, Table 3.5).
- *
- * `broadcast` and `extendedProperties` are **rejected on iOS**, which annotates both
- * `CBCharacteristicPropertyBroadcast` and `CBCharacteristicPropertyExtendedProperties` as "Not
- * allowed for local characteristics". They are offered because Android's `PROPERTY_BROADCAST` and
- * `PROPERTY_EXTENDED_PROPS` do set the bits.
+ * Core Spec Vol 3, Part G, Table 3.5.
+ * iOS rejects `broadcast` and `extendedProperties`.
  */
 export type CharacteristicProperty =
   | 'read'
@@ -109,22 +56,8 @@ export type CharacteristicProperty =
   | 'extendedProperties';
 
 /**
- * Access requirements for an attribute value. `readable` and `writeable` map 1:1 onto both
- * platforms; `readEncrypted` and `writeEncrypted` map onto CoreBluetooth's
- * `read`/`writeEncryptionRequired`.
- *
- * **The MITM and signed variants are rejected on iOS** with `ERR_UNSUPPORTED`.
- * `CBAttributePermissions` has exactly four members, and every near equivalent *weakens* what was
- * asked for — an MITM variant demands authenticated pairing rather than any encrypted link, a signed
- * variant a signature over an unencrypted one — so the call fails rather than publishing an attribute
- * less protected than the app declared.
- *
- * An encrypted permission also raises the security of the *subscription*, so a central cannot receive
- * by notification what it may not read directly: Android publishes the Client Characteristic
- * Configuration descriptor with the matching encrypted write permission, and iOS adds
- * `.notifyEncryptionRequired`/`.indicateEncryptionRequired` to the declared property. Both are a
- * behaviour change for a characteristic that declares `notify` or `indicate` alongside `readEncrypted`
- * or `writeEncrypted` — an unpaired central can no longer subscribe.
+ * iOS rejects MITM and signed variants with `ERR_UNSUPPORTED`.
+ * Encrypted permission raises subscription security: unpaired centrals cannot subscribe to notify/indicate.
  */
 export type CharacteristicPermission =
   | 'readable'
@@ -136,21 +69,10 @@ export type CharacteristicPermission =
   | 'writeSigned'
   | 'writeSignedMitm';
 
-/**
- * A secondary service "is a service that is included from another service" (Core Spec Vol 3, Part G,
- * §3.1) and is not intended to be discovered on its own. This module publishes every configured
- * service at the top level and cannot include one service from another, so a `secondary` service is
- * published but will not be found by a central doing primary service discovery. It is offered
- * because both platforms can express the type and a peer that already knows the handle can use it.
- */
+/** Secondary service (Core Spec Vol 3, Part G, §3.1): published but not in primary discovery. */
 export type GattServiceType = 'primary' | 'secondary';
 
-/**
- * Two services declaring the same `uuid`, and one service declaring the same characteristic `uuid`
- * twice, are both rejected: `sendNotification` and `updateCharacteristicValue` address an attribute by
- * the pair of UUIDs, and each platform resolves that pair to exactly one attribute. The same
- * characteristic UUID in two *different* services is accepted, which GATT permits.
- */
+/** Duplicate service or characteristic UUIDs within a service are rejected; UUIDs across services are allowed. */
 export interface GattServiceConfig {
   uuid: string;
   /** Defaults to `primary`. */
@@ -158,205 +80,98 @@ export interface GattServiceConfig {
   characteristics: GattCharacteristicConfig[];
 }
 
-/**
- * The ATT transaction timeout, in milliseconds. A transaction not completed within 30 s times out,
- * after which no further request, command, indication or notification may be sent on that ATT
- * bearer — recovering costs a whole new bearer (Core Spec Vol 3, Part F, §3.3.3). A server timeout at
- * or above this could never answer in time, so it is the exclusive upper bound on
- * `CreateServerOptions.requestTimeoutMs`.
- */
+/** Core Spec Vol 3, Part F, §3.3.3: ATT transaction timeout before bearer drops. Upper bound for requestTimeoutMs. */
 export const ATT_TRANSACTION_TIMEOUT_MS = 30_000;
 
 /** Default `CreateServerOptions.requestTimeoutMs`. */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
-/**
- * The longest value any attribute may hold: "the maximum length of an attribute value shall be 512
- * octets" (Core Spec Vol 3, Part F, §3.2.9).
- *
- * The bound applies to every value the module *stores* as an attribute — a characteristic or descriptor
- * `value` in the configuration, and anything `updateCharacteristicValue` writes — not only to the ones a
- * central writes. Both platforms already refuse a client write that assembles past it, and both cap a
- * notification at `min(mtu - 3, 512)`, so without this an application could publish an attribute that no
- * central could ever be notified of and that only a conformant Read Blob could retrieve in full.
- */
+/** Core Spec Vol 3, Part F, §3.2.9: maximum attribute value length. */
 export const MAX_ATTRIBUTE_VALUE_LENGTH = 512;
 
 export interface CreateServerOptions {
   /**
-   * How long a request delegated to JavaScript may go unanswered before the module answers it itself
-   * with `ATT_ERROR_UNLIKELY_ERROR`, in milliseconds. Defaults to `DEFAULT_REQUEST_TIMEOUT_MS`
-   * (10000).
-   *
-   * Without it a handler that never calls `sendResponse` leaves the central stalled until its own
-   * 30 s ATT transaction timeout expires, which then bars every further request, notification and
-   * indication on that bearer. Answering early keeps the bearer usable.
-   *
-   * Must be an integer from 0 to `ATT_TRANSACTION_TIMEOUT_MS - 1`; `0` disables the timeout.
+   * Timeout (ms) before unanswered delegated requests auto-fail. Prevents handler stalls from
+   * dropping the ATT bearer. Defaults to 10000. Must be 0 to ATT_TRANSACTION_TIMEOUT_MS - 1.
    */
   requestTimeoutMs?: number;
 }
 
 export interface SendNotificationOptions {
   /**
-   * Refuse the send with `ERR_NO_SUBSCRIBER` when the target device has not enabled the exact
-   * transmission `confirm` selects — indications for `confirm: true`, notifications for
-   * `confirm: false`. Defaults to `true`.
-   *
-   * On Android this is checked against the device's own Client Characteristic Configuration bits,
-   * because "when a bit is set, that action shall be enabled, otherwise it will not be used" (Core
-   * Spec Vol 3, Part G, §3.3.3.3). `false` sends anyway there, since the platform transmits without
-   * consulting the descriptor — useful for a peer whose descriptor state the app knows better.
-   *
-   * iOS cannot make the distinction, because CoreBluetooth reports a subscription without saying
-   * which bit the central set, so it is checked as "subscribed at all". `false` changes nothing
-   * there: `updateValue(_:for:onSubscribedCentrals:)` ignores unsubscribed centrals, so there is no
-   * send to force.
-   *
-   * This never relaxes the `confirm` property check, which applies on both platforms regardless.
+   * Reject with `ERR_NO_SUBSCRIBER` if not subscribed to this transmission mode.
+   * Defaults to `true`. Android checks CCCD bits; iOS checks subscription state only.
    */
   requireSubscription?: boolean;
 }
 
-/**
- * Discovery latency against battery. Android implements these as advertising intervals of 1 s, 250 ms
- * and 100 ms, and documents `lowLatency` as having "the highest power consumption" and as something
- * that "should not be used for continuous background advertising". Ignored on iOS, which chooses
- * advertising intervals itself.
- */
+/** Android: 1s/250ms/100ms intervals. Ignored on iOS. */
 export type AdvertisingMode = 'lowPower' | 'balanced' | 'lowLatency';
 
-/**
- * Radio transmit power, which sets how far the advertisement carries. Ignored on iOS, which offers
- * no peripheral-role transmit power control.
- */
+/** Ignored on iOS. */
 export type AdvertisingTxPower = 'ultraLow' | 'low' | 'medium' | 'high';
 
-/**
- * A Manufacturer Specific Data advertisement structure. Android only; rejected on iOS with
- * `ERR_UNSUPPORTED`.
- */
+/** Android only; rejected on iOS with `ERR_UNSUPPORTED`. */
 export interface ManufacturerDataEntry {
-  /** 16-bit Bluetooth SIG Company Identifier. `0xFFFF` is reserved for development and testing. */
   companyId: number;
   data: number[];
 }
 
-/** A Service Data advertisement structure. Android only; rejected on iOS with `ERR_UNSUPPORTED`. */
+/** Android only; rejected on iOS with `ERR_UNSUPPORTED`. Use 16-bit UUID for portability. */
 export interface ServiceDataEntry {
-  /**
-   * Android documents this as the "16-bit UUID of the service the data is associated with", so a
-   * 4-hex-digit UUID is the portable choice — a 128-bit one costs 16 of the 31 available bytes.
-   */
   uuid: string;
   data: number[];
 }
 
-/** Options whose concept has no CoreBluetooth counterpart. Ignored on iOS. */
+/** Android-only options. Ignored on iOS. */
 export interface AndroidAdvertiseOptions {
-  /**
-   * Include the device's *own* Bluetooth name in the scan response. Defaults to `true` when
-   * `localName` is set, so a config that asks for a name still gets one advertised — just the
-   * device's own. Costs the name's length plus two bytes of the scan response's 31-byte budget.
-   */
+  /** Include device's Bluetooth name in scan response. Defaults to `true` when `localName` is set. */
   includeDeviceName?: boolean;
   /**
-   * Rename the device's Bluetooth adapter to `localName`, so a scanner sees the requested name.
-   *
-   * **This changes the phone's system-wide Bluetooth name**, not just this advertisement's: it
-   * appears in the device's own Bluetooth settings and to every peer, over Classic as well as LE. It
-   * is the only control Android offers over the advertised name, which is why it is exposed at all,
-   * but it defaults to `false`.
-   *
-   * The previous name is restored on `stopAdvertising`, `stopServer`, module destruction, an
-   * `AdvertiseConfig.timeoutMs` elapsing, and a start that fails after the rename was applied. While a
-   * server is running the attempt is repeated the next time Bluetooth is turned back on, because
-   * `BluetoothAdapter.setName` fails while the adapter is off.
-   *
-   * It stays best-effort even so, and the gaps are worth knowing: a killed process never runs it, and
-   * **a `stopServer` issued while the adapter is off leaves the name changed for good** — the restore
-   * fails at that moment, and the adapter-state receiver that would have retried it is unregistered by
-   * the same call. Prefer `includeDeviceName` unless the exact advertised name matters.
-   *
-   * Requires `BLUETOOTH_CONNECT` on API 31+. Rejects with `ERR_ADVERTISE` when set without a
-   * `localName`.
+   * Rename system Bluetooth adapter. Changes system-wide name, not just advertisement.
+   * Restored on stopAdvertising/stopServer, unless adapter is off (hazard: name persists if stopServer runs while off).
+   * Requires BLUETOOTH_CONNECT API 31+. Rejects with ERR_ADVERTISE unless localName is set.
    */
   setAdapterName?: boolean;
 }
 
 export interface AdvertiseConfig {
   /**
-   * The local name to advertise. Honoured verbatim on iOS, as `CBAdvertisementDataLocalNameKey`.
-   *
-   * **Android has no per-advertisement local name**: `AdvertiseData.Builder` offers only
-   * `setIncludeDeviceName(boolean)`, and the name that includes is the *adapter's*. No public API
-   * writes an arbitrary Local Name into an advertisement, so Android advertises the device's own name
-   * instead (`android.includeDeviceName`) unless the app opts in to renaming the adapter with
-   * `android.setAdapterName`.
-   *
-   * **It competes with the advertisement's 31-byte budget on iOS and not on Android**, which is where
-   * one configuration stops behaving the same either side: CoreBluetooth puts the name in the
-   * advertisement, while Android puts it in the scan response. A name that pushes the payload over
-   * rejects with `ERR_ADVERTISE` on iOS and advertises on Android. See `docs/api.md`.
+   * iOS: verbatim, in advertisement payload. Android: ignored; use android.setAdapterName to rename.
+   * Competes with 31-byte budget on iOS only.
    */
   localName?: string;
   serviceUuids?: string[];
   /** Include the radio's transmit power level in the scan response. Ignored on iOS, with a warning. */
   includeTxPowerLevel?: boolean;
-  /**
-   * Advertise as connectable, so centrals may open a connection. Defaults to `true`. `false` is
-   * rejected on iOS with `ERR_UNSUPPORTED`: `CBPeripheralManager` only implements the connectable
-   * peripheral role.
-   */
+  /** Defaults to `true`. iOS rejects `false` with `ERR_UNSUPPORTED`. */
   connectable?: boolean;
-  /** Defaults to `lowPower`, matching the platform default. Ignored on iOS, with a warning. */
+  /** Android only. Defaults to `lowPower`. */
   mode?: AdvertisingMode;
-  /** Defaults to `medium`, matching the platform default. Ignored on iOS, with a warning. */
+  /** Android only. Defaults to `medium`. */
   txPowerLevel?: AdvertisingTxPower;
-  /**
-   * Stop advertising after this many milliseconds; `0`, the default, advertises until
-   * `stopAdvertising`. Must be 0–180000, the bound `AdvertiseSettings.Builder.setTimeout` enforces,
-   * applied on both platforms. iOS has no equivalent, so the module emulates it with a timer — same
-   * observable outcome, but only while the process is alive.
-   */
+  /** Stop after ms. Defaults to 0 (no timeout). Must be 0–180000. iOS emulates with timer. */
   timeoutMs?: number;
-  /**
-   * Manufacturer Specific Data to advertise. Shares the advertisement's 31-byte budget with the
-   * service UUIDs, costing its data length plus four bytes per entry; an overrun rejects with
-   * `ERR_ADVERTISE`. Rejected on iOS with `ERR_UNSUPPORTED`.
-   */
+  /** Android only; rejected on iOS. Shares 31-byte budget with service UUIDs. */
   manufacturerData?: ManufacturerDataEntry[];
-  /**
-   * Service Data to advertise. Shares the advertisement's 31-byte budget, as `manufacturerData` does.
-   * Rejected on iOS with `ERR_UNSUPPORTED`.
-   */
+  /** Android only; rejected on iOS. Shares 31-byte budget with manufacturer data. */
   serviceData?: ServiceDataEntry[];
   android?: AndroidAdvertiseOptions;
 }
 
 export interface DeviceConnectedEvent {
   deviceId: string;
-  /** Always empty on iOS: CoreBluetooth exposes no name for a remote central. */
+  /** Empty on iOS; CoreBluetooth does not expose remote central names. */
   name?: string;
 }
 
 /**
- * A central the module currently considers connected.
- *
- * **What "connected" means differs by platform, and cannot be made to agree.** Android reports
- * connections directly, through `onConnectionStateChange`. iOS has no connection-level callback at
- * all, so membership is derived from ATT activity: a central appears on its first subscribe, read or
- * write, and is dropped when it unsubscribes from everything or Bluetooth leaves `poweredOn`. So on
- * iOS a central that never touches an attribute is absent from this list, and one that unsubscribes
- * but stays connected is dropped from it early.
- *
- * The list is the module's own tracking on both platforms, not a platform query:
- * `BluetoothManager.getConnectedDevices(GATT_SERVER)` would report centrals connected to *any* GATT
- * server on the device, including other apps'.
+ * Android: from onConnectionStateChange. iOS: derived from ATT activity (subscribe/read/write);
+ * absent if central never touches an attribute, dropped if unsubscribes from all.
  */
 export interface ConnectedDevice {
   deviceId: string;
-  /** From `BluetoothDevice.getName()` on Android. Always empty on iOS. */
+  /** Android only. */
   name?: string;
 }
 
@@ -366,46 +181,25 @@ export interface DeviceDisconnectedEvent {
 
 export interface CharacteristicReadRequestEvent {
   deviceId: string;
-  /**
-   * **Unique per device, not globally.** Android carries the ATT transaction identifier through as it
-   * is, and the peer assigns that per connection — so two centrals connected at once both produce
-   * `1, 2, 3`. iOS numbers requests across the whole manager and so happens not to repeat, but nothing
-   * in the API promises that. Key any bookkeeping of your own on the pair with `deviceId`, the way the
-   * module keys its own pending requests.
-   */
+  /** Unique per device only. Key bookkeeping on (deviceId, requestId) pair. */
   requestId: number;
   serviceUuid: string;
   characteristicUuid: string;
   offset: number;
 }
 
-/**
- * A central wrote to a characteristic.
- *
- * A long or reliable write is reported on Android as a single event per attribute, carrying the
- * reassembled value at `offset: 0`, once the execute has committed it; a cancelled queue emits
- * nothing. iOS cannot report the distinction, because CoreBluetooth exposes no prepared-write
- * callback and the fragmentation happens below the app layer.
- */
+/** Long/reliable write reported once at offset 0. iOS cannot distinguish Write Without Response. */
 export interface CharacteristicWriteRequestEvent {
   deviceId: string;
-  /** Unique per device, not globally — see `CharacteristicReadRequestEvent.requestId`. */
+  /** Unique per device only. */
   requestId: number;
   serviceUuid: string;
   characteristicUuid: string;
-  /** Where `value` begins within the attribute. Always `0` for a reassembled long write. */
   offset: number;
   value: number[];
   /**
-   * `true` only for a characteristic configured with `delegate.write`; the module answers every other
-   * write itself before emitting the event. Decided per characteristic, so a batch touching a delegated
-   * and a plain characteristic emits one event of each and only the delegated one asks to be answered.
-   *
-   * On **Android** it is additionally `false` for a Write Without Response, which carries nothing to
-   * answer. **iOS cannot make that distinction**: `didReceiveWriteRequests:` delivers an ATT request and
-   * an ATT command through the same callback and `CBATTRequest` exposes no flag telling them apart, so
-   * there a Write Without Response to a `delegate.write` characteristic arrives with
-   * `responseNeeded: true` and does wait for `sendResponse`.
+   * `true` only if characteristic has `delegate.write`.
+   * Android: `false` for Write Without Response. iOS: cannot distinguish, always `true` for delegated writes.
    */
   responseNeeded: boolean;
 }
@@ -416,102 +210,45 @@ export interface NotificationSentEvent {
   status: number;
 }
 
-/**
- * The link budget for one connected device.
- *
- * The public unit is the **ATT MTU**, in octets, because that is what the Core Specification and the
- * Android platform both call "MTU". `maxNotificationPayload` is provided rather than left to the
- * caller to derive.
- */
+/** ATT MTU and link budget. */
 export interface DeviceMtu {
   deviceId: string;
   /**
-   * ATT_MTU in octets, including the ATT header. Before any negotiation this is the specification
-   * default of 23 (Core Spec Vol 3, Part G, §5.2.1).
-   *
-   * Exact on Android, which reports the ATT MTU directly through `onMtuChanged`. Derived on iOS,
-   * where CoreBluetooth exposes only `CBCentral.maximumUpdateValueLength` and three octets of
-   * notification header are added back — Apple does not document that identity, so prefer
-   * `maxNotificationPayload` there.
+   * Default 23 (Core Spec Vol 3, Part G, §5.2.1). Exact on Android.
+   * On iOS, derived from CBCentral.maximumUpdateValueLength + 3.
    */
   mtu: number;
-  /**
-   * Octets that fit in a single notification or indication — the smaller of `mtu - 3`, the maximum
-   * Attribute Value length of an `ATT_HANDLE_VALUE_NTF` PDU (Core Spec Vol 3, Part F, §3.4.7.1), and
-   * the 512-octet maximum length of an attribute value itself (§3.2.9). The second bound only binds
-   * above an ATT MTU of 515. Size a `sendNotification` payload against this; anything larger is
-   * rejected with `PAYLOAD_EXCEEDS_MTU` rather than truncated.
-   */
+  /** Max octets per notification/indication: min(mtu - 3, 512). Reject if larger with PAYLOAD_EXCEEDS_MTU. */
   maxNotificationPayload: number;
 }
 
 /**
- * The MTU for a connection changed, or was observed for the first time.
- *
- * Both platforms report the link's starting MTU with `onDeviceConnected`, so a consumer that sizes its
- * payloads from this event alone is told the budget for every central. Android would otherwise say
- * nothing at all for a central that never asks to exchange an MTU, since `onMtuChanged` fires only for
- * a request that arrives.
- *
- * After that, Android delivers a genuine change from `onMtuChanged` as it happens. iOS has no
- * equivalent callback, so the value is sampled whenever the central produces ATT activity and emitted
- * when it differs from the value last seen — a change therefore surfaces at the next activity rather
- * than the moment it happens.
+ * Android: delivered as onMtuChanged fires. iOS: sampled on ATT activity, emitted if changed.
+ * Always reported once on onDeviceConnected.
  */
 export type MtuChangedEvent = DeviceMtu;
 
-/**
- * A central enabled notifications or indications on a characteristic — the signal to start
- * streaming to it.
- *
- * Whether it asked for notifications or for indications is not reported: CoreBluetooth does not
- * expose the distinction, so it cannot be surfaced consistently. Switching between the two produces
- * no further event, since the central stays subscribed throughout.
- */
+/** Central enabled notifications or indications. Notification vs. indication not distinguished. */
 export interface CharacteristicSubscribedEvent {
   deviceId: string;
-  /** Empty when the platform could not identify the owning service. */
   serviceUuid: string;
   characteristicUuid: string;
 }
 
 /**
- * A central stopped receiving updates for a characteristic — the signal to stop streaming.
- *
- * Also emitted for every subscription a central still held when it disconnects, and when
- * Bluetooth is turned off and the published database is dropped.
- *
- * On iOS, losing the last subscription is additionally reported as a disconnection, because
- * CoreBluetooth delivers the same callback either way — see `DeviceDisconnectedEvent`. A delegated read
- * or write that central still has outstanding is **not** cancelled by that inference: it may well still
- * be connected and about to be answered, so the request is left to `CreateServerOptions.requestTimeoutMs`
- * instead, which ends it only if the central really has gone.
+ * Central stopped or disconnected. On iOS, losing last subscription reports as disconnection too.
+ * Pending delegated requests are not cancelled; they expire via requestTimeoutMs.
  */
 export interface CharacteristicUnsubscribedEvent {
   deviceId: string;
-  /** Empty when the platform could not identify the owning service. */
   serviceUuid: string;
   characteristicUuid: string;
 }
 
 /**
- * Bluetooth adapter state, normalised so consumers never have to branch on platform.
- *
- * - `poweredOn` — the only state in which a server can advertise.
- * - `poweredOff` — iOS `CBManagerState.poweredOff`, Android `STATE_OFF`.
- * - `resetting` — transient, so do not act yet. iOS `CBManagerState.resetting`, Android
- *   `STATE_TURNING_ON` / `STATE_TURNING_OFF`, both of which the platform documents as not yet usable.
- * - `unsupported` — no BLE peripheral support. iOS `CBManagerState.unsupported`, Android: no
- *   `BluetoothAdapter`.
- * - `unauthorized` — the app may not use Bluetooth. **iOS only** (`CBManagerState.unauthorized`);
- *   Android has no adapter state for it and reports a missing grant as an `ERR_PERMISSION` rejection
- *   from the call that needed it, so branch on both rather than on this state alone.
- * - `unknown` — not determined yet. iOS reports this until the first state callback arrives, and
- *   before `createServer` it can report nothing else, since `CBPeripheralManager.state` needs an
- *   instantiated manager. Android reads the adapter directly and so answers properly at any time.
- *
- * `poweredOff` destroys the published GATT database on both platforms. The module re-publishes
- * services on the next transition to `poweredOn`, but advertising must be restarted by the consumer.
+ * Normalized adapter state. `poweredOn` only state allowing advertising/scanning.
+ * `poweredOff` destroys published database; call createServer again after recovery.
+ * `unauthorized` is iOS only; Android reports missing permissions as ERR_PERMISSION on the call.
  */
 export type BluetoothState =
   'unknown' | 'resetting' | 'unsupported' | 'unauthorized' | 'poweredOff' | 'poweredOn';
@@ -521,35 +258,14 @@ export interface BluetoothStateChangedEvent {
 }
 
 /**
- * Every `serviceUuid` and `characteristicUuid` in an event payload is the **lowercase 128-bit form**,
- * on both platforms, whatever spelling the configuration used. A 16-bit or 32-bit UUID is expanded
- * onto the Bluetooth Base UUID before it reaches either platform, because `CBUUID` accepts all three
- * forms while Java's `UUID.fromString` requires only the 8-4-4-4-12 one.
- *
- * The spelling the consumer passed is deliberately **not** echoed back. The Core Specification
- * requires the conversion before comparison anyway (Vol 3, Part B, §2.5.1), and one canonical
- * spelling is what makes a consumer's `event.characteristicUuid === MY_UUID` work at all. Restoring
- * it would also mean a reverse map on both platforms, for events that arrive for attributes never
- * configured — a descriptor write, a read on a re-published database — which have no spelling to
- * restore.
- *
- * `deviceId` is unaffected: it is an opaque handle (a MAC address on Android, a `CBCentral.identifier`
- * on iOS), not a Bluetooth UUID.
+ * Every serviceUuid and characteristicUuid in event payloads is lowercase 128-bit form (Core Spec Vol 3, Part B, §2.5.1).
+ * This is the only canonical spelling across platforms; use it for equality checks.
  */
 /**
- * The published GATT database went away for a reason no promise reported.
- *
- * The module re-publishes the services on every transition to `poweredOn` / `STATE_ON`, and until this
- * event existed a re-publication that failed rejected nothing and emitted nothing — `createServer` had
- * long since resolved, and only a `startAdvertising` parked at that moment would have heard about it.
- * The database really is absent afterwards: `isServerRunning` reports `false`, and recovering means
- * calling `createServer` again.
- *
- * Not emitted when Bluetooth is simply turned off, which `onBluetoothStateChanged` already reports and
- * which the next power-on re-publishes from.
+ * Published database is absent; call createServer to recover.
+ * Emitted when re-publication fails; not on normal Bluetooth off (that's onBluetoothStateChanged).
  */
 export interface ServerPublicationFailedEvent {
-  /** The same code the equivalent `createServer` rejection would carry, usually `ERR_CREATE_SERVER`. */
   code: string;
   message: string;
 }
@@ -567,18 +283,7 @@ export type GattServerEvents = {
   onServerPublicationFailed(event: ServerPublicationFailedEvent): void;
 };
 
-/**
- * Statuses accepted by `sendResponse`.
- *
- * An ATT error code is a single octet (Core Spec 5.4, Vol 3, Part F, §3.4.1.1, Table 3.4), and
- * Android narrows the status to a `uint8_t` on its way into the Bluetooth stack — so
- * `BluetoothGatt.GATT_FAILURE` (257), a GATT *status* rather than an ATT error code, actually went out
- * on the wire as its low byte, `0x01` "Invalid Handle".
- *
- * Only 0x01–0x11 are exposed, because they are exactly the codes both platforms can transmit:
- * `CBATTError.Code` stops at 0x11. Android could also send 0x12, 0x13 and the application and profile
- * ranges, but iOS would downgrade those to Unlikely Error, so they are deliberately not offered.
- */
+/** ATT error codes (Core Spec Vol 3, Part F, §3.4.1.1, Table 3.4). Only 0x01–0x11 portable. */
 export const GATT_SUCCESS = 0x00;
 
 /** The attribute handle given was not valid on this server. */

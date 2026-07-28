@@ -22,11 +22,7 @@ import {
   GATT_SUCCESS,
 } from '../index';
 
-/**
- * ATT error codes, in the order and with the decimal values of the Error Code list in Core Spec
- * Vol 3, Part F, Table 3.4 — spelled in decimal so the assertion does not simply repeat the hex
- * literals it is checking.
- */
+/** ATT error codes and decimal values from Core Spec Vol 3, Part F, Table 3.4. */
 const SPECIFIED_ERROR_CODES: [number, string][] = [
   [1, 'Invalid Handle'],
   [2, 'Read Not Permitted'],
@@ -68,8 +64,6 @@ const EXPORTED_ERROR_CODES_IN_SPEC_ORDER = [
 ];
 
 describe('ATT error constants', () => {
-  // One test rather than seventeen: a wrong or transposed value fails here just the same, and naming
-  // the code in the assertion says which one without needing a case per row.
   it('assigns each specified error code to its own constant', () => {
     expect(EXPORTED_ERROR_CODES_IN_SPEC_ORDER).toHaveLength(SPECIFIED_ERROR_CODES.length);
 
@@ -85,8 +79,7 @@ describe('ATT error constants', () => {
     );
   });
 
-  // Android narrows the status to a byte on its way into the stack, so a wider constant would go out as
-  // an unrelated error rather than the one named.
+  // Android narrows the status to a byte, so a wider constant would surface as an unrelated error.
   it('reserves zero for success and keeps every error inside a single byte', () => {
     expect(GATT_SUCCESS).toBe(0);
     expect(EXPORTED_ERROR_CODES_IN_SPEC_ORDER).not.toContain(GATT_SUCCESS);

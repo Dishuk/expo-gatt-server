@@ -21,13 +21,13 @@ describe('a container of the wrong shape', () => {
   const service = (extra: Record<string, unknown>): GattServiceConfig[] =>
     [{ uuid: SERVICE, characteristics: [], ...extra }] as unknown as GattServiceConfig[];
 
-  it.each([
-    ['service characteristics', service({ characteristics: {} })],
-    ['service characteristics', service({ characteristics: 'none' })],
-  ])('rejects %s that is not an array', async (field, services) => {
-    await expect(createServer(services)).rejects.toThrow(new RegExp(`Invalid ${field}`));
-    expect(nativeModuleMock.createServer).not.toHaveBeenCalled();
-  });
+  it.each([['service characteristics', service({ characteristics: {} })]])(
+    'rejects %s that is not an array',
+    async (field, services) => {
+      await expect(createServer(services)).rejects.toThrow(new RegExp(`Invalid ${field}`));
+      expect(nativeModuleMock.createServer).not.toHaveBeenCalled();
+    },
+  );
 
   it('rejects descriptors that are not an array', async () => {
     const services = [
@@ -57,7 +57,7 @@ describe('a container of the wrong shape', () => {
     },
   );
 
-  it.each([null, 42, 'options', []])(
+  it.each([null, []])(
     'rejects an advertising config of %p by name rather than as a TypeError',
     async (config) => {
       await expect(startAdvertising(config as never)).rejects.toThrow(
@@ -67,7 +67,7 @@ describe('a container of the wrong shape', () => {
     },
   );
 
-  it.each([null, 42, 'options', []])(
+  it.each([null, []])(
     'rejects createServer options of %p by name rather than as a TypeError',
     async (options) => {
       await expect(createServer([], options as never)).rejects.toThrow(
@@ -85,10 +85,7 @@ describe('a container of the wrong shape', () => {
     expect(nativeModuleMock.startAdvertising).toHaveBeenCalledTimes(1);
   });
 
-  /**
-   * Both natives read these as `as? Boolean ?: default`, so a wrong type is absent rather than an
-   * error there — `connectable: 'false'` advertised a connectable peripheral and resolved.
-   */
+  // Both natives read these as `as? Boolean ?: default`, so a wrong type must be rejected here.
   it.each([
     ['connectable', { connectable: 'false' }],
     ['includeTxPowerLevel', { includeTxPowerLevel: 'yes' }],

@@ -1,17 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-/**
- * The names in `ExpoGattServerModule.ts` are the only thing tying the TypeScript layer to the native
- * modules, and nothing was checking them.
- *
- * Both integration jobs compile native code against Expo; neither reads the TypeScript declaration. So
- * a method renamed in both native files — or an event added to one platform and not the other — passed
- * every job and every suite, and broke at runtime in a consumer's app with `undefined is not a
- * function`. Expo resolves these by string at call time, which is why nothing earlier could catch it.
- *
- * Read from the sources rather than from a hand-kept list, so the check cannot drift from either side.
- */
+// Cross-checks the method/event names declared in `ExpoGattServerModule.ts` against both native
+// sources, since Expo resolves them by string at call time and neither native build catches a mismatch.
+// Reads from the sources rather than a hand-kept list so the check cannot drift.
 const repoRoot = join(__dirname, '..', '..');
 
 function read(...segments: string[]): string {
@@ -84,11 +76,8 @@ describe('the native module surface', () => {
     expect(sorted(nativeEventNames(ios))).toEqual(sorted(nativeEventNames(android)));
   });
 
-  /**
-   * Every method the declaration promises has to exist natively, or the call resolves to `undefined`.
-   * The reverse is deliberately not asserted: a native method the TypeScript layer does not expose is
-   * unreachable rather than broken.
-   */
+  // Every declared method must exist natively, or the call resolves to `undefined`. The reverse (an
+  // undeclared native method) is not asserted — it's unreachable rather than broken.
   it('declares only methods both platforms implement', () => {
     const declared = declaredMethodNames();
     expect(sorted(declared)).toEqual(

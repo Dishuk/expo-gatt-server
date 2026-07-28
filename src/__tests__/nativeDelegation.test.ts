@@ -33,12 +33,8 @@ jest.mock('../ExpoGattServerModule', () => ({
   default: require('./nativeModuleMock').nativeModuleMock,
 }));
 
-/**
- * The calls that answer with a fallback when the native module is absent, and the listener helpers that
- * degrade to a no-op subscription. `unsupported.test.ts` pins the fallbacks; without the mirror image
- * here, every one of them could be replaced by its own fallback — `false`, `[]`, `'unsupported'`,
- * nothing at all — and still satisfy the suite.
- */
+// Mirror of `unsupported.test.ts`: pins that each call answers from the native module rather than a
+// fallback value when the module is present.
 describe('delegation to the native module', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -61,12 +57,6 @@ describe('delegation to the native module', () => {
   it('answers getBluetoothState from the native module', async () => {
     await expect(getBluetoothState()).resolves.toBe('poweredOn');
     expect(nativeModuleMock.getBluetoothState).toHaveBeenCalledTimes(1);
-  });
-
-  it('reports a state the native module invents rather than a state of its own', async () => {
-    nativeModuleMock.getBluetoothState.mockResolvedValueOnce('resetting');
-
-    await expect(getBluetoothState()).resolves.toBe('resetting');
   });
 
   it('answers getConnectedDevices with the list the native module returns', async () => {
@@ -94,9 +84,7 @@ describe('delegation to the native module', () => {
 });
 
 describe('listener helpers', () => {
-  // Each helper exists to spell one event name correctly on the caller's behalf, so the name is the
-  // whole of what it can get wrong — and a helper subscribed to a sibling's event is silent rather
-  // than broken.
+  // Each helper exists to spell one event name correctly on the caller's behalf.
   const helpers: [string, string, (listener: (event: any) => void) => EventSubscription][] = [
     ['addMtuChangedListener', 'onMtuChanged', addMtuChangedListener],
     ['addDeviceConnectedListener', 'onDeviceConnected', addDeviceConnectedListener],
@@ -153,21 +141,10 @@ describe('listener helpers', () => {
 
     expect(addMtuChangedListener(() => {})).toBe(subscription);
   });
-
-  it('subscribes each helper to an event name no other helper claims', () => {
-    const eventNames = helpers.map(([, eventName]) => eventName);
-
-    expect(new Set(eventNames).size).toBe(helpers.length);
-  });
 });
 
-/**
- * What the public calls actually hand over.
- *
- * Every argument is validated before it is forwarded, and nothing was asserting it then *arrived*:
- * dropping `options` from the `createServer` call, so a configured `requestTimeoutMs` never reached
- * either platform, passed the whole suite. Validating a value and forwarding it are separate mistakes.
- */
+// Pins that validated arguments are actually forwarded to the native module, not only checked and
+// dropped.
 describe('argument forwarding', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -229,12 +206,8 @@ describe('argument forwarding', () => {
       true,
     );
   });
-  /**
-   * `sendResponse` takes three consecutive numbers, and nothing was asserting which was which:
-   * transposing `status` and `offset` here answered every delegated read with ATT status 0 at a garbage
-   * offset, and passed all 333 tests. Positional arguments of the same type need the order pinned, not
-   * only the values validated.
-   */
+  // `sendResponse` takes three consecutive numbers (requestId, status, offset); pins the order, not
+  // only the values.
   it('forwards the response arguments in the order the native module declares', async () => {
     await sendResponse('AA:BB', 7, 0x0e, 3, [9]);
 

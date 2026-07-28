@@ -46,11 +46,6 @@ declare class ExpoGattServerModuleType extends NativeModule<GattServerEvents> {
 export type { ExpoGattServerModuleType };
 
 /**
- * `null` wherever the native module was never installed — on web, and in a binary that does not
- * contain it, such as Expo Go.
- *
- * The optional variant is required because this line runs at *import* time: `requireNativeModule`
- * would throw from it, taking down any bundle that reached the import even if it only ever calls in
- * behind a platform check.
+ * null if native module not installed. Optional variant required at import time—requireNativeModule would throw.
  */
 export default requireOptionalNativeModule<ExpoGattServerModuleType>('ExpoGattServer');

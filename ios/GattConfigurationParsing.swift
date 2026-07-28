@@ -2,30 +2,20 @@ import CoreBluetooth
 import Foundation
 
 /// Configuration parsing that does not need ExpoModulesCore.
-///
-/// Split out of `ExpoGattServerModule.swift` so `Package.swift` can compile it and `swift test` can
-/// exercise it on the host, the way `GattConfiguration.kt` is split out on Android. Before the split
-/// this logic was reachable by no test at all — the binding imports ExpoModulesCore, which has no host
-/// build — and it was where two silent decoding bugs lived: `map["value"] as? [Int]` against a
-/// dictionary whose numbers arrive as `Double`, which dropped every configured characteristic value
-/// and published every descriptor empty.
+/// Testable on the host; used to catch silent decoding failures when untyped dictionaries have Double values.
 struct GattArgumentError: LocalizedError {
   let message: String
   var errorDescription: String? { message }
 }
 
-/// The longest advertising duration `AdvertiseSettings.Builder.setTimeout` accepts, applied here too so
-/// one configuration behaves the same either side. iOS emulates the limit with a timer of its own.
+/// The longest advertising duration both platforms accept. iOS enforces with a timer.
 let maxAdvertisingTimeoutMs = 180_000
 
 /// Decodes a millisecond duration out of an untyped configuration map, refusing anything that is not a
 /// whole number in `0...bound`.
 ///
-/// Re-checked natively rather than trusted from the TypeScript layer, on the same grounds as the
-/// duplicate-UUID and byte-range checks: the native module is reachable directly. Android has always
-/// re-checked these; iOS took the advertising timeout on trust, and Swift bridges `Bool` to `NSNumber`
-/// where Kotlin's `Boolean` is not a `Number` — so `timeoutMs: true` threw on Android and, on iOS,
-/// resolved and then silently stopped the advertisement one millisecond later.
+/// Re-checked natively since the module is reachable directly. Swift bridges `Bool` to `NSNumber`,
+/// so `timeoutMs: true` resolves but silently stops the advertisement on iOS.
 internal func parseTimeoutMs(
   _ value: Any?, field: String, bound: Int, default fallback: Int, boundDescription: String
 ) throws -> Int {
@@ -43,16 +33,9 @@ internal func parseTimeoutMs(
 
 /// Decodes a whole number out of an argument expo-modules-core delivered as a `Double`.
 ///
-/// Every integer argument this module takes is *declared* as a `Double` and narrowed here, rather than
-/// declared as an `Int` and narrowed by expo-modules-core. Its `DynamicNumberType` converts with
-/// `Int(double.rounded())`, and `Int(_: Double)` **traps** on `NaN` or an infinity — an uncatchable
-/// fatal error that takes the process with it, raised before this module's code runs at all, so no
-/// amount of checking inside a function body could have prevented it. A `Double` parameter converts
-/// without narrowing, which puts the decision here where it can be reported.
-///
-/// It also removes a silent divergence: Android's converter turns the same `NaN` into `0` and truncates
-/// a fraction where iOS rounds it, so an unchecked argument named a *different* request on each
-/// platform. Both platforms now refuse it with the same message.
+/// Declared as `Double` and narrowed here instead of as `Int`, because `Int(_: Double)` **traps**
+/// (uncatchable fatal error) on `NaN` or infinity. Android's converter returns `0` for `NaN` and
+/// truncates fractions; iOS rounds them. Both platforms refuse it with the same message.
 internal func parseIntArgument(
   _ value: Double, field: String, min: Int, max: Int, explanation: String
 ) throws -> Int {
@@ -65,18 +48,14 @@ internal func parseIntArgument(
   return Int(value)
 }
 
-/// Decodes a value that will be *stored* as an attribute, which the specification bounds at
-/// `maxAttributeValueLength` however it came to be set — a configured `value` and
-/// `updateCharacteristicValue` alike, not only a write arriving from a central.
+/// Decodes a value that will be stored as an attribute (configured or updated).
 internal func parseAttributeValue(_ value: Any?, field: String) throws -> Data? {
   guard let bytes = try parseByteArray(value, field: field) else { return nil }
   try assertAttributeValueLength(bytes, field: field)
   return bytes
 }
 
-/// The one bound, applied wherever an attribute value is set. Kept separate from
-/// `parseAttributeValue` because the typed `[Int]` path — `updateCharacteristicValue` — has already
-/// been decoded by expo-modules-core and needs only the length rule.
+/// Validates the bound applied to all attribute values. Separate from parseAttributeValue because typed paths are pre-decoded.
 internal func assertAttributeValueLength(_ bytes: Data, field: String) throws {
   guard bytes.count <= maxAttributeValueLength else {
     throw GattArgumentError(
@@ -87,23 +66,14 @@ internal func assertAttributeValueLength(_ bytes: Data, field: String) throws {
   }
 }
 
-/// The advertising payload a legacy advertisement can carry — Core Spec Vol 3, Part C, §11: an
-/// `AdvData` field is 31 octets. The scan response has its own 31, which CoreBluetooth does not let a
-/// peripheral populate.
+/// Legacy advertising payload limit: 31 octets (Core Spec Vol 3, Part C, §11). Scan response has its own 31; CoreBluetooth does not expose it.
 let maxAdvertisementPayloadLength = 31
 
-/// The AD structure the controller adds for a connectable advertisement: length, type `0x01`, and one
-/// octet of flags. A `CBPeripheralManager` advertisement is always connectable, so the room is always
-/// spent — the same three octets Android's `AdvertiseHelper` reserves before it decides an advertisement
-/// is too large.
+/// The AD structure always added for a connectable advertisement: length, type 0x01, flags. CBPeripheralManager always connectable.
 let advertisingFlagsLength = 3
 
-/// The octets an advertisement's AD structures would occupy.
-///
-/// Each structure costs a length octet and a type octet plus its payload; service UUIDs are grouped by
-/// width into one structure per width present (Core Spec Vol 3, Part C, §11 and the Supplement's §1.1).
-/// The widths come from `CBUUID.data`, which is what `advertisedForm` has already contracted where it
-/// could.
+/// Total octets in an advertisement's AD structures.
+/// Service UUIDs grouped by width per Core Spec Vol 3, Part C, §11 and Supplement §1.1; widths from CBUUID.data.
 func advertisementPayloadSize(localName: String?, serviceUuids: [CBUUID]) -> Int {
   var size = advertisingFlagsLength
   if let localName = localName, !localName.isEmpty {
@@ -120,18 +90,9 @@ func advertisementPayloadSize(localName: String?, serviceUuids: [CBUUID]) -> Int
   return size
 }
 
-/// Refuses an advertisement that could not go on the air as asked.
-///
-/// CoreBluetooth reports no failure for one that does not fit: `startAdvertising` succeeds,
-/// `peripheralManagerDidStartAdvertising` reports `error == nil`, and the parts that did not fit are
-/// silently dropped — a truncated local name, and service UUIDs relocated into the Apple-proprietary
-/// scan-response overflow area, which only Apple hardware reads. A non-Apple central filtering on a
-/// service UUID then never discovers the peripheral, and nothing anywhere says why. Android's stack
-/// refuses the same advertisement with `ADVERTISE_FAILED_DATA_TOO_LARGE`, which the module reports as
-/// `ERR_ADVERTISE`, and `docs/api.md` documents that rejection for both platforms.
-///
-/// Checked before the call rather than after, because afterwards there is nothing left to check: the
-/// advertisement CoreBluetooth put on the air is not readable from the API.
+/// Refuses an advertisement that does not fit. CoreBluetooth silently drops local name and service UUIDs
+/// that do not fit; a non-Apple central filtering on a dropped service UUID will not discover the peripheral.
+/// Android refuses with ADVERTISE_FAILED_DATA_TOO_LARGE; both platforms document this rejection.
 func assertAdvertisementFits(localName: String?, serviceUuids: [CBUUID]) throws {
   let size = advertisementPayloadSize(localName: localName, serviceUuids: serviceUuids)
   guard size > maxAdvertisementPayloadLength else { return }
@@ -148,17 +109,9 @@ func assertAdvertisementFits(localName: String?, serviceUuids: [CBUUID]) throws 
   )
 }
 
-/// Refuses a characteristic that declares one descriptor UUID more than once.
-///
-/// Lives here rather than beside the assignment it guards so that it can be exercised on the host:
-/// `ExpoGattServerModule.swift` imports ExpoModulesCore and has no host build, and this is a rule that
-/// must not be discovered to be wrong on a device. `CBMutableCharacteristic.descriptors` raises
-/// `NSInternalInconsistencyException` for a second User Description or Presentation Format descriptor,
-/// which Swift cannot catch — so the configuration that merely shadowed an attribute on Android
-/// terminated the application here.
-///
-/// Any repeat is refused, not only the two CoreBluetooth names, so one configuration means the same
-/// thing on both platforms.
+/// Refuses duplicate descriptor UUIDs on a characteristic.
+/// CBMutableCharacteristic.descriptors raises NSInternalInconsistencyException (uncatchable) for duplicates.
+/// Any repeat is refused to mean the same thing on both platforms.
 internal func assertUniqueDescriptorUuids(_ uuids: [CBUUID], characteristic: CBUUID) throws {
   var seen: Set<CBUUID> = []
   for uuid in uuids {
@@ -173,17 +126,8 @@ internal func assertUniqueDescriptorUuids(_ uuids: [CBUUID], characteristic: CBU
 }
 
 /// Decodes an optional array whose elements must all be of one type, reporting the first that is not.
-///
-/// Written because `value as? [Element]` is all-or-nothing: one element of the wrong type makes the
-/// whole cast `nil`, and every caller here read `nil` as "the key was absent". So a single malformed
-/// entry published a service with *no* characteristics, a characteristic with *no* descriptors, or —
-/// worst — an attribute with no properties and no permissions, and `createServer` resolved as though
-/// the configuration had been honoured. That is the silent-drop failure the TypeScript layer rejects a
-/// misspelled property name to prevent, reappearing one layer down for a caller that reaches the native
-/// module directly, which is the case this parsing exists for at all.
-///
-/// Android refuses the same input rather than dropping it, so throwing is also what keeps one
-/// configuration meaning one thing on both platforms.
+/// `value as? [Element]` is all-or-nothing: one bad element makes the whole cast nil, silently dropping
+/// services, characteristics, or attributes. Android refuses the same input; both platforms need consistent behavior.
 internal func parseTypedArray<Element>(
   _ value: Any?, field: String, elementDescription: String
 ) throws -> [Element]? {
@@ -208,11 +152,7 @@ internal func parseTypedArray<Element>(
 }
 
 /// Converts an array of byte values delivered as `Double`.
-///
-/// Declared `[Double]` rather than `[Int]` for the same reason the three `sendResponse` numbers are:
-/// expo-modules-core narrows a declared `Int` with `Int(double.rounded())`, which **traps** on `NaN` or
-/// an infinity, and that trap fires before any code here runs — so a single bad element killed the
-/// process instead of rejecting. `UInt8(exactly:)` refuses those, and fractions with them.
+/// Int(_: Double) **traps** on NaN or infinity; UInt8(exactly:) refuses them safely.
 internal func parseBytes(_ value: [Double], field: String) throws -> Data {
   var bytes: [UInt8] = []
   bytes.reserveCapacity(value.count)
@@ -228,17 +168,9 @@ internal func parseBytes(_ value: [Double], field: String) throws -> Data {
   return Data(bytes)
 }
 
-/// Decodes an array of byte values out of an **untyped** configuration map.
-///
-/// Elements arrive as `Double`: expo-modules-core converts an untyped `[String: Any]` through
-/// `DynamicRawType` → `JavaScriptValue.getAny()`, which maps every JS number to `getDouble()`. So
-/// `as? [Int]` can never succeed on this path, however plainly it reads — which is exactly why the
-/// failure was silent. Typed parameters are unaffected, which is why only the two `services` sites
-/// were wrong.
-///
-/// Booleans are refused rather than bridged through `NSNumber`, matching Android's `as? Number`.
-/// Returns `nil` only when the key is absent: `[]` is a configured, zero-length value, and the two
-/// mean different things to a characteristic.
+/// Decodes an array of byte values out of an untyped configuration map.
+/// Elements arrive as Double (expo-modules-core maps JS numbers to getDouble()), so as? [Int] always fails.
+/// Booleans are refused (matching Android's as? Number). Returns nil only if key is absent, not for empty array.
 internal func parseByteArray(_ value: Any?, field: String) throws -> Data? {
   guard let value = value, !(value is NSNull) else { return nil }
   guard let elements = value as? [Any] else {
@@ -264,12 +196,7 @@ internal func parseByteArray(_ value: Any?, field: String) throws -> Data? {
 
 // MARK: - Attribute configuration
 
-/// Moved here from the binding so `swift test` can exercise it: the property and permission maps
-/// decide what a published attribute allows, and a transposed line there publishes a weaker
-/// attribute than was asked for with nothing in any build reporting it.
-
-/// `CBUUID(string:)` raises an uncatchable Objective-C exception for anything other than a 16-bit,
-/// 32-bit or hyphenated 128-bit string, so every string is checked before it reaches CoreBluetooth.
+/// `CBUUID(string:)` raises an uncatchable Objective-C exception for invalid formats; validate before calling CoreBluetooth.
 func isValidUuid(_ string: String) -> Bool {
   func isHex(_ characters: Substring) -> Bool {
     !characters.isEmpty && characters.allSatisfy { $0.isASCII && $0.isHexDigit }
@@ -305,9 +232,7 @@ func parseUuid(_ value: Any?, field: String) throws -> CBUUID {
   return CBUUID(string: string)
 }
 
-/// Apple annotates `CBCharacteristicPropertyBroadcast` and
-/// `CBCharacteristicPropertyExtendedProperties` as "Not allowed for local characteristics", so both are
-/// refused here instead of being set and rejected at publication time.
+/// Broadcast and extendedProperties are not allowed for local characteristics; refuse early.
 func parseProperties(_ list: [String]?) throws -> CBCharacteristicProperties {
   var props: CBCharacteristicProperties = []
   for str in list ?? [] {
@@ -331,10 +256,7 @@ func parseProperties(_ list: [String]?) throws -> CBCharacteristicProperties {
   return props
 }
 
-/// `CBAttributePermissions` has exactly four members, so Android's MITM and signed variants have
-/// nothing to map onto. Every near equivalent is *weaker* than what was asked for — an MITM variant
-/// requires authenticated pairing rather than any encrypted link, a signed variant a signature over an
-/// unencrypted one — so they are refused rather than approximated into a less protected attribute.
+/// CBAttributePermissions has four members; Android's MITM/signed variants would be weaker approximations, so refuse them.
 func parsePermissions(_ list: [String]?) throws -> CBAttributePermissions {
   var perms: CBAttributePermissions = []
   for str in list ?? [] {
@@ -358,20 +280,9 @@ func parsePermissions(_ list: [String]?) throws -> CBAttributePermissions {
   return perms
 }
 
-/// Raises the security of the subscription itself to match the security declared on the value.
-///
-/// A `CBAttributePermissions` member guards only a read or a write of the value; nothing in it reaches
-/// the Client Characteristic Configuration descriptor, which CoreBluetooth owns and never exposes. The
-/// only gate on subscribing is the separate property pair Apple documents as "only trusted devices can
-/// enable notifications/indications of the characteristic value", so without this an unpaired central
-/// could subscribe to a characteristic whose direct read it is refused and receive every later value in
-/// cleartext — the same hole Android leaves in that descriptor's own write permission.
-///
-/// Derived from the permissions rather than exposed as two more `CharacteristicProperty` names so that
-/// one configuration means the same thing on both platforms and no consumer has to branch on the OS.
-/// The plain `.notify`/`.indicate` member is kept alongside: it is what sets the corresponding bit of
-/// the published characteristic declaration (Core Spec Vol 3, Part G, Table 3.5), which a central needs
-/// to see before it will subscribe at all.
+/// Raises subscription security to match value security. CBAttributePermissions don't guard the CCC descriptor;
+/// without this an unpaired central could subscribe to an encrypted characteristic and receive values in cleartext.
+/// The .notify/.indicate property sets the declaration bit (Core Spec Vol 3, Part G, Table 3.5).
 internal func securedSubscription(
   _ properties: CBCharacteristicProperties,
   _ permissions: CBAttributePermissions

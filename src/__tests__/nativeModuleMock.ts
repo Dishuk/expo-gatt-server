@@ -4,12 +4,9 @@ import type { BluetoothState, ConnectedDevice, GattServerEvents } from '../ExpoG
 import type { ExpoGattServerModuleType } from '../ExpoGattServerModule';
 
 /**
- * Stands in for the native module so the JavaScript layer can be exercised without a device or a
- * native build. Every method resolves successfully, which makes a rejection in a test attributable to
- * the validation under test rather than to the mock.
- *
- * Arguments are deliberately untyped so assertions can reach into the normalised payloads; the checks
- * below keep the method names and return types honest against the native module's own declaration.
+ * Stands in for the native module. Every method resolves successfully by default, so a rejection in
+ * a test is attributable to the validation under test rather than to the mock. Arguments are
+ * untyped so assertions can reach into the normalised payloads.
  */
 export const nativeModuleMock = {
   createServer: jest.fn(async (..._args: any[]) => undefined),
@@ -30,11 +27,7 @@ export const nativeModuleMock = {
   addListener: jest.fn((..._args: any[]) => ({ remove: jest.fn() })),
 } satisfies Record<DeclaredMethod, jest.Mock> & { addListener: jest.Mock };
 
-/**
- * The methods this module declares itself, as opposed to the ones it inherits from `NativeModule`
- * (`addListener`, `removeAllListeners`, and the rest of Expo's event plumbing). Only the former are
- * the module's own contract, and only they need mocking in full.
- */
+/** Methods this module declares itself, excluding the ones it inherits from `NativeModule`. */
 type DeclaredMethod = Exclude<
   keyof ExpoGattServerModuleType,
   // `NativeModule<T>` aliases the *constructor* type, so its own `keyof` is `prototype` and friends —
@@ -43,18 +36,9 @@ type DeclaredMethod = Exclude<
 >;
 
 /**
- * Compile-time only, and the reason the `satisfies` above is not `Partial`.
- *
- * `Partial<Record<…>>` checked that no *extra* names appeared, and nothing else: a method added to the
- * native module, or renamed on it, left the mock silently short of it while every suite stayed green.
- * These two aliases turn both into type errors. They are types, so they cost nothing at runtime.
- *
- * What no TypeScript check here can reach is whether `ExpoGattServerModule.ts`'s hand-written
- * declaration still matches the Kotlin and the Swift — Expo resolves those names as strings at call
- * time, so nothing in a type system sees them. The `android-integration` and `ios-integration` jobs do
- * not close that either: they compile native code against Expo and never read this declaration, so a
- * method renamed on both platforms passed every one of them. `nativeSurface.test.ts` reads the three
- * sources and compares the names directly, which is what actually holds them together.
+ * Compile-time only. Ensures a method added to or renamed on the native module type cannot leave the
+ * mock silently short of it. Does not check that `ExpoGattServerModule.ts`'s declaration still
+ * matches the Kotlin/Swift — `nativeSurface.test.ts` covers that.
  */
 type MissingFromMock = Exclude<DeclaredMethod, keyof typeof nativeModuleMock>;
 type ReturnTypeMismatches = {
@@ -69,27 +53,13 @@ type ReturnTypeMismatches = {
     : never;
 }[DeclaredMethod & keyof typeof nativeModuleMock];
 
-/**
- * Fails to compile unless `T` is `never`.
- *
- * A bare `type X = … ? true : never` would not do: an alias that resolves to `never` is perfectly legal
- * and reports nothing. Putting the union in a `extends never` constraint is what turns a non-empty one
- * into a type error that names the offending method.
- */
+/** Fails to compile unless `T` is `never`; the `extends never` constraint is what makes it an error. */
 type AssertNever<T extends never> = T;
 
 export type MockIsComplete = AssertNever<MissingFromMock>;
 export type MockReturnsMatch = AssertNever<ReturnTypeMismatches>;
 
-/**
- * The arguments of the `nth` call to `method`, failing the test rather than returning `undefined` when
- * there was no such call.
- *
- * Reaching into `mock.calls[n]` directly reads as an assertion but is not one: an index that does not
- * exist yields `undefined`, and the property accesses that follow then throw a `TypeError` naming a
- * line rather than the missing call. Checking here turns "the module was never called" into that
- * sentence.
- */
+/** The arguments of the `nth` call to `method`; fails the test rather than returning `undefined`. */
 export function callArgs<Method extends keyof typeof nativeModuleMock>(
   method: Method,
   nth = 0,

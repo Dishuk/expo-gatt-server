@@ -2,23 +2,11 @@ import ExpoModulesCore
 import CoreBluetooth
 
 public class ExpoGattServerModule: Module {
-  /// Read and written only on the main queue, along with everything the manager itself owns — see the
-  /// note on `GattServerManager`.
+  /// Read and written only on the main queue.
   private var manager: GattServerManager?
 
-  /// Counts `stopServer` calls, so a `createServer` that has begun parsing can tell that the application
-  /// asked to tear down while it was still working.
-  ///
-  /// **This covers only the window it can see.** The epoch is read inside the `AsyncFunction` body, on
-  /// Expo's worker queue, which is already after the JavaScript call returned — so a `stopServer` issued
-  /// in the same tick has been counted before the baseline is taken, and the guard below passes. The
-  /// ordinary mount/unmount pair is therefore recovered in `src/index.ts`, which is single-threaded and
-  /// is the only place that knows which call the application made first; see `serverStopEpoch` there.
-  /// What this does catch is a stop landing between that read and the main-queue hop, where parsing a
-  /// large configuration leaves a real window.
-  ///
-  /// Guarded by a lock rather than confined to the main queue, because it is read from the worker queue
-  /// before the hop and written from the JS thread without one.
+  /// Tracks `stopServer` calls to detect stops issued during `createServer` parsing.
+  /// Guarded by lock: read from worker queue, written from JS thread.
   private let serverStopEpochLock = NSLock()
   private var serverStopEpochValue = 0
 
@@ -28,8 +16,7 @@ public class ExpoGattServerModule: Module {
     return serverStopEpochValue
   }
 
-  /// Called synchronously on the JS thread, so the recorded order is the order the application issued
-  /// the calls in — not the order their main-queue blocks happen to run.
+  /// Records stop on JS thread, so order matches application calls (not main-queue execution order).
   private func recordServerStop() {
     serverStopEpochLock.lock()
     defer { serverStopEpochLock.unlock() }
@@ -95,9 +82,6 @@ public class ExpoGattServerModule: Module {
       }
     }
 
-    // No CBPeripheralManager method drops a central, and cancelPeripheralConnection(_:) belongs to
-    // CBCentralManager and takes a CBPeripheral, so it cannot be turned around on a central. Nothing
-    // is approximated here, because no documented CoreBluetooth call does this.
     AsyncFunction("disconnectDevice") { (deviceId: String, promise: Promise) in
       let error = GattServerError.configurationUnsupported(
         option: "disconnectDevice",
@@ -119,8 +103,7 @@ public class ExpoGattServerModule: Module {
 
     AsyncFunction("getBluetoothState") { (promise: Promise) in
       DispatchQueue.main.async {
-        // `CBPeripheralManager.state` needs an instantiated manager, and instantiating one purely to
-        // read state would trigger the Bluetooth permission prompt.
+        // Instantiating CBPeripheralManager triggers permission prompt, so use CBManager.authorization if no manager exists.
         guard let mgr = self.manager else {
           switch CBManager.authorization {
           case .denied, .restricted:
@@ -151,9 +134,7 @@ public class ExpoGattServerModule: Module {
         let requestTimeoutMs = try self.parseRequestTimeout(options["requestTimeoutMs"])
         var initialValues: [CharacteristicAddress: Data] = [:]
         var cbServices: [CBMutableService] = []
-        // `addedServices` is keyed by service UUID and `findCharacteristic` takes the first match, so a
-        // repeat would leave one attribute unreachable and the other addressed by both spellings.
-        // Rejected in JavaScript too; repeated here because the native module is reachable directly.
+        // Validate unique service UUIDs: CoreBluetooth's addedServices key lookup + findCharacteristic first-match would leave one unreachable.
         var serviceUuids: Set<CBUUID> = []
         for serviceConfig in services {
           let service = try self.parseServiceConfig(serviceConfig, initialValues: &initialValues)
@@ -166,11 +147,9 @@ public class ExpoGattServerModule: Module {
           cbServices.append(service)
         }
         let delegations = try self.parseDelegations(services)
-        // Only the parsing above is queue-agnostic; the manager is built and opened on the main queue.
         let parsedValues = initialValues
         DispatchQueue.main.async {
-          // The application asked to stop while this create was still parsing. Publishing now would
-          // leave a database nothing holds a handle to, so nothing is opened at all.
+          // Stop was issued during parsing; skip publishing to avoid orphaned database.
           guard self.serverStopEpoch == epoch else {
             promise.reject("ERR_NO_SERVER", "Server was stopped before it finished opening")
             return
@@ -185,8 +164,7 @@ public class ExpoGattServerModule: Module {
             ])
           }
           self.manager = mgr
-          // Resolves only once CoreBluetooth is powered on and has acknowledged every service, so a
-          // resolved promise means the server really is advertisable.
+          // Resolves once CoreBluetooth is powered on and services are acknowledged.
           mgr.open(services: cbServices, initialValues: parsedValues) { error in
             if let error = error as? GattServerError {
               promise.reject(error.code, error.message)
@@ -198,8 +176,7 @@ public class ExpoGattServerModule: Module {
           }
         }
       } catch let error as GattServerError {
-        // Keeps a specific code such as ERR_UNSUPPORTED, which the generic catch below flattens into
-        // ERR_CREATE_SERVER.
+        // Preserve specific error codes (ERR_UNSUPPORTED, etc.); generic catch flattens to ERR_CREATE_SERVER.
         promise.reject(error.code, error.message)
       } catch {
         promise.reject("ERR_CREATE_SERVER", error.localizedDescription)
@@ -216,11 +193,7 @@ public class ExpoGattServerModule: Module {
       let serviceUuids: [CBUUID]?
       do {
         try self.rejectUnsupportedAdvertisingOptions(config)
-        // `as? [String]` is all-or-nothing: one non-string made the whole cast `nil`, which reads here
-        // as "the key was absent" — so the advertisement went on the air carrying *no* service UUIDs
-        // and the promise resolved, leaving a central filtering on one unable to find the peripheral.
-        // The same silent-drop the other five configuration arrays were converted away from; this was
-        // the site that kept the old cast. Android already refuses the same input.
+        // Parse serviceUuids with validation; as? [String] silently fails if any element is non-string.
         let serviceUuidStrings: [String]? = try parseTypedArray(
           config["serviceUuids"], field: "serviceUuids", elementDescription: "UUID strings"
         )
@@ -251,16 +224,12 @@ public class ExpoGattServerModule: Module {
           promise.reject("ERR_NO_SERVER", "Server not created. Call createServer first.")
           return
         }
-        // Waits for the database to be published rather than sampling the state: it is `.unknown` until
-        // peripheralManagerDidUpdateState fires and the publication that follows takes further
-        // main-queue turns, which rejected perfectly healthy calls made straight after createServer.
-        // The manager does the waiting, because only it can tell a stop from a genuine release.
+        // Manager waits for database publication; state is .unknown until peripheralManagerDidUpdateState + service acknowledgment.
         mgr.startAdvertising(
           localName: localName, serviceUuids: serviceUuids, timeoutMs: timeoutMs
         ) { error in
           if let error = error as? GattServerError {
-            // Keeps ERR_NO_SERVER and ERR_BLUETOOTH, which the generic branch below would flatten into
-            // ERR_ADVERTISE.
+            // Preserve specific codes; generic branch flattens to ERR_ADVERTISE.
             promise.reject(error.code, error.message)
           } else if let error = error {
             promise.reject("ERR_ADVERTISE", error.localizedDescription)
@@ -271,14 +240,8 @@ public class ExpoGattServerModule: Module {
       }
     }
 
-    // Kept synchronous, so the JavaScript signature stays `void` and matches Android's. The teardown
-    // itself is deferred because it must run on the main queue, and blocking the JavaScript thread on
-    // it invites a deadlock against a main thread already waiting on JavaScript.
-    //
-    // This body runs on the JavaScript thread, while an `AsyncFunction` body runs on Expo's own worker
-    // queue — so this is **not** ordered against an un-awaited `startAdvertising`, and a stop issued
-    // second can reach the manager first. The shared layer carries the application's call order across
-    // that gap; see `advertisingStopEpoch` in `src/index.ts`.
+    // Synchronous (matches Android void signature); teardown deferred to main queue to avoid JS thread deadlock.
+    // Note: stopAdvertising can race with un-awaited startAdvertising; call order tracked in JavaScript.
     Function("stopAdvertising") {
       DispatchQueue.main.async { self.manager?.stopAdvertising() }
     }
@@ -301,8 +264,7 @@ public class ExpoGattServerModule: Module {
         promise.reject("ERR_NOTIFY", error.localizedDescription)
         return
       }
-      // `requireSubscription` has no iOS counterpart: CoreBluetooth only ever transmits to subscribed
-      // centrals, so an unsubscribed send cannot be forced through.
+      // CoreBluetooth only transmits to subscribed centrals; requireSubscription always true on iOS.
       DispatchQueue.main.async {
         guard let mgr = self.manager else {
           promise.reject("ERR_NO_SERVER", "Server not created")
@@ -332,10 +294,7 @@ public class ExpoGattServerModule: Module {
       }
     }
 
-    // The three numbers are declared as `Double` and narrowed by `parseIntArgument`, not declared as
-    // `Int` and narrowed by expo-modules-core: its `Int(double.rounded())` traps on `NaN` or an
-    // infinity, and that trap fires before any code here runs — so `sendResponse(dev, NaN, …)` killed
-    // the process instead of rejecting. See `parseIntArgument`.
+    // Parameters are Double (not Int) because expo-modules-core's Int(double.rounded()) traps on NaN/infinity before code runs.
     AsyncFunction("sendResponse") { (
       deviceId: String,
       rawRequestId: Double,
@@ -367,12 +326,7 @@ public class ExpoGattServerModule: Module {
         return
       }
       DispatchQueue.main.async {
-        // `REQUEST_NOT_FOUND` rather than `ERR_NO_SERVER`, because that is what the situation is:
-        // answering a request the module no longer holds is a missing request. With no manager there are
-        // no pending requests at all — `stop` answered and discarded them — so the lookup could only have
-        // failed anyway. Android's binding reports the same code here, for the same reason;
-        // `docs/api.md` invites branching on `code` without branching on `Platform.OS`, and this is one
-        // of the places that has to hold for that to be true.
+        // REQUEST_NOT_FOUND not ERR_NO_SERVER: answering a request the module doesn't hold is a missing request. Android also uses this code.
         guard let mgr = self.manager else {
           promise.reject(
             "REQUEST_NOT_FOUND", "Request \(requestId) not found or already responded"
@@ -407,8 +361,7 @@ public class ExpoGattServerModule: Module {
         try validateUuid(serviceUuid, field: "service")
         try validateUuid(characteristicUuid, field: "characteristic")
         data = try parseBytes(value, field: "characteristic")
-        // The same bound a configured value gets: this is the other way an application sets an
-        // attribute's value, and the specification bounds the attribute rather than the route to it.
+        // Same bound as configured values: spec bounds the attribute, not the update route.
         try assertAttributeValueLength(data, field: "characteristic")
       } catch {
         promise.reject("ERR_UPDATE_VALUE", error.localizedDescription)
@@ -434,11 +387,9 @@ public class ExpoGattServerModule: Module {
       }
     }
 
-    // Synchronous and deferred for the same reasons as `stopAdvertising`.
+    // Synchronous and deferred for same reasons as stopAdvertising.
     Function("stopServer") {
-      // Recorded here, on the JS thread, rather than inside the block: a `createServer` still parsing
-      // on the worker queue reaches the main queue after this block does, and would otherwise publish
-      // a database this call was meant to prevent.
+      // Record on JS thread to catch stops issued during createServer parsing on worker queue.
       self.recordServerStop()
       DispatchQueue.main.async {
         self.manager?.stop()
@@ -447,7 +398,7 @@ public class ExpoGattServerModule: Module {
     }
 
     OnDestroy {
-      // The block captures the module strongly, so deferring the teardown cannot skip it.
+      // Block captures module strongly, so teardown always runs.
       self.recordServerStop()
       DispatchQueue.main.async {
         self.manager?.stop()
@@ -456,12 +407,7 @@ public class ExpoGattServerModule: Module {
     }
   }
 
-  /// `CBPeripheralManager.startAdvertising` silently ignores every key but the local name and service
-  /// UUIDs. Only the options that change what a scanner *observes* are rejected here, since dropping
-  /// those yields a peripheral that appears to advertise yet can never be found by a central filtering
-  /// on them. `mode`, `txPowerLevel` and `includeTxPowerLevel` are merely radio hints, warned about in
-  /// JavaScript instead — rejecting them would force every cross-platform caller to branch on platform
-  /// just to tune Android's battery use.
+  /// CBPeripheralManager silently ignores most keys; only reject options that affect scanner visibility (manufacturerData, serviceData, connectable).
   private func rejectUnsupportedAdvertisingOptions(_ config: [String: Any]) throws {
     if let entries = config["manufacturerData"] as? [[String: Any]], !entries.isEmpty {
       throw GattServerError.advertisingOptionUnsupported(
@@ -484,7 +430,6 @@ public class ExpoGattServerModule: Module {
   }
 
 
-  /// Anything outside 0...255 would be silently corrupted by a clamping or truncating conversion.
   private func parseRequestTimeout(_ value: Any?) throws -> Int {
     try parseTimeoutMs(
       value,
@@ -497,7 +442,6 @@ public class ExpoGattServerModule: Module {
     )
   }
 
-  /// Absent or empty `delegate` configuration produces no entry, so the default stays fully automatic.
   private func parseDelegations(
     _ services: [[String: Any]]
   ) throws -> [CharacteristicAddress: CharacteristicDelegation] {
@@ -581,13 +525,7 @@ public class ExpoGattServerModule: Module {
     let properties = try parseProperties(propertyNames)
     let permissions = try parsePermissions(permissionNames)
 
-    // A CBMutableCharacteristic created with a non-nil value is forced read-only by CoreBluetooth, and
-    // adding it with any other properties or permissions raises "Characteristics with cached values
-    // must be read-only" — so the characteristic is always published with a dynamic (nil) value and the
-    // initial value served from this cache, letting any configuration Android accepts work here too.
-    //
-    // `[]` is a configured value, not an absent one: it declares a present but zero-length attribute,
-    // which Android caches and auto-answers reads from.
+    // CBMutableCharacteristic with non-nil value is forced read-only. Use nil value + cache to support full property/permission configs.
     if let bytes = try parseAttributeValue(map["value"], field: "characteristic") {
       initialValues[CharacteristicAddress(service: service, characteristic: uuid)] = bytes
     }
@@ -603,9 +541,7 @@ public class ExpoGattServerModule: Module {
       map["descriptors"], field: "descriptors", elementDescription: "descriptor objects"
     )
     if let descriptorList = descriptorList, !descriptorList.isEmpty {
-      // Checked *before* the assignment, which is the only place it can be: the setter raises an
-      // uncatchable Objective-C exception for a repeat. JavaScript rejects it too; repeated here
-      // because the native module is reachable directly. See `assertUniqueDescriptorUuids`.
+      // Setter raises uncatchable Objective-C exception on duplicate; validate before assignment via assertUniqueDescriptorUuids.
       let descriptors = try descriptorList.map { try parseDescriptorConfig($0) }
       try assertUniqueDescriptorUuids(descriptors.map(\.uuid), characteristic: uuid)
       characteristic.descriptors = descriptors
@@ -614,9 +550,7 @@ public class ExpoGattServerModule: Module {
     return characteristic
   }
 
-  /// `CBMutableDescriptor` is documented as supporting "only the `Characteristic User Description` and
-  /// `Characteristic Presentation Format` descriptors". Anything else is refused rather than handed to
-  /// CoreBluetooth, which would reject the whole service at publication time.
+  /// CBMutableDescriptor supports only Characteristic User Description (0x2901) and Presentation Format (0x2904); others rejected to avoid service publication failure.
   private func parseDescriptorConfig(_ map: [String: Any]) throws -> CBMutableDescriptor {
     let uuid = try parseUuid(map["uuid"], field: "descriptor")
     // An absent value publishes a zero-length descriptor, which is what Android's
@@ -625,8 +559,7 @@ public class ExpoGattServerModule: Module {
 
     switch uuid {
     case CBUUID(string: CBUUIDCharacteristicUserDescriptionString):
-      // Apple models this descriptor's value as an NSString, so anything but UTF-8 has no
-      // representation to publish.
+      // User Description is NSString on iOS; value must be valid UTF-8.
       guard let text = String(data: bytes, encoding: .utf8) else {
         throw GattServerError.configurationUnsupported(
           option: "descriptor \(uuid.uuidString)",

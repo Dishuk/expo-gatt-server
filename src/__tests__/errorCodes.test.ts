@@ -23,18 +23,8 @@ function codedError(code: string): Error & { code: string } {
   return Object.assign(new Error(`Rejected with ${code}`), { code });
 }
 
-/**
- * Every entry point that can reject with a native code.
- *
- * Listed per **entry point**, not per code. The wrapper has no per-code logic — it returns the native
- * promise and the rejection propagates untouched — so the codes a platform can raise are documentation,
- * not behaviour, and enumerating forty of them here asserted the same pass-through forty times while
- * proving nothing about the native side that raises them.
- *
- * What can genuinely break is per entry point: one that grows a `try`/`catch` and rethrows a plain
- * `Error`, or awaits and re-wraps, silently strips the code a consumer branches on. That is what this
- * pins, once each.
- */
+// Every entry point that can reject with a native code, listed once each — the wrapper has no
+// per-code logic, so this pins that each entry point still passes the native rejection through.
 const CODED_ENTRY_POINTS: [string, jest.Mock, () => Promise<unknown>][] = [
   ['createServer', nativeModuleMock.createServer, () => createServer([])],
   ['startAdvertising', nativeModuleMock.startAdvertising, () => startAdvertising()],
@@ -67,10 +57,8 @@ describe('a native rejection reaches the caller unchanged', () => {
   );
 });
 
-/**
- * Only this direction holds. The converse does not: `serverStoppedError` and `advertisingCancelledError`
- * are raised here with a code and never reach a platform, and a missing native module throws without one.
- */
+// The converse does not hold: `serverStoppedError` and `advertisingCancelledError` are raised here
+// with a code and never reach a platform.
 describe('a validation failure carries no code and never reaches the platform', () => {
   const validationFailures: [string, () => Promise<unknown>][] = [
     ['createServer with a malformed service UUID', () => createServer([{ uuid: 'nope' } as never])],

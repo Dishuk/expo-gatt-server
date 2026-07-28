@@ -3,13 +3,11 @@ import XCTest
 
 @testable import GattServerCore
 
-/// How a written fragment lands in the attribute it targets.
+/// How a written fragment lands in the attribute it targets — decides what the *next* read returns.
 ///
-/// This is the part of the peripheral that decides what the *next* read returns, so a mistake here is
-/// visible on the wire and silent everywhere else. It is also where iOS and Android diverged: iOS had
-/// only `CBATTRequest.offset` to go on and treated every fragment at offset 0 as a whole-value
-/// replacement, truncating an attribute that a long write did not cover to its end, while Android —
-/// which is told the procedure directly — kept the remainder.
+/// iOS has only `CBATTRequest.offset` to go on; Android is told the write procedure directly. iOS used
+/// to treat every fragment at offset 0 as a whole-value replacement, truncating an attribute that a
+/// long write did not fully cover.
 final class WriteAssemblyTests: XCTestCase {
   private var manager: GattServerManager!
 
@@ -156,13 +154,8 @@ final class WriteAssemblyTests: XCTestCase {
   private let address = CharacteristicAddress(
     service: CBUUID(string: "180D"), characteristic: CBUUID(string: "2A37")
   )
-  /// Drives the real assembly `didReceiveWrite` uses, rather than a copy of it.
-  ///
-  /// This used to re-implement the fold, with a comment saying so — and the copy had drifted from the
-  /// original in ways that mattered: it decided the queued-write heuristic across the whole batch
-  /// instead of per attribute, and knew nothing of the delegated/automatic split. So the cases below
-  /// asserted against the test's own accumulator. `assembleWriteBatch` exists to be called from both
-  /// places, taking plain fragments because `CBATTRequest` has no public initialiser.
+  /// Drives the real assembly `didReceiveWrite` uses, rather than a copy of it. `assembleWriteBatch`
+  /// takes plain fragments because `CBATTRequest` has no public initialiser.
   private func assemble(current: Data, fragments: [(offset: Int, bytes: [UInt8])]) -> Data? {
     manager.assembleWriteBatch(
       fragments.map {
@@ -226,8 +219,6 @@ final class WriteAssemblyTests: XCTestCase {
 
   /// Two Write Without Response commands to *one* characteristic, coalesced into a single callback.
   /// Each replaces, so the attribute is left holding exactly the last one — the value Android leaves.
-  /// Read as a queued write, the first splice kept `[3, 4, 5]` behind the 3-byte write and the second
-  /// then kept `[5]` behind the 4-byte one, so a read afterwards served bytes no central had written.
   func testCoalescedCommandsToOneAttributeReplaceRatherThanKeepingATail() {
     let result = assemble(
       current: data([1, 2, 3, 4, 5]),
@@ -253,9 +244,7 @@ final class WriteAssemblyTests: XCTestCase {
 extension WriteAssemblyTests {
   func testEachAttributeGetsItsOwnQueuedWriteDecision() {
     let manager = GattServerManager(requestTimeoutMs: 1000)
-    // Two Write Without Response commands the stack coalesced: each is a lone part at offset 0, so
-    // neither is a queued write and both must truncate. Pooling the offsets made the pair look like a
-    // two-fragment run, and each attribute then kept a tail it should have dropped.
+    // Two coalesced commands, each a lone part at offset 0: neither is a queued write, both truncate.
     let fragments = [
       GattServerManager.WriteFragment(
         address: CharacteristicAddress(

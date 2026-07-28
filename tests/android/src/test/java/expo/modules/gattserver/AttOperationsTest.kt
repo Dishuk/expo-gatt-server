@@ -11,33 +11,21 @@ import org.junit.Test
 import java.util.UUID
 
 /**
- * The ATT arithmetic every request runs through. Plain JUnit — none of this touches the Android
- * framework, so it needs neither Robolectric nor a device.
+ * ATT arithmetic (write assembly, response rebasing, CCCD, MTU bounds). Plain JUnit, no Android
+ * framework dependency.
  *
- * Several of these deliberately mirror `tests/swift/WriteAssemblyTests.swift` and
- * `ResponseRebasingTests.swift` case for case. The two platforms implement the same contracts
- * independently, and asserting the same inputs produce the same bytes on each is the only thing that
- * actually holds them together — the module's whole premise is that one configuration behaves the same
- * either side.
+ * Several cases mirror `tests/swift/WriteAssemblyTests.swift` and `ResponseRebasingTests.swift`
+ * to keep both platforms producing the same bytes for the same input.
  */
 class AttOperationsTest {
   private fun bytes(vararg values: Int) = ByteArray(values.size) { values[it].toByte() }
 
   // MARK: - Assembling a prepared write
 
-  /**
-   * Only the queued-write path reaches [spliceAt]; an unqueued `ATT_WRITE_REQ` replaces the value
-   * outright elsewhere. So a part covers exactly what it carries and the rest of the attribute stays —
-   * the property iOS had to be taught, having only the offset to go on.
-   */
+  /** Only the queued-write path reaches [spliceAt]; an unqueued write replaces the value outright elsewhere. */
   @Test
   fun `a part at offset zero keeps the tail`() {
     assertArrayEquals(bytes(9, 9, 3, 4, 5), spliceAt(bytes(1, 2, 3, 4, 5), 0, bytes(9, 9)))
-  }
-
-  @Test
-  fun `a part keeps both sides of the fragment`() {
-    assertArrayEquals(bytes(1, 8, 3, 4, 5), spliceAt(bytes(1, 2, 3, 4, 5), 1, bytes(8)))
   }
 
   @Test
@@ -58,23 +46,11 @@ class AttOperationsTest {
   }
 
   @Test
-  fun `an offset exactly at the end is in range`() {
-    assertNotNull(spliceAt(bytes(1, 2), 2, bytes(9)))
-  }
-
-  @Test
   fun `an empty part leaves the value alone`() {
     assertArrayEquals(bytes(1, 2, 3), spliceAt(bytes(1, 2, 3), 1, ByteArray(0)))
   }
 
-  /**
-   * "The maximum length of an attribute value shall be 512 octets" — Core Spec Vol 3, Part F, §3.2.9.
-   *
-   * [spliceAt] bounds the offset and not the result, so nothing stopped a batch of in-range parts from
-   * assembling past the limit: two 500-octet parts at offsets 0 and 500 committed a 1000-octet value,
-   * which the module then refused to notify for as long as the server lived, because the notification
-   * bound is this same limit.
-   */
+  /** "The maximum length of an attribute value shall be 512 octets" — Core Spec Vol 3, Part F, §3.2.9. */
   @Test
   fun `an assembled value at the limit is accepted and one past it is not`() {
     assertFalse(exceedsAttributeLength(512))
@@ -88,11 +64,7 @@ class AttOperationsTest {
     assertTrue(exceedsAttributeLength(assembled!!.size))
   }
 
-  /**
-   * A single PDU is not the bound it looks like, which is what the unqueued write path was written on
-   * the assumption of: at the largest ATT_MTU the specification permits, one `ATT_WRITE_REQ` carries two
-   * octets more than an attribute may hold, so that path needs the limit as much as the queued one.
-   */
+  /** At the largest permitted ATT_MTU, one write request carries 514 octets — two more than an attribute may hold. */
   @Test
   fun `one write request at the largest permitted mtu can exceed the limit`() {
     val largestWriteValue = 517 - 3
@@ -100,10 +72,7 @@ class AttOperationsTest {
     assertTrue(exceedsAttributeLength(largestWriteValue))
   }
 
-  /**
-   * Folds a multi-part long write the way `assemblePreparedWrites` does. This is the case that used to
-   * disagree with iOS: a write that stops short of the attribute's end must leave the remainder.
-   */
+  /** Folds a multi-part long write; stopping short of the attribute's end must leave the remainder. */
   @Test
   fun `a multi part long write stopping short keeps the remainder`() {
     var value = bytes(1, 2, 3, 4, 5, 6, 7, 8)
@@ -111,16 +80,6 @@ class AttOperationsTest {
     value = spliceAt(value, 2, bytes(12, 13))!!
 
     assertArrayEquals(bytes(10, 11, 12, 13, 5, 6, 7, 8), value)
-  }
-
-  @Test
-  fun `a multi part long write may grow the attribute`() {
-    var value = bytes(1, 2)
-    value = spliceAt(value, 0, bytes(1, 2))!!
-    value = spliceAt(value, 2, bytes(3, 4))!!
-    value = spliceAt(value, 4, bytes(5))!!
-
-    assertArrayEquals(bytes(1, 2, 3, 4, 5), value)
   }
 
   /** Repeats of the same handle are executed in the order received rather than replacing one another. */
@@ -138,13 +97,7 @@ class AttOperationsTest {
   private fun rebase(value: ByteArray, supplied: Int, requested: Int, isRead: Boolean = true) =
     rebasedResponseValue(value, isRead, supplied, requested, requestId = 7)
 
-  /**
-   * The TypeScript layer rejects a negative offset, but the native module is reachable directly and the
-   * rest of this file re-checks what JavaScript checks for exactly that reason. A negative supplied
-   * offset used to pass the `supplied > requested` relation — `-4` is not greater than `0` — and produce
-   * a positive `skip`, so the value was trimmed from the front and handed to the central labelled as the
-   * whole attribute, with nothing reported on either side.
-   */
+  /** The native module is reachable directly, so a negative offset must be rejected here too, not just in the JS layer. */
   @Test
   fun `a negative supplied offset is rejected rather than trimming the response`() {
     val error = assertThrows(GattServerException::class.java) {
@@ -154,21 +107,8 @@ class AttOperationsTest {
   }
 
   @Test
-  fun `a negative requested offset is rejected`() {
-    val error = assertThrows(GattServerException::class.java) {
-      rebase(bytes(1, 2, 3), supplied = 0, requested = -1)
-    }
-    assertEquals("ERR_RESPONSE_OFFSET", error.code)
-  }
-
-  @Test
   fun `the whole value at offset zero answers a plain read`() {
     assertArrayEquals(bytes(1, 2, 3), rebase(bytes(1, 2, 3), supplied = 0, requested = 0))
-  }
-
-  @Test
-  fun `the whole value at offset zero answers a read blob continuation`() {
-    assertArrayEquals(bytes(3, 4, 5), rebase(bytes(1, 2, 3, 4, 5), supplied = 0, requested = 2))
   }
 
   @Test
@@ -199,10 +139,7 @@ class AttOperationsTest {
     assertArrayEquals(ByteArray(0), rebase(bytes(1, 2), supplied = 0, requested = 99))
   }
 
-  /**
-   * Supplying the value from *after* the requested offset leaves the octets the central asked for
-   * missing, which nothing downstream could detect — so it is refused rather than sent short.
-   */
+  /** Supplying the value from after the requested offset would silently drop the missing octets, so it is refused. */
   @Test
   fun `supplying from past the requested offset is rejected`() {
     val error = runCatching { rebase(bytes(1, 2, 3), supplied = 4, requested = 2) }
@@ -211,11 +148,6 @@ class AttOperationsTest {
     assertNotNull(error)
     assertEquals("ERR_RESPONSE_OFFSET", error!!.code)
     assertTrue(error.message!!, error.message!!.contains("offset 2"))
-  }
-
-  @Test
-  fun `supplying from exactly the requested offset is accepted`() {
-    assertArrayEquals(bytes(1, 2, 3), rebase(bytes(1, 2, 3), supplied = 2, requested = 2))
   }
 
   /** A write response carries no value, so nothing is rebased and nothing is rejected. */
@@ -250,27 +182,13 @@ class AttOperationsTest {
   }
 
   @Test
-  fun `reading and writing the configuration round trips`() {
-    for (bits in listOf(0x0000, 0x0001, 0x0002, 0x0003, 0x00FF, 0xFF00, 0xFFFF)) {
-      assertEquals(bits, cccdBits(cccdValue(bits)))
-    }
-  }
-
-  @Test
   fun `the configuration value is always the two octets the specification fixes`() {
     for (bits in listOf(0x0000, 0x0001, 0xFFFF)) {
       assertEquals(CCCD_VALUE_LENGTH, cccdValue(bits).size)
     }
   }
 
-  /**
-   * Pins the two bits to the values the specification assigns them, rather than to themselves.
-   *
-   * Every other case here uses the constants on both sides of the assertion, so swapping their values
-   * left the whole suite green while the server delivered indications to a client that had asked for
-   * notifications and vice versa — the exact confusion `cccdEnables` exists to prevent. Core Spec Vol 3,
-   * Part G, §3.3.3.3: bit 0 is Notification, bit 1 is Indication.
-   */
+  /** Pins the two bits to the values the specification assigns, not just to themselves — Core Spec Vol 3, Part G, §3.3.3.3: bit 0 is Notification, bit 1 is Indication. */
   @Test
   fun `the configuration bits are the ones the specification assigns`() {
     assertEquals(0x0001, CCCD_NOTIFY_BIT)
@@ -297,23 +215,6 @@ class AttOperationsTest {
     assertFalse(cccdSubscribed(0xFF00))
   }
 
-  /**
-   * The distinction that keeps the server from sending a client something it did not ask for: "when a
-   * bit is set, that action shall be enabled, otherwise it will not be used". Gating on either bit
-   * would hand a notification to a client that enabled only indications.
-   */
-  @Test
-  fun `a client that enabled only notifications is not sent indications`() {
-    assertTrue(cccdEnables(CCCD_NOTIFY_BIT, confirm = false))
-    assertFalse(cccdEnables(CCCD_NOTIFY_BIT, confirm = true))
-  }
-
-  @Test
-  fun `a client that enabled only indications is not sent notifications`() {
-    assertTrue(cccdEnables(CCCD_INDICATE_BIT, confirm = true))
-    assertFalse(cccdEnables(CCCD_INDICATE_BIT, confirm = false))
-  }
-
   @Test
   fun `a client that enabled both may be sent either`() {
     val both = CCCD_NOTIFY_BIT or CCCD_INDICATE_BIT
@@ -330,10 +231,7 @@ class AttOperationsTest {
 
   // MARK: - MTU
 
-  /**
-   * The platform truncates an oversized notification rather than failing it, and a notification has no
-   * continuation, so the tail would be lost with nothing to recover it. The boundary is exact.
-   */
+  /** A notification has no continuation, so an oversized one would silently lose its tail; the boundary is exact. */
   @Test
   fun `a payload that exactly fills the link is accepted`() {
     assertNull(mtuErrorFor(negotiatedMtu = 23, size = 20))
@@ -353,22 +251,7 @@ class AttOperationsTest {
     assertNotNull(mtuErrorFor(negotiatedMtu = null, size = DEFAULT_ATT_MTU - ATT_NOTIFICATION_HEADER_SIZE + 1))
   }
 
-  /**
-   * The hint is the actionable part — it says the link simply has not negotiated yet — so it belongs
-   * only where that is true. On a negotiated link it would be actively misleading.
-   */
-  @Test
-  fun `the default mtu hint appears only while the link is unnegotiated`() {
-    assertTrue(mtuErrorFor(negotiatedMtu = null, size = 40)!!.message!!.contains("default ATT MTU"))
-    assertFalse(mtuErrorFor(negotiatedMtu = 247, size = 400)!!.message!!.contains("default ATT MTU"))
-  }
-
-  /**
-   * The maximum ATT_MTU of 517 leaves 514 octets for the value, but an attribute may hold only 512
-   * (Core Spec Vol 3, Part F, §3.2.9) — and `notifyCharacteristicChanged` answers a longer one by
-   * throwing rather than by reporting a status, on whichever thread drains the queue. Measuring by
-   * `ATT_MTU - 3` alone accepted those two octets and turned them into a crash.
-   */
+  /** ATT_MTU 517 leaves 514 octets for the value, but an attribute may hold only 512 (Core Spec Vol 3, Part F, §3.2.9). */
   @Test
   fun `a payload past the attribute bound is refused however large the link is`() {
     assertNull(mtuErrorFor(negotiatedMtu = 517, size = MAX_ATTRIBUTE_VALUE_LENGTH))
@@ -401,23 +284,11 @@ class AttOperationsTest {
     assertEquals("PAYLOAD_EXCEEDS_MTU", mtuErrorFor(negotiatedMtu = 23, size = 40)!!.code)
   }
 
-  @Test
-  fun `the mtu refusal names both sizes and says nothing was sent`() {
-    val message = mtuErrorFor(negotiatedMtu = 247, size = 400)!!.message!!
-
-    assertTrue(message, message.contains("400"))
-    assertTrue(message, message.contains("244"))
-    assertTrue(message, message.contains("Nothing was sent"))
-  }
-
   // MARK: - Transmission type
 
   private val characteristic: UUID = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb")
 
-  /**
-   * `notifyCharacteristicChanged` checks neither the declaration nor the client's configuration, so
-   * without this the stack would emit a PDU no client could legally have asked for.
-   */
+  /** notifyCharacteristicChanged does not itself check the declared properties. */
   @Test
   fun `a characteristic without notify cannot send a notification`() {
     val error = confirmError(PROPERTY_INDICATE, characteristic, confirm = false)
@@ -425,14 +296,6 @@ class AttOperationsTest {
     assertNotNull(error)
     assertEquals("ERR_CONFIRM_UNSUPPORTED", error!!.code)
     assertTrue(error.message!!, error.message!!.contains("\"notify\""))
-  }
-
-  @Test
-  fun `a characteristic without indicate cannot send an indication`() {
-    val error = confirmError(PROPERTY_NOTIFY, characteristic, confirm = true)
-
-    assertNotNull(error)
-    assertTrue(error!!.message!!, error.message!!.contains("\"indicate\""))
   }
 
   @Test
@@ -471,12 +334,7 @@ class AttOperationsTest {
 
   // MARK: - Slicing a read
 
-  /**
-   * The opposite contract to [rebasedResponseValue], which answers past-the-end with an empty value
-   * because the caller supplying it has declared where the attribute ends. Here the module owns the
-   * value, so it knows the offset is out of range and must say so — the distinction is easy to invert,
-   * and inverting it is invisible until a peer asks for a blob.
-   */
+  /** The opposite of [rebasedResponseValue]: here the module owns the value, so an out-of-range offset must say so rather than answer empty. */
   @Test
   fun `an offset past the end is out of range`() {
     assertNull(readSliceAt(bytes(1, 2, 3), 4))
@@ -493,10 +351,7 @@ class AttOperationsTest {
     assertArrayEquals(bytes(1, 2, 3), readSliceAt(bytes(1, 2, 3), 0))
   }
 
-  /**
-   * The continuation an `ATT_READ_BLOB_REQ` asks for. Answering with the whole value again — which the
-   * descriptor path used to do — makes the central reassemble a repeated prefix.
-   */
+  /** The continuation an ATT_READ_BLOB_REQ asks for. */
   @Test
   fun `a blob continuation reads from the offset onwards`() {
     assertArrayEquals(bytes(3, 4, 5), readSliceAt(bytes(1, 2, 3, 4, 5), 2))

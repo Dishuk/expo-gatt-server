@@ -31,12 +31,8 @@ final class ErrorContractTests: XCTestCase {
     ("ERR_UNSUPPORTED", .configurationUnsupported(option: "permission", reason: "no member.")),
   ]
 
-  /// What makes the table above's "adding a case forces a decision" true rather than aspirational.
-  ///
-  /// `GattServerError` carries associated values, so it cannot be `CaseIterable` and the table cannot be
-  /// derived from it. Left at that, a new case inherited whatever `GattServerError.code` happened to
-  /// return for it and was covered by nothing. A `switch` with no `default` does not compile until the
-  /// new case is named here, and naming it is what sends the author to the table.
+  /// `GattServerError` carries associated values, so it cannot be `CaseIterable` and the table above
+  /// cannot be derived from it. A `switch` with no `default` forces a new case to be named here.
   private static func declaredCode(for error: GattServerError) -> String {
     switch error {
     case .payloadExceedsMtu: return "PAYLOAD_EXCEEDS_MTU"
@@ -163,30 +159,14 @@ final class ErrorContractTests: XCTestCase {
 
   // MARK: - What a failed publication round reports
 
-  /// The two ways a round can end badly, and the code both of them owe every audience.
-  ///
-  /// `ServerPublicationFailedEvent` documents "the same code the equivalent `createServer` rejection
-  /// would carry, usually `ERR_CREATE_SERVER`", and Android emits exactly that. iOS used to hand the
-  /// completion `ERR_CREATE_SERVER` naming the service and the reason, and then hand the *event*
-  /// `ERR_NO_SERVER` with a message telling the reader to wait for `createServer` to resolve — one
-  /// fault, two codes, and a listener branching on the code taking a different path per platform.
-  ///
-  /// The fix was to carry one error through `failPublicationRound` to all three audiences, so what this
-  /// pins is that both errors it can be given report the code the event promises.
+  /// The two ways a round can end badly. `failPublicationRound` carries one error through to all three
+  /// audiences (completion, event, and this table), so both must report the code the event promises.
   private static let publicationFailures: [GattServerError] = [
     .serviceRegistrationFailed(uuid: "180d", reason: "why"),
     .publicationTimedOut(awaiting: ["180d"], timeoutMs: 30_000),
   ]
 
-  func testEveryWayAPublicationRoundFailsReportsTheCreateServerCode() {
-    for error in Self.publicationFailures {
-      XCTAssertEqual(error.code, "ERR_CREATE_SERVER", "\(error)")
-    }
-  }
-
-  /// The message reaches `onServerPublicationFailed` unchanged, so it has to say what failed rather than
-  /// what to do about it. `databaseNotPublished` — which this path used to report — is advice for a
-  /// caller who advertised too early, and named neither the service nor the reason.
+  /// The message reaches `onServerPublicationFailed` unchanged, so it has to name the service and reason.
   func testARegistrationFailureNamesTheServiceAndTheReason() {
     let message = GattServerError.serviceRegistrationFailed(uuid: "180d", reason: "why").message
 

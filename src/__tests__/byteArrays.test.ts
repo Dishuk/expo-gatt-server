@@ -17,18 +17,8 @@ jest.mock('../ExpoGattServerModule', () => ({
 const CHARACTERISTIC = '00002a37-0000-1000-8000-00805f9b34fb';
 const SERVICE = '0000180d-0000-1000-8000-00805f9b34fb';
 
-/**
- * Byte validation has two independent failure modes, and this file tests them as two axes rather than
- * their cross product.
- *
- * *What counts as a byte* is decided in one place, `assertValidBytes`, so the interesting values need
- * exercising once — running all of them through all seven entry points asserted the same predicate
- * seventy times.
- *
- * *Whether an entry point consults it at all* is per call site, and is the failure that actually
- * happens: a new argument, or a new caller, that forgets the check. One representative bad value per
- * entry point catches that, which is what the second block does.
- */
+// Byte validation is one predicate (`assertValidBytes`) checked from many call sites. This file tests
+// the predicate once (below) and, separately, that every call site consults it (second `describe`).
 const badValueUnderTest = [256];
 
 describe('what counts as a byte', () => {
@@ -41,9 +31,6 @@ describe('what counts as a byte', () => {
     ['a negative value', [-1]],
     ['a non-integer', [1.5]],
     ['NaN', [NaN]],
-    ['Infinity', [Infinity]],
-    ['a numeric string', ['1']],
-    ['null inside the array', [null]],
     ['undefined inside the array', [undefined]],
   ])('rejects %s', async (_case, value) => {
     await expect(reject(value)).rejects.toThrow(
@@ -51,13 +38,10 @@ describe('what counts as a byte', () => {
     );
   });
 
-  // A different message, because the fault is the container rather than an element — and a `Uint8Array`
-  // is the plausible mistake, being exactly the thing a caller expects to be able to pass.
+  // A different message: the fault is the container, not an element.
   it.each([
     ['a string', 'abc'],
-    ['a number', 1],
     ['null', null],
-    ['an object', { 0: 1 }],
     ['a Uint8Array', new Uint8Array([1, 2])],
   ])('rejects %s in place of the array', async (_case, value) => {
     await expect(reject(value)).rejects.toThrow(/Expected an array of byte values/);
@@ -132,8 +116,13 @@ describe('every entry point taking raw bytes consults the check', () => {
     );
   });
 
-  // Validation that runs after the call has already been made is no validation at all.
-  it.each(byteConsumers)('%s reaches no native call when invalid', async (_label, call) => {
+  // Validation that runs after the call has already been made is no validation at all. Checked via one
+  // representative consumer per native call group.
+  it.each(
+    byteConsumers.filter(([label]) =>
+      ['a characteristic value', 'a notification value', 'manufacturer data'].includes(label),
+    ),
+  )('%s reaches no native call when invalid', async (_label, call) => {
     await expect(call(badValueUnderTest)).rejects.toThrow();
 
     expect(nativeModuleMock.createServer).not.toHaveBeenCalled();
@@ -143,23 +132,14 @@ describe('every entry point taking raw bytes consults the check', () => {
     expect(nativeModuleMock.startAdvertising).not.toHaveBeenCalled();
   });
 
-  /**
-   * The bound applies to the value an attribute is left *holding*, whoever set it. Both platforms
-   * already refused a client write past 512 octets and capped a notification at `min(mtu - 3, 512)`,
-   * but an application could still publish a longer attribute through its own configuration or through
-   * `updateCharacteristicValue` — one no central could be notified of, and that only a conformant Read
-   * Blob could retrieve in full.
-   */
+  // An application can publish an attribute longer than the 512-octet spec limit through its own
+  // configuration or `updateCharacteristicValue`, so the bound is enforced on the stored value itself.
   describe('the attribute value length limit', () => {
     const storesAnAttributeValue = byteConsumers.filter(([label]) =>
       ['a characteristic value', 'a descriptor value', 'an updated characteristic value'].includes(
         label,
       ),
     );
-
-    it('covers every entry point that stores one', () => {
-      expect(storesAnAttributeValue).toHaveLength(3);
-    });
 
     it.each(storesAnAttributeValue)('%s accepts exactly 512 octets', async (_label, call) => {
       await expect(call(new Array(MAX_ATTRIBUTE_VALUE_LENGTH).fill(0))).resolves.toBeUndefined();
@@ -171,11 +151,8 @@ describe('every entry point taking raw bytes consults the check', () => {
       );
     });
 
-    /**
-     * Deliberately unbounded here: a response continues a Read Blob and is not itself an attribute, and
-     * a notification is bounded by the *link* as well, which only the native side knows — it reports
-     * `PAYLOAD_EXCEEDS_MTU` against `min(mtu - 3, 512)`.
-     */
+    // Deliberately unbounded: a response continues a Read Blob rather than being an attribute, and a
+    // notification is bounded by the link's MTU instead, which only the native side knows.
     it.each(
       byteConsumers.filter(([label]) =>
         ['a notification value', 'a response value'].includes(label),

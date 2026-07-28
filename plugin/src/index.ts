@@ -5,50 +5,24 @@ import { withGattServerIos } from './withGattServerIos';
 
 export type ExpoGattServerPluginProps = {
   /**
-   * `NSBluetoothAlwaysUsageDescription`, which iOS requires before the app may touch CoreBluetooth at
-   * all. A string set here replaces whatever the app config holds; `false` leaves the key untouched,
-   * for an app that would rather write it itself. Omitting it fills in a generic description only when
-   * the key is otherwise absent, so an existing `ios.infoPlist` entry still wins.
-   *
+   * NSBluetoothAlwaysUsageDescription. String replaces config, false leaves untouched, undefined fills default if absent.
    * @platform ios
    */
   bluetoothAlwaysPermission?: string | false;
   /**
-   * Add `bluetooth-peripheral` to `UIBackgroundModes`, letting the peripheral keep advertising and
-   * answering requests while the app is backgrounded. Defaults to `false`: the mode is App Store
-   * reviewable and useless to a foreground-only app.
-   *
-   * Only ever adds, the same way `requireBluetoothLeHardware` does — a mode another plugin or the app
-   * config declared is never taken back out. So turning this off does not undo a project that was
-   * prebuilt with it on: `npx expo prebuild --clean`, or removing the entry from `ios/`'s `Info.plist`,
-   * is what does. Left in an app that no longer advertises in the background, it is a capability App
-   * Store review will ask to have justified.
-   *
+   * Add bluetooth-peripheral to UIBackgroundModes. Only adds, never removes—turning off requires prebuild --clean.
    * @platform ios
    */
   bluetoothPeripheralBackgroundMode?: boolean;
   /**
-   * Whether the app declares `android.hardware.bluetooth_le` as required. Defaults to `false`,
-   * matching the module's own manifest, so a device without BLE hardware can still install the app.
-   * Set it to `true` if the app genuinely cannot work without BLE and should be filtered off Google
-   * Play accordingly. A requirement another plugin or the app config already declared is left as it
-   * is, so this only ever adds the declaration — it never relaxes one.
-   *
+   * Declare android.hardware.bluetooth_le required; only adds, never relaxes existing declarations.
    * @platform android
    */
   requireBluetoothLeHardware?: boolean;
 };
 
 /**
- * Checks what the types cannot.
- *
- * Plugin props come from `app.json`, which is untyped JSON at prebuild time, so
- * `ExpoGattServerPluginProps` constrains nobody. The values land straight in an `Info.plist` entry and
- * an `AndroidManifest.xml` attribute, where a wrong type does not fail — it succeeds into something
- * quietly wrong. `bluetoothAlwaysPermission: true` is not a valid plist string, so iOS reads the key as
- * absent and terminates the app the moment it touches CoreBluetooth — the exact failure this plugin
- * exists to prevent. `requireBluetoothLeHardware: "false"` is a truthy string, so it sets
- * `android:required="true"` and filters the app off Google Play. Both prebuild silently today.
+ * Plugin props are untyped JSON that lands directly in plist/manifest. Wrong types succeed silently.
  */
 function assertValidProps(props: ExpoGattServerPluginProps): void {
   if (props === null || typeof props !== 'object' || Array.isArray(props)) {
@@ -57,12 +31,7 @@ function assertValidProps(props: ExpoGattServerPluginProps): void {
     );
   }
 
-  // The same rule the module applies to `createServer`'s own configuration, for the same reason: every
-  // layer below reads the keys it knows and ignores the rest, so a misspelling is not an error anywhere
-  // — it is simply absent. `requireBluetoothLEHardware` is one capital away from the real name and is
-  // read by nothing, so the app prebuilds clean and ships `android:required="false"`, staying listed on
-  // Google Play for devices with no BLE radio. There is no config to inherit here that a stray key could
-  // legitimately belong to: Expo passes this object through verbatim from `app.json`.
+  // Misspellings are silently ignored—every layer reads only keys it knows and ignores the rest.
   const recognised = [
     'bluetoothAlwaysPermission',
     'bluetoothPeripheralBackgroundMode',
@@ -116,9 +85,7 @@ function assertValidProps(props: ExpoGattServerPluginProps): void {
 }
 
 /**
- * Exported unwrapped for the tests. The default export wraps this in `createRunOncePlugin`, which
- * skips every application after the first — so a test calling the default export more than once
- * exercises the guard exactly once and silently passes thereafter.
+ * Exported unwrapped for testing; default export wraps this in createRunOncePlugin.
  */
 export const withGattServer: ConfigPlugin<ExpoGattServerPluginProps> = (config, props = {}) => {
   assertValidProps(props);
@@ -126,6 +93,5 @@ export const withGattServer: ConfigPlugin<ExpoGattServerPluginProps> = (config, 
   return withGattServerAndroid(config, props);
 };
 
-// Named rather than read from package.json, which lies outside the plugin's `rootDir` and would drag
-// `@types/node` in for the `require`.
+// Hardcoded to avoid requiring @types/node (package.json is outside plugin rootDir).
 export default createRunOncePlugin(withGattServer, 'expo-gatt-server');

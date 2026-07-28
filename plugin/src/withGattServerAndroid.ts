@@ -7,17 +7,10 @@ const BLUETOOTH_LE_FEATURE = 'android.hardware.bluetooth_le';
 type AndroidManifestRoot = AndroidConfig.Manifest.AndroidManifest['manifest'];
 
 /**
- * Declares `android.hardware.bluetooth_le` on the app manifest, raising an existing declaration but
- * never relaxing one.
- *
- * Separated from the mod so the rule can be exercised without Expo's mod pipeline: a declaration this
- * quietly overwrote would take the app off Google Play's BLE filter with nothing in the build saying so,
- * which is invisible until a release reaches devices that should not have been offered it.
+ * Declare bluetooth_le feature, raising but never relaxing existing declarations.
  */
 export function applyBluetoothLeFeature(manifest: AndroidManifestRoot, required: boolean): void {
-  // `xml2js` parses an attribute-less `<uses-feature />` to the string `""` — so `feature.$` threw a
-  // `TypeError` naming neither this plugin nor the manifest, mid-prebuild. A lone node is normalised
-  // into the list rather than replaced, so a declaration written that way is still honoured.
+  // xml2js parses attribute-less tags to ""; normalize to array to preserve lone nodes.
   const existing = manifest['uses-feature'];
   const features = Array.isArray(existing) ? existing : existing == null ? [] : [existing];
   manifest['uses-feature'] = features;
@@ -25,10 +18,7 @@ export function applyBluetoothLeFeature(manifest: AndroidManifestRoot, required:
     (feature) => feature?.$?.['android:name'] === BLUETOOTH_LE_FEATURE,
   );
   if (declared) {
-    // A declaration another plugin or the app config already made is left alone unless this one is
-    // raising it: overwriting it with the module's own `false` would take the app off Google Play's
-    // BLE filter with nothing in the build reporting it. An entry carrying no `android:required` is
-    // left alone for the same reason — the attribute defaults to `true`.
+    // Existing declarations left alone unless raising. Attribute defaults to true if absent.
     if (required) {
       declared.$['android:required'] = 'true';
     }

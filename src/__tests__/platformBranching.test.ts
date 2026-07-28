@@ -6,8 +6,7 @@ jest.mock('../ExpoGattServerModule', () => ({
   default: require('./nativeModuleMock').nativeModuleMock,
 }));
 
-// The one value the module reads from `expo-modules-core`, overridden per test below. The rest has to
-// stay real: `expo` itself loads through it.
+// The one value the module reads from expo-modules-core, overridden per test below.
 jest.mock('expo-modules-core', () => ({
   ...jest.requireActual('expo-modules-core'),
   Platform: { OS: 'android' },
@@ -15,14 +14,8 @@ jest.mock('expo-modules-core', () => ({
 
 const { Platform } = jest.requireMock('expo-modules-core') as { Platform: { OS: string } };
 
-/**
- * The places the shared layer behaves differently per platform.
- *
- * Mocked rather than reached by running the whole suite twice under the preset's per-platform Jest
- * projects: that cost several hundred duplicated assertions to arrive at these few conditionals, and
- * still only exercised one side of each per run. Here both sides are asserted together, so a branch
- * that stops firing — or starts firing everywhere — fails.
- */
+// Both sides of the platform branch are asserted here, mocked rather than run under separate
+// per-platform Jest projects.
 describe('the advertising options iOS cannot honour', () => {
   let warn: jest.SpyInstance;
 
@@ -87,6 +80,5 @@ describe('the advertising options iOS cannot honour', () => {
   });
 });
 
-// The other `Platform.OS` branch — the message for a binary that simply does not contain the module —
-// is asserted in `unsupported.test.ts`, where the native module is already mocked away, and its web
-// counterpart in `unsupportedWeb.test.ts`.
+// The other Platform.OS branch (missing-module message) is asserted in unsupported.test.ts and its
+// web counterpart in unsupportedWeb.test.ts.

@@ -14,13 +14,7 @@ export type BluetoothInfoPlist = {
 };
 
 /**
- * Writes the iOS Bluetooth keys onto [infoPlist], in place.
- *
- * Separated from the mod so the three-way precedence of `bluetoothAlwaysPermission` can be exercised
- * without Expo's mod pipeline: a string replaces whatever the app config holds, `false` leaves the key
- * untouched, and omitting it fills in a default only when the key is otherwise absent — so an existing
- * `ios.infoPlist` entry still wins. Getting that wrong either overwrites an app's own wording or leaves
- * the key missing, and iOS terminates the app the moment it touches CoreBluetooth without it.
+ * Apply iOS Bluetooth keys. Precedence: string replaces, false leaves untouched, undefined fills default if absent.
  */
 export function applyBluetoothInfoPlist(
   infoPlist: BluetoothInfoPlist,
@@ -34,9 +28,7 @@ export function applyBluetoothInfoPlist(
   }
 
   if (props.bluetoothPeripheralBackgroundMode) {
-    // A string here is the plausible hand-edit, and spreading one produced a per-character array while
-    // `includes` matched substrings — so `'bluetooth-peripheral'` was left a string and the mode never
-    // became an entry. Normalised into a list instead, which is what the key has to hold.
+    // Normalize to array—spreading a string produces per-character array.
     const declared = infoPlist.UIBackgroundModes;
     const modes = Array.isArray(declared) ? declared : declared == null ? [] : [declared];
     if (!modes.includes(PERIPHERAL_BACKGROUND_MODE)) {
