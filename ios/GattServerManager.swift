@@ -620,16 +620,13 @@ extension GattServerManager: CBPeripheralManagerDelegate {
     case .resetting:
       // `CBManagerState.resetting` is 1, below `poweredOff`'s 4, so both of Apple's thresholds apply:
       // every central has been disconnected and the local database is cleared. Only the waiters are
-      // spared, because a further state update really is coming and the re-publish that follows powering
-      // on can still satisfy them.
+      // spared, since a further state update is coming and the re-publish that follows powering on can
+      // still satisfy them.
       let error = GattServerError.bluetoothUnavailable(state: peripheral.state)
       discardPublishedDatabase(reason: error)
-      // Sparing them costs them their bound: `discardPublishedDatabase` cancels the publication timeout,
-      // which is the *round's* limit, and only `publishConfiguredServices` re-arms it — on a transition
-      // to powered on that may never come. So a `createServer` and every parked `startAdvertising` were
-      // left with no timer at all, which is precisely the outcome `publicationTimeoutMs` exists to
-      // prevent. The wait is bounded here instead, keyed to the promises rather than to a round that no
-      // longer exists.
+      // Re-bounds them: `discardPublishedDatabase` cancels the publication timeout, and only
+      // `publishConfiguredServices` re-arms it — on a transition to powered on that may never come. This
+      // bound is keyed to the promises rather than to a round that no longer exists.
       armWaiterTimeout(reason: error)
     default:
       let error = GattServerError.bluetoothUnavailable(state: peripheral.state)

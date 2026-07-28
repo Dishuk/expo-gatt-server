@@ -248,18 +248,12 @@ internal class AdvertisingController(
         cancelStartTimeout()
       }
       if (advertiseCallback.compareAndSet(callback, null)) {
-        // Nothing this call started is on the air and no AdvertiseCallback is coming to say so. Left
-        // set, `isAdvertising` would report an advertisement that is not running until the
-        // adapter-state receiver happened to clear it.
+        // Nothing this call started is on the air and no AdvertiseCallback is coming to say so, so
+        // `isAdvertising` must not keep reporting one.
         advertising.set(false)
-        // Nothing reached the air, so the rename this start applied has nothing left to justify it — the
-        // same reason `onStartFailure` restores it. Without this, a start that threw because the adapter
-        // went off between the check above and the call left the phone named after the application for
-        // good, visible in Settings and to every peer.
-        //
-        // Inside the ownership test, because a start this one has already been displaced by owns both
-        // the radio and the name now: restoring unconditionally put the phone back to its original name
-        // while the advertisement that had just renamed it was still on the air.
+        // Nothing reached the air, so the rename this start applied has nothing left to justify it — as
+        // `onStartFailure` also finds. Inside the ownership test: a start that displaced this one owns
+        // both the radio and the name, and must not have its rename undone.
         restoreAdapterName()
       }
       // Swallowed rather than reported when a stop settled this call first: settling it twice throws.
@@ -269,26 +263,20 @@ internal class AdvertisingController(
       }
       throw e
     }
-    // The callback has to be installed before the start, because it is the only handle the platform accepts
-    // for stopping and no lock may be held across the binder call — so a stop that landed during the start
-    // took it, and is honoured here instead of leaving the radio advertising with nothing able to stop it.
-    // The generation is tested too, because a stop that landed before the callback was installed left
-    // nothing for the identity test to find.
+    // The callback is installed before the start, since it is the only handle the platform accepts for
+    // stopping and no lock may be held across the binder call. A stop that landed during the start
+    // therefore took it, and is honoured here rather than leaving the radio advertising with nothing able
+    // to stop it. The generation is tested too, for a stop that landed before the callback was installed.
     if (advertiseCallback.get() !== callback || generation.get() != claimed) {
       logDebug { "Advertising was stopped while starting — stopping the new advertisement" }
       leAdvertiser.stopAdvertising(callback)
-      // Taking the callback back is what stops a late onStartSuccess reporting this advertisement as
-      // running; a stop that took it first has already cleared the flag.
+      // Taking the callback back stops a late onStartSuccess reporting this advertisement as running; a
+      // stop that took it first has already cleared the flag.
       if (advertiseCallback.compareAndSet(callback, null)) {
         advertising.set(false)
-        // The stop's own restore was a no-op if it ran before this call applied the rename, because
-        // there was no original name recorded yet to put back. Repeated here for that ordering; it
-        // no-ops when the stop did reach it, since nothing is recorded any more.
-        //
-        // Inside the ownership claim, for the reason the catch block above gives: this branch is also
-        // reached when a *newer start* displaced this one, and that start owns both the radio and the
-        // name. Restoring unconditionally put the phone back to its original name while the
-        // advertisement that had just renamed it was still on the air, with nothing left to restore it.
+        // A stop that ran before this call applied the rename had nothing recorded to put back, so the
+        // restore is repeated here; it no-ops if the stop did reach it. Inside the ownership claim for
+        // the reason the catch block above gives.
         restoreAdapterName()
       }
       // That stop may have settled the *previous* completion, if it landed before this one was
@@ -398,11 +386,9 @@ internal class AdvertisingController(
    */
   private fun scheduleAirtimeTimeout(timeoutMs: Int) {
     if (timeoutMs <= 0) return
-    // The name goes back with the advertisement it was applied for. The platform stops advertising at
-    // this limit without reporting it, so nothing else runs here — and an `android.setAdapterName` start
-    // that carried a `timeoutMs` used to leave the phone's system-wide Bluetooth name changed for good,
-    // with nothing on the air to justify it. iOS's equivalent expiry already goes through its own
-    // `stopAdvertising` for the same reason.
+    // The platform stops advertising at this limit without reporting it, so this expiry is the only place
+    // the name applied for that advertisement can go back — otherwise an `android.setAdapterName` start
+    // carrying a `timeoutMs` leaves the phone's system-wide name changed for good.
     val expiry = Runnable {
       advertising.set(false)
       restoreAdapterName()

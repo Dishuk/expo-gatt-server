@@ -108,9 +108,8 @@ data class CharacteristicDelegation(
  * [SubscriptionRegistry] the per-client CCCDs, [NotificationDispatcher] the send queues,
  * [PreparedWriteQueue] the queued-write procedure and [AdvertisingController] the radio.
  *
- * `MissingPermission` is suppressed per function rather than for the whole class: the permissions are
- * checked in [ExpoGattServerModule] before anything here is reachable, but a class-level suppression
- * also hid every *new* violation, including the module's own broken check.
+ * `MissingPermission` is suppressed per function rather than for the whole class, so a new violation
+ * still surfaces. [ExpoGattServerModule] checks the permissions before anything here is reachable.
  */
 class GattServerManager(
   private val context: Context,
@@ -173,21 +172,17 @@ class GattServerManager(
    * The looper the server's own lifecycle work runs on: the adapter-state broadcasts, and the release of
    * everyone parked in [whenDatabasePublished].
    *
-   * Both do binder work — `openGattServer`, `addService`, `close`, `setName`, `startAdvertising` — and
-   * both first block on [serverLifecycleLock], which `open` and `stop` hold across binder calls of their
-   * own. Run on the main thread, as they were, a slow Bluetooth process turned an adapter toggle into an
-   * ANR: a `BroadcastReceiver` has around ten seconds before one, and the parked advertising callers
-   * released behind it are doing the same kind of work. Created with the receiver and quit with it, so
-   * its lifetime cannot outlast the server it serves.
+   * Both do binder work — `openGattServer`, `addService`, `close`, `setName`, `startAdvertising` — behind
+   * [serverLifecycleLock], which `open` and `stop` hold across binder calls of their own. Keeping that off
+   * the main thread is what stops a slow Bluetooth process turning an adapter toggle into an ANR, since a
+   * `BroadcastReceiver` has around ten seconds. Created with the receiver and quit with it.
    */
   @Volatile
   private var lifecycleThread: HandlerThread? = null
 
   /**
    * Identifies one pending request. The device is part of the key because Android's `requestId` is the raw
-   * ATT transaction id, which AOSP assigns from a counter on the per-connection transport control block
-   * (`p_cmd->trans_id = ++tcb.trans_id` in `system/stack/gatt/gatt_sr.cc`) and `BluetoothGattServer` passes
-   * through untouched — so two connected centrals both produce 1, 2, 3 and would otherwise collide.
+   * ATT transaction id, counted per connection, so two connected centrals both produce 1, 2, 3.
    */
   private data class RequestKey(val deviceId: String, val requestId: Int)
 
@@ -286,10 +281,9 @@ class GattServerManager(
    * The service-and-characteristic address of a characteristic the framework handed back, or `null` when
    * the published database cannot name its owner.
    *
-   * `getService()` is set for every characteristic reached through a registered service, so the search
-   * below is only ever a fallback — but the field is plain mutable state the framework owns, and an
-   * address guessed from the UUID alone is exactly what the per-service keying exists to avoid. Matching
-   * the instance the database actually holds settles it without guessing.
+   * `getService()` is set for every characteristic reached through a registered service, so the identity
+   * search below is only a fallback for that field being framework-owned mutable state. It matches the
+   * instance the database holds rather than guessing an owner from the UUID.
    */
   private fun addressOf(characteristic: BluetoothGattCharacteristic): CharacteristicAddress? {
     characteristic.service?.uuid?.let { return CharacteristicAddress(it, characteristic.uuid) }
@@ -673,8 +667,7 @@ class GattServerManager(
         )
       }
     } catch (e: Exception) {
-      // Reported through the completion, which is the caller's promise, rather than rethrown: the
-      // binding's own catch would reject it too, and the completion would stay armed either way.
+      // Reported through the completion rather than rethrown, so the caller's promise settles once.
       finishOpen(
         DatabasePublication.FAILED,
         (e as? GattServerException)
@@ -884,17 +877,14 @@ class GattServerManager(
 
   /**
    * Queues a notification for [deviceId] and reports the outcome through [onResult] — with `null` once
-   * the platform confirms delivery through `onNotificationSent`. Throws only for problems detectable
-   * before the send is accepted into the queue.
-   *
-   * The call deliberately does not complete as soon as the payload is handed to the stack: a device may
-   * have one notification outstanding at a time, so anything sent while an earlier one is still in
-   * flight waits its turn instead of being discarded by the stack.
+   * the platform confirms delivery through `onNotificationSent`, not when the payload is handed over.
+   * A device may have one notification outstanding at a time, so later sends wait their turn. Throws only
+   * for problems detectable before the send is accepted into the queue.
    *
    * [confirm] selects an indication over a notification, which the characteristic must declare the
-   * matching property for; [requireSubscription] additionally refuses the send when the device has not
-   * enabled that same transmission in its own CCCD. Clearing it sends anyway, since the platform does
-   * not consult the CCCD before transmitting. The property check is not optional either way.
+   * matching property for. [requireSubscription] additionally refuses the send when the device has not
+   * enabled that transmission in its own CCCD; clearing it sends anyway, since the platform does not
+   * consult the CCCD. The property check applies either way.
    */
   fun sendNotification(
     deviceId: String,
@@ -907,13 +897,9 @@ class GattServerManager(
   ) {
     val server = gattServer ?: throw serverUnavailable()
 
-    // An unknown service and an unknown characteristic collapse into one code, because an address that
-    // names nothing in the published database is the same mistake either way — and because that is the
-    // only distinction iOS can draw, where `CBATTRequest.characteristic.service` is a weak reference.
-    //
-    // Checked before the connection, and iOS checks them in the same order, so a call carrying both a
-    // stale deviceId and a mistyped UUID reports the same code on either platform. The address is the
-    // permanent fault of the two: no retry fixes it, while a disconnection may well resolve itself.
+    // Unknown service and unknown characteristic collapse into one code, and the address is checked
+    // before the connection — iOS does both the same way, so a call carrying a stale deviceId *and* a
+    // mistyped UUID reports the same code on either platform.
     val serviceId = parseUuid(serviceUuid, "service")
     val characteristicId = parseUuid(characteristicUuid, "characteristic")
     val characteristic = server.getService(serviceId)
@@ -1001,9 +987,9 @@ class GattServerManager(
     val characteristicUuid = characteristic.uuid
     val enabled = cccdSubscribed(bits)
 
-    // An unresolvable subscription is reported but not recorded, as iOS does with the same situation:
-    // filed under the wrong service it would make a send to another service's same-named characteristic
-    // look deliverable, and the stack transmits whatever it is handed without consulting the CCCD.
+    // Reported but not recorded, as iOS does: filed under the wrong service it would make a send to
+    // another service's same-named characteristic look deliverable, and the stack transmits whatever it
+    // is handed without consulting the CCCD.
     val address = addressOf(characteristic)
     if (address == null) {
       Log.w(TAG, "CCCD: cannot name the service owning $characteristicUuid, not recording the subscription")
@@ -1044,11 +1030,9 @@ class GattServerManager(
     // Re-checked as well as at enqueue time: the MTU can change while an entry waits its turn, and the
     // payload must never reach the stack if it cannot be carried intact.
     mtuErrorFor(deviceId, entry.value.size)?.let { return it }
-    // Reported as a refusal rather than allowed to propagate. Two of the three callers —
-    // `onNotificationSent` and the timeout runnable — are the Bluetooth binder thread and the main
-    // looper, where nothing catches, so a throw from the stack would take the process down instead of
-    // failing the one send. `notifyCharacteristicChanged` does throw for arguments it will not carry,
-    // and the checks above cannot be assumed to have anticipated every one of them.
+    // `notifyCharacteristicChanged` throws for arguments it will not carry, and two of the three callers
+    // are the binder thread and the main looper, where nothing catches — so a throw would take the
+    // process down rather than fail the one send.
     return try {
       notifyValue(server, entry.device, entry.characteristic, entry.confirm, entry.value)
     } catch (e: Exception) {
@@ -1063,9 +1047,8 @@ class GattServerManager(
 
   /**
    * Holds one part of a long or reliable write until the execute arrives, and echoes it back: the
-   * response's handle, offset and part value "shall be set to the same value as in the corresponding
-   * ATT_PREPARE_WRITE_REQ PDU" (Core Spec Vol 3, Part F, §3.4.6.2), which a Reliable Write client
-   * compares and cancels the whole procedure over.
+   * response "shall be set to the same value as in the corresponding ATT_PREPARE_WRITE_REQ PDU" (Core
+   * Spec Vol 3, Part F, §3.4.6.2), which a Reliable Write client compares and cancels over.
    */
   @SuppressLint("MissingPermission")
   private fun queuePreparedWrite(
@@ -1105,10 +1088,9 @@ class GattServerManager(
       return
     }
 
-    // A delegated write is JavaScript's to accept or reject, so the assembled values were withheld until
-    // it answers, and one pending request stands for the whole atomic execute. The configuration changes
-    // ride along with them: the queued-write procedure is atomic, so a subscription the same execute
-    // asked for must not survive a rejection of it.
+    // A delegated write is JavaScript's to accept or reject, so the assembled values are withheld until it
+    // answers and one pending request stands for the whole atomic execute. Configuration changes ride
+    // along: a subscription the same execute asked for must not survive a rejection of it.
     if (assembled.delegated.isNotEmpty()) {
       registerPendingRequest(
         requestId, device.address, offset = 0, isRead = false,
@@ -1125,15 +1107,13 @@ class GattServerManager(
       gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
     }
 
-    // Reported once per attribute from offset 0, rather than replaying the fragments the client happened
-    // to split the value into.
+    // Reported once per attribute from offset 0, rather than replaying the fragments the client split the
+    // value into.
     //
-    // Exactly one attribute is marked `responseNeeded`, because the execute is a single request and one
-    // pending request stands for the whole batch — the answer covers every attribute in it. Marking each
-    // delegated attribute instead handed them all the batch's one `requestId`, so the second
-    // `sendResponse` rejected with `REQUEST_NOT_FOUND` after the first had already answered the execute.
-    // A second delegated attribute still receives its event and can commit its value with
-    // `updateCharacteristicValue`; it simply must not answer again. This is the shape iOS reports.
+    // Exactly one attribute is marked `responseNeeded`: the execute is a single request, and one pending
+    // request stands for the whole batch, so one answer covers every attribute in it. The others still
+    // receive their event and can commit with `updateCharacteristicValue`, but a second `sendResponse`
+    // would reject with `REQUEST_NOT_FOUND`. iOS reports the same shape.
     val responder = assembled.characteristicValues.keys.firstOrNull { it in assembled.delegated }
     assembled.characteristicValues.forEach { (characteristic, value) ->
       listener?.onCharacteristicWriteRequest(
@@ -1176,8 +1156,8 @@ class GattServerManager(
    * Answers a request JavaScript left unanswered, so the central's transaction completes with an
    * error rather than stalling until its own ATT transaction timeout drops the connection.
    *
-   * "Unlikely Error" is the closest the specification offers: the request was valid and the server
-   * simply failed to produce a response, which none of the more specific codes describes.
+   * "Unlikely Error" is the closest the specification offers for a valid request the server simply
+   * failed to answer.
    */
   @SuppressLint("MissingPermission")
   private fun expireRequest(key: RequestKey, pending: PendingRequest) {
@@ -1188,16 +1168,13 @@ class GattServerManager(
   }
 
   /**
-   * Answers every matching request with [status] and then forgets it — the reason
-   * [discardPendingRequests] is reserved for the paths where the link is already gone.
+   * Answers every matching request with [status] and then forgets it. Use this wherever the central can
+   * still hear the response; [discardPendingRequests] is for the paths where the link is already gone.
    *
-   * `stop` disconnects nobody, so a central whose read or write is still outstanding is very likely
-   * still connected, and dropping the request silently stalls its ATT bearer until the 30 s
-   * transaction timeout retires it — after which no further request, notification or indication may
-   * be sent on it at all (Core Spec Vol 3, Part F, §3.3.3).
-   *
-   * Must run while `gattServer` and `connectedDevices` are still populated, which is why `stop`
-   * calls it before `close()` rather than alongside its other bookkeeping.
+   * `stop` disconnects nobody, so dropping a request silently would stall the central's ATT bearer until
+   * the 30 s transaction timeout retires it — after which nothing more may be sent on it at all (Core
+   * Spec Vol 3, Part F, §3.3.3). Must therefore run while `gattServer` and `connectedDevices` are still
+   * populated, before `close()`.
    */
   @SuppressLint("MissingPermission")
   private fun answerAndDiscardPendingRequests(status: Int, predicate: (RequestKey) -> Boolean) {
@@ -1230,26 +1207,21 @@ class GattServerManager(
   /**
    * Answers a pending read or write request.
    *
-   * A read response is deliberately not size-checked: the central continues a value longer than one
-   * `ATT_READ_RSP` with `ATT_READ_BLOB_REQ`, so answering with more than fits is normal ATT rather than a
-   * failure, and the automatic read path already answers with the whole remainder from the requested
-   * offset.
+   * A read response is not size-checked: the central continues a value longer than one `ATT_READ_RSP`
+   * with `ATT_READ_BLOB_REQ`, so answering with more than fits is normal ATT.
    *
-   * [offset] states where [value] begins within the attribute, and the response is rebased onto the
-   * offset the request actually asked for — so passing offset 0 with the whole value answers a Read Blob
-   * continuation correctly, and passing the request's own offset with a pre-sliced value works too. iOS
-   * honours the same contract.
+   * [offset] states where [value] begins within the attribute, and the response is rebased onto the offset
+   * the request asked for — so offset 0 with the whole value answers a Read Blob continuation correctly,
+   * and the request's own offset with a pre-sliced value works too. iOS honours the same contract.
    */
   @SuppressLint("MissingPermission")
   fun sendResponse(deviceId: String, requestId: Int, status: Int, offset: Int, value: ByteArray) {
-    // Every rejection the caller could have caused is checked before the pending entry is touched, so a
-    // rejected attempt leaves the request answerable instead of stranding the central until its ATT
-    // transaction times out. The request is looked up first, so answering one the server has forgotten —
-    // which is what losing the database to a stop or a power cycle leaves behind — reports the same code
-    // iOS reports for it.
-    // Range-checked natively as well as in JavaScript, because the module is reachable directly. The
-    // framework narrows `status` to a byte on its way into the stack, so a wider value would go out as an
-    // unrelated ATT error rather than be reported — 257 becoming 0x01 "Invalid Handle", say.
+    // Every caller-caused rejection is checked before the pending entry is touched, so a rejected attempt
+    // leaves the request answerable rather than stranding the central until its ATT transaction times out.
+    //
+    // Range-checked natively as well as in JavaScript, since the module is reachable directly. The
+    // framework narrows `status` to a byte, so a wider value would go out as an unrelated ATT error —
+    // 257 becoming 0x01 "Invalid Handle", say.
     if (status !in 0..0xFF) {
       throw GattServerException(
         "ERR_RESPONSE",
@@ -1269,16 +1241,14 @@ class GattServerManager(
       requestId = requestId
     )
 
-    // Claimed before the response goes out, not after: once the stack has it the transaction is answered,
-    // and an expiry already dispatched onto the main looper would answer it a second time —
-    // `removeCallbacks` cannot recall one that has left the queue. A refused send therefore leaves the
-    // request unanswerable, which is the lesser fault, since the stack that refused it is gone anyway.
+    // Claimed before the response goes out: `removeCallbacks` cannot recall an expiry that has already
+    // left the main looper's queue, and it would answer the transaction a second time. A refused send is
+    // then left unanswerable, which is the lesser fault.
     if (!pendingRequests.remove(key, pending)) throw unknownRequest(deviceId, requestId)
     pending.timeout?.let { timeoutHandler.removeCallbacks(it) }
 
-    // Committed before the response goes out, so a central that reads straight after its write response
-    // sees what it wrote. Only a success commits them: any ATT error rejects the whole execute, which the
-    // queued-write procedure treats as one atomic operation.
+    // Committed before the response goes out, so a central that reads straight after its write sees what
+    // it wrote. Only on success: any ATT error rejects the whole execute, which is one atomic operation.
     val succeeded = status == BluetoothGatt.GATT_SUCCESS
     val committed =
       if (succeeded) values.commitDeferredValues(pending.deferredValues) else emptyMap()
@@ -1297,10 +1267,9 @@ class GattServerManager(
       )
     }
 
-    // Applied only once the acceptance has actually reached the central, and only for a success: a
-    // rejected execute leaves the client's configuration exactly as it was, which is what the central
-    // believes. Left until after the response because each transition reports to a listener, and there is
-    // nothing to undo if the send is refused.
+    // Applied only once the acceptance has reached the central, and only on success: a rejected execute
+    // leaves the client's configuration as the central believes it to be. After the response because each
+    // transition reports to a listener, and a refused send leaves nothing to undo.
     if (succeeded) {
       for ((descriptor, bits) in pending.clientConfigurations) {
         applyClientConfiguration(device, descriptor.characteristic, bits)
@@ -1352,12 +1321,10 @@ class GattServerManager(
       }
       return null
     }
-    // No pre-33 overload takes the payload: `notifyCharacteristicChanged(device, characteristic,
-    // confirm)` reads it from `characteristic.getValue()` and rejects a null one outright. So the payload
-    // is parked in the mirrored value for the duration of the call and the stored value put back
-    // afterwards, which is what keeps a send from changing what a read returns here as it does on 33+.
-    // Restoring cannot truncate the notification: the framework reads the field and hands the array over
-    // binder before returning.
+    // No pre-33 overload takes the payload: it is read from `characteristic.getValue()`. So the payload is
+    // parked there for the duration of the call and the stored value put back, keeping a send from
+    // changing what a read returns as it does on 33+. Restoring cannot truncate the notification — the
+    // framework hands the array over binder before returning.
     val triggered = values.transaction {
       @Suppress("DEPRECATION")
       val stored = characteristic.value
@@ -1423,7 +1390,8 @@ class GattServerManager(
     subscriptions.clearAll()
     delegations.clear()
     delegationsByCharacteristic.clear()
-    // Clear last. close() doesn't disconnect; STATE_DISCONNECTED or onNotificationSent may arrive after close(). Only clear listener, not timeoutHandler queue (finishOpen posts to it).
+    // Cleared last: close() does not disconnect, so STATE_DISCONNECTED or onNotificationSent may still
+    // arrive. The timeoutHandler queue is left alone — finishOpen posts to it.
     listener = null
   }
 }

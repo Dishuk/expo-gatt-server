@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - unreleased
 
 > ### Read this before upgrading
 >
@@ -23,7 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > - `createServer` requires `services` array (not `undefined`); each service requires `characteristics` array
 > - Characteristic/descriptor values bounded at `MAX_ATTRIBUTE_VALUE_LENGTH` (512 octets)
 > - Android stops renaming adapter unless `android.setAdapterName` is set; `ACCESS_FINE_LOCATION` permission removed; `android.hardware.bluetooth_le` no longer required
-> - `expo` peer dependency narrows to `>=57.0.0`; apps on SDK 51–56 no longer resolve this package; `expo-modules-core` now required
+> - `expo` peer dependency narrows to `>=57.0.0`; apps on SDK 51–56 no longer resolve this package; `expo-modules-core` now required, and the unused `react` / `react-native` peers are gone
+> - Node 20.19.4 is the minimum, matching React Native 0.86
 
 ### Added
 
@@ -216,8 +217,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking: `GATT_FAILURE`.** Was `257` (GATT status not ATT code); use `ATT_ERROR_*` constants instead (e.g., `ATT_ERROR_UNLIKELY_ERROR` for general failures)
 - **Breaking: `MTU_SMALL` error code.** Use `PAYLOAD_EXCEEDS_MTU` instead; oversized `sendResponse` no longer an error
 - **Breaking: `ACCESS_FINE_LOCATION` permission.** Removed from manifest (peripheral doesn't scan); apps that scan must declare it themselves
+- **`react` and `react-native` peer dependencies.** Neither is imported by the package; `expo >=57.0.0` already states the runtime
 
-## [0.1.0] - 2025-05-23
+## [0.1.0] - 2026-05-23
 
 ### Added
 
@@ -230,5 +232,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Auto-response for cached read values
 - CCCD descriptor auto-added for notify/indicate characteristics on Android
 
-[Unreleased]: https://github.com/Dishuk/expo-gatt-server/compare/v0.1.0...HEAD
+[0.2.0]: https://github.com/Dishuk/expo-gatt-server/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/Dishuk/expo-gatt-server/releases/tag/v0.1.0

@@ -18,12 +18,7 @@ private const val MAX_QUEUED_NOTIFICATIONS_PER_DEVICE = 64
 /** Timeout for onNotificationSent callback. Must exceed ATT transaction timeout (Core Spec Vol 3, Part F, §3.3.3) to avoid race with stack's own timeout. */
 private const val NOTIFICATION_TIMEOUT_MS = 35_000L
 
-/**
- * How long to wait before offering the stack an entry it refused as busy again.
- *
- * Short, because the refusal means the previous send is still in flight rather than that anything is
- * wrong, and the entry is holding up its device's whole queue while it waits.
- */
+/** How long to wait before re-offering an entry the stack refused as busy. */
 private const val NOTIFICATION_BUSY_RETRY_MS = 50L
 
 internal class QueuedNotification(
@@ -35,8 +30,8 @@ internal class QueuedNotification(
   val onResult: (GattServerException?) -> Unit,
 ) {
   /**
-   * When to stop offering this entry to a stack that keeps refusing it as busy, as an uptime
-   * milliseconds reading. Zero until the first refusal. Read and written under the queue's monitor.
+   * Uptime milliseconds at which to stop re-offering this entry to a stack that keeps refusing it as
+   * busy. Zero until the first refusal. Read and written under the queue's monitor.
    */
   var busyDeadline = 0L
 }
@@ -68,14 +63,12 @@ internal class NotificationDispatcher(
    * Queues one entry for [deviceId] and starts it moving. Throws only when the device's queue is already
    * at its bound, which is the one refusal detectable before the send is accepted.
    *
-   * [stillConnected] is consulted after the enqueue rather than before, to close the window a teardown
-   * running between the two would otherwise open. See the two failure shapes below.
+   * [stillConnected] is consulted after the enqueue rather than before, closing the window a teardown
+   * running between the two would open.
    */
   fun enqueue(deviceId: String, entry: QueuedNotification, stillConnected: () -> Boolean) {
-    // `computeIfAbsent` rather than `getOrPut`, which is a plain `get() ?: put()` — `kotlin.concurrent`
-    // is not imported, so the atomic overload is not the one that resolves. Two first sends to the same
-    // device racing each other both built a queue and the second replaced the first in the map, leaving
-    // whatever the first had enqueued in a queue nothing would drain.
+    // `computeIfAbsent`, not `getOrPut`: the latter resolves to a plain `get() ?: put()` here and two
+    // racing first sends would each build a queue, one of them orphaned with an entry in it.
     val queue = queues.computeIfAbsent(deviceId) { NotificationQueue() }
     synchronized(queue) {
       if (queue.waiting.size >= MAX_QUEUED_NOTIFICATIONS_PER_DEVICE) {
@@ -87,23 +80,18 @@ internal class NotificationDispatcher(
       }
       queue.waiting.addLast(entry)
     }
-    // Two ways this entry can land somewhere nothing will drain it, both from a teardown running between
-    // the caller's connection check and the enqueue.
-    //
-    // The device may simply have gone away. Or — the case testing the connection alone missed — the
-    // central may have disconnected and reconnected inside the window: the teardown detached this queue
-    // from the map and the reconnection registered a new one, so the device is present again while this
-    // entry sits in the detached queue with no timeout armed and a promise that never settles. A
-    // detached queue is never re-registered, so its identity is what distinguishes the two.
+    // A teardown between the caller's connection check and the enqueue can leave this entry in a queue
+    // nothing drains: the device may be gone, or it may have disconnected and reconnected, which detaches
+    // this queue and registers a new one. A detached queue is never re-registered, so identity tells the
+    // two apart.
     val detached = queues[deviceId] !== queue
     val disconnected = !stillConnected()
     if (detached || disconnected) {
       val error = GattServerException("ERR_DEVICE_DISCONNECTED", "Device $deviceId disconnected")
-      // Only when the device itself is gone. A queue the central has already reconnected behind belongs
-      // to the live connection, and failing its entries would settle sends that are still perfectly good.
+      // Only when the device itself is gone: a queue the central has reconnected behind holds sends that
+      // are still good.
       if (disconnected) failFor(deviceId, error)
-      // Settled straight from this entry either way, because the pump cannot reach a queue that is no
-      // longer the registered one.
+      // Settled here either way, since the pump cannot reach a queue that is no longer the registered one.
       if (take(queue, entry)) entry.onResult(error)
       return
     }
@@ -124,20 +112,18 @@ internal class NotificationDispatcher(
         queue.inFlight = candidate
         candidate
       }
-      // Armed only once the stack has accepted the send, because the bound exists for a callback that
-      // never arrives — and a dispatch that fails outright settles the entry here instead, which would
-      // leave a timer running against an entry already gone.
+      // Armed only once the stack has accepted the send: the bound exists for a callback that never
+      // arrives, and a dispatch that fails outright settles the entry below instead.
       val error = dispatch(deviceId, next)
       if (error == null) {
         armTimeout(deviceId, queue, next)
         return
       }
-      // A busy stack has refused the offer, not the entry, so the entry goes back where it was rather
-      // than being failed — and the loop stops, because offering the next one now would be refused for
-      // exactly the same reason and take the whole backlog down with it.
+      // A busy stack refused the offer, not the entry, so it goes back where it was. The loop stops too:
+      // the next entry would be refused for the same reason.
       if (error is NotifyBusyException && repark(deviceId, queue, next)) return
       // Only the thread that still owns the entry may settle it: a disconnect or a stop can take it
-      // during the dispatch and settle it first, and a second settle throws on a release build.
+      // during the dispatch, and settling twice throws.
       val stillOurs = synchronized(queue) {
         if (queue.inFlight !== next) {
           false
@@ -215,10 +201,9 @@ internal class NotificationDispatcher(
    * Puts an entry the stack refused as busy back at the head of its queue and schedules another attempt,
    * reporting whether it did.
    *
-   * `false` means the entry must be settled by the caller instead: either its budget is spent — bounded
-   * by [NOTIFICATION_TIMEOUT_MS], the same outer bound a send the stack accepted gets, so a device whose
-   * stack never frees up fails its sends rather than retrying for the life of the process — or something
-   * else has taken it already, in which case the caller's own ownership check declines to settle it too.
+   * `false` means the caller must settle it instead: either the retry budget is spent — bounded by
+   * [NOTIFICATION_TIMEOUT_MS], so a stack that never frees up fails the send rather than retrying
+   * forever — or something else has already taken the entry.
    */
   private fun repark(deviceId: String, queue: NotificationQueue, entry: QueuedNotification): Boolean {
     val now = SystemClock.uptimeMillis()
@@ -243,10 +228,9 @@ internal class NotificationDispatcher(
   /**
    * Bounds the wait for one entry's `onNotificationSent`.
    *
-   * The timer names the entry it was armed for and settles it through [take], so it needs no cancelling:
-   * one that fires after the callback already arrived finds the entry gone and does nothing. That keeps
-   * the bound off every path that clears `inFlight` — the callback, a disconnect, an adapter power cycle
-   * and `stop` — none of which can then forget to cancel it.
+   * The timer names the entry it was armed for, so it needs no cancelling: one that fires after the
+   * callback arrived finds the entry gone and does nothing. No path that clears `inFlight` — the
+   * callback, a disconnect, a power cycle, `stop` — has to remember to cancel it.
    */
   private fun armTimeout(deviceId: String, queue: NotificationQueue, entry: QueuedNotification) {
     // Off the main looper for the same reason as [repark]: this ends by pumping the queue, which
@@ -255,9 +239,8 @@ internal class NotificationDispatcher(
       val abandoned = synchronized(queue) {
         if (queue.inFlight === entry) {
           queue.inFlight = null
-          // Only this branch records one: the stack accepted this send and still owes a callback for
-          // it. An entry still waiting was never handed over. See
-          // [NotificationQueue.callbacksOwedToAbandonedSends].
+          // Only this branch: the stack accepted this send and still owes a callback for it. An entry
+          // still waiting was never handed over.
           queue.callbacksOwedToAbandonedSends += 1
           true
         } else {
@@ -280,7 +263,7 @@ internal class NotificationDispatcher(
 
   /**
    * Removes [entry] from [queue] if it is still there, reporting whether this call is the one that took
-   * it — so an entry a concurrent drain has already claimed is not settled a second time.
+   * it, so a concurrent drain cannot settle it twice.
    */
   private fun take(queue: NotificationQueue, entry: QueuedNotification): Boolean =
     synchronized(queue) {

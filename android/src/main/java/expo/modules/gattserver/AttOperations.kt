@@ -94,9 +94,8 @@ internal fun cccdSubscribed(bits: Int): Boolean =
 
 /**
  * Whether [bits] enables exactly the transmission [confirm] selects. "When a bit is set, that action
- * shall be enabled, otherwise it will not be used" (Core Spec Vol 3, Part G, §3.3.3.3), so a client
- * that enabled only indications must not be handed a notification, and vice versa — gating on either
- * bit would send whichever the caller asked for regardless of the client's configuration.
+ * shall be enabled, otherwise it will not be used" (Core Spec Vol 3, Part G, §3.3.3.3), so a client that
+ * enabled only indications must not be handed a notification, and vice versa.
  */
 internal fun cccdEnables(bits: Int, confirm: Boolean): Boolean {
   val required = if (confirm) CCCD_INDICATE_BIT else CCCD_NOTIFY_BIT

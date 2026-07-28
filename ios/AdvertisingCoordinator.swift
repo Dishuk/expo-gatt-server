@@ -97,9 +97,8 @@ final class AdvertisingCoordinator {
   ///
   /// `peripheralManagerDidStartAdvertising:error:` is documented only as returning "the result of a
   /// startAdvertising: call", with nothing promising one arrives when the state drops instead — so a
-  /// start CoreBluetooth already has is settled here rather than left pending for the process
-  /// lifetime. Claiming the completion is what stops a late callback settling it a second time, and
-  /// the expiry goes with the advertisement it belonged to rather than stopping a later one.
+  /// start CoreBluetooth already has is settled here rather than left pending for the process lifetime.
+  /// Claiming the completion stops a late callback settling it twice.
   func discard(reason: Error) {
     cancelAirtimeTimeout()
     pendingAirtimeMs = 0

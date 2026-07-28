@@ -93,9 +93,8 @@ private let bluetoothBaseUuidSuffix = "-0000-1000-8000-00805f9b34fb"
 extension CBUUID {
   /// The lowercase 128-bit spelling, which is what `java.util.UUID.toString` produces on Android.
   ///
-  /// `CBUUID.uuidString` is not that: it uppercases the 128-bit form and echoes a 16-bit or 32-bit
-  /// UUID back in the short form it was constructed from, which made the same characteristic arrive in
-  /// event payloads spelled differently on each platform. Normalising is repeated here as well as in
+  /// `CBUUID.uuidString` is not that: it uppercases the 128-bit form and echoes a 16-bit or 32-bit UUID
+  /// back in the short form it was constructed from. Normalising is repeated here as well as in
   /// JavaScript because these UUIDs come back out of CoreBluetooth rather than from the configuration.
   var normalizedString: String {
     let lower = uuidString.lowercased()
@@ -107,14 +106,12 @@ extension CBUUID {
   ///
   /// Unlike Android's encoder, `CBUUID` advertises whatever width it was constructed from: a 16-bit
   /// alias occupies two octets of the 31-byte budget, its 128-bit expansion sixteen. The shared
-  /// TypeScript layer expands every UUID to 128 bits so both platforms see one spelling — correct for
-  /// addressing and for event payloads, and free on Android, but on iOS it silently cost fourteen bytes
-  /// of advertising space per UUID. That is enough to push a service UUID out of the advertisement and
-  /// into the Apple-only scan-response overflow area, where a non-Apple central filtering on it stops
-  /// finding the peripheral at all.
+  /// TypeScript layer expands every UUID to 128 bits so both platforms address attributes by one
+  /// spelling, which costs fourteen bytes per UUID here — enough to push a service UUID into the
+  /// Apple-only scan-response overflow area, where a non-Apple central filtering on it stops finding the
+  /// peripheral.
   ///
-  /// Only exact members of the Bluetooth base range contract; a vendor UUID has no shorter form and is
-  /// returned unchanged.
+  /// Only exact members of the Bluetooth base range contract; a vendor UUID is returned unchanged.
   var advertisedForm: CBUUID {
     let lower = uuidString.lowercased()
     guard lower.count == 36, lower.hasSuffix(bluetoothBaseUuidSuffix) else { return self }

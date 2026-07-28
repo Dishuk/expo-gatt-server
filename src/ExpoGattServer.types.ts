@@ -275,10 +275,6 @@ export interface BluetoothStateChangedEvent {
 }
 
 /**
- * Every serviceUuid and characteristicUuid in event payloads is lowercase 128-bit form (Core Spec Vol 3, Part B, §2.5.1).
- * This is the only canonical spelling across platforms; use it for equality checks.
- */
-/**
  * Published database is absent; call createServer to recover.
  * Emitted when re-publication fails; not on normal Bluetooth off (that's onBluetoothStateChanged).
  */
@@ -287,6 +283,10 @@ export interface ServerPublicationFailedEvent {
   message: string;
 }
 
+/**
+ * Every serviceUuid and characteristicUuid in these payloads is the lowercase 128-bit form (Core Spec
+ * Vol 3, Part B, §2.5.1) — the only canonical spelling across platforms. Use it for equality checks.
+ */
 export type GattServerEvents = {
   onDeviceConnected(event: DeviceConnectedEvent): void;
   onDeviceDisconnected(event: DeviceDisconnectedEvent): void;

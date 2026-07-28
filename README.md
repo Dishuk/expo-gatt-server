@@ -8,7 +8,7 @@ Expo module that turns your React Native app into a BLE GATT server. Advertise s
 |------|---------|---------|
 | [Expo](https://expo.dev/) | SDK 57 | Framework and module system -- the version this package is developed and tested against |
 | [React Native](https://reactnative.dev/) | as bundled with your Expo SDK | Runtime |
-| [Node.js](https://nodejs.org/) | >= 18 | Build tooling |
+| [Node.js](https://nodejs.org/) | >= 20.19.4 | Build tooling -- the floor React Native 0.86 sets |
 | Xcode | 26.5 | iOS builds (iOS 15.1+ deployment target, Swift 5.9). Bounded by Expo SDK 57 compatibility. |
 | Android Studio | any | Android builds (API 24+ / Android 7.0, compileSdk 35) |
 

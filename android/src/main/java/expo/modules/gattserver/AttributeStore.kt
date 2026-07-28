@@ -92,8 +92,7 @@ internal class AttributeStore {
    * were actually applied.
    *
    * An attribute something else has written since the execute was assembled — `updateCharacteristicValue`
-   * or another client — keeps that newer value: silently undoing a write the application already
-   * completed successfully is the one outcome nothing downstream could detect or recover from.
+   * or another client — keeps that newer value rather than having a completed write silently undone.
    */
   @Suppress("DEPRECATION")
   fun commitDeferredValues(
