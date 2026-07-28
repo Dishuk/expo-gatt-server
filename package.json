@@ -4,7 +4,19 @@
   "description": "Expo module for BLE GATT server (peripheral) functionality",
   "main": "./build/index.js",
   "types": "./build/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./build/index.d.ts",
+      "default": "./build/index.js"
+    },
+    "./app.plugin.js": "./app.plugin.js",
+    "./expo-module.config.json": "./expo-module.config.json",
+    "./package.json": "./package.json"
+  },
   "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
   "files": [
     "build",
     "ios",
@@ -56,8 +68,8 @@
   },
   "peerDependencies": {
     "expo": ">=57.0.0",
-    "expo-modules-core": "*",
-    "react": "*",
-    "react-native": "*"
+    "expo-modules-core": ">=57.0.0",
+    "react": ">=18.0.0",
+    "react-native": ">=0.74.0"
   }
 }
