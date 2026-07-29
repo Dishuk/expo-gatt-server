@@ -1,0 +1,41 @@
+{
+  "expo": {
+    "name": "expo-gatt-server-example",
+    "slug": "expo-gatt-server-example",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "plugins": [
+      [
+        "expo-gatt-server",
+        {
+          "bluetoothAlwaysPermission": "This example app uses Bluetooth to run a BLE GATT server (peripheral) for testing expo-gatt-server.",
+          "bluetoothPeripheralBackgroundMode": true,
+          "requireBluetoothLeHardware": true
+        }
+      ]
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "expo.modules.gattserver.example"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "expo.modules.gattserver.example",
+      "permissions": [
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.BLUETOOTH_ADVERTISE"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
+  }
+}

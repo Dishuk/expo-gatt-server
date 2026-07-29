@@ -1,8 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- GATT peripheral: BLUETOOTH_* and BLUETOOTH_ADVERTISE for advertising/server; no location (scanning not needed). -->
   <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
   <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
   <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
   <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-  <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+
+  <!-- Both marked required=false (can be overridden to true by consuming app via OR merge). BLUETOOTH_* permissions cause Google Play to infer android.hardware.bluetooth with required=true; must declare both features explicitly to prevent filtering. -->
+  <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+  <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 </manifest>

@@ -1,7 +1,5 @@
 package expo.modules.gattserver
 
-import android.bluetooth.BluetoothGattCharacteristic
-import android.bluetooth.BluetoothGattService
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.content.ContextCompat
@@ -9,17 +7,45 @@ import androidx.core.os.bundleOf
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
-import java.util.UUID
-
-private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+import java.util.concurrent.Executors
 
 class ExpoGattServerModule : Module() {
+  /**
+   * Written on `AsyncFunctionQueue`, read on JavaScript thread. Volatile publishes across threads
+   * to prevent a stale `null` from leaking the server and broadcast receiver.
+   */
+  @Volatile
   private var manager: GattServerManager? = null
 
-  private fun missingPermission(permission: String): Boolean {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return false
-    val context = appContext.reactContext ?: return false
-    return ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED
+  /**
+   * Where a `stopServer` teardown runs, so it does not hold the JavaScript thread across the binder
+   * calls `stop` makes under `serverLifecycleLock`. Single-threaded: `createServer` drains it before
+   * opening, so a deferred stop can never close the server that replaced it.
+   */
+  private val teardownExecutor = Executors.newSingleThreadExecutor { runnable ->
+    Thread(runnable, "ExpoGattServerTeardown")
+  }
+
+  /** Blocks until any deferred teardown has finished. Never called from the JavaScript thread. */
+  private fun awaitPendingTeardown() {
+    // Explicit Runnable: `submit {}` is ambiguous between the Runnable and Callable overloads.
+    runCatching { teardownExecutor.submit(Runnable {}).get() }
+  }
+
+  /**
+   * Returns rejection code and message if [permission] is not granted, or null. Checks React context
+   * first: missing context is an error (not a pass) to avoid deferring the failure to a Bluetooth SecurityException.
+   */
+  private fun permissionError(permission: String, requiredBy: String? = null): Pair<String, String>? {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
+    val suffix = if (requiredBy != null) ", which $requiredBy requires" else ""
+    val context = appContext.reactContext
+      ?: return "ERR_NO_CONTEXT" to
+        "React context not available, so the $permission permission$suffix could not be checked"
+    if (ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED) {
+      return "ERR_PERMISSION" to "$permission permission not granted$suffix"
+    }
+    return null
   }
 
   override fun definition() = ModuleDefinition {
@@ -30,12 +56,83 @@ class ExpoGattServerModule : Module() {
       "onDeviceDisconnected",
       "onCharacteristicReadRequest",
       "onCharacteristicWriteRequest",
-      "onNotificationSent"
+      "onNotificationSent",
+      "onCharacteristicSubscribed",
+      "onCharacteristicUnsubscribed",
+      "onBluetoothStateChanged",
+      "onMtuChanged",
+      "onServerPublicationFailed"
     )
 
-    AsyncFunction("createServer") { services: List<Map<String, Any?>>, promise: Promise ->
-      if (missingPermission(android.Manifest.permission.BLUETOOTH_CONNECT)) {
-        promise.reject("ERR_PERMISSION", "BLUETOOTH_CONNECT permission not granted", null)
+    AsyncFunction("getMtu") { deviceId: String, promise: Promise ->
+      val mgr = manager ?: run {
+        promise.reject("ERR_NO_SERVER", "Server not created", null)
+        return@AsyncFunction
+      }
+      val mtu = mgr.mtuFor(deviceId) ?: run {
+        promise.reject("ERR_DEVICE_DISCONNECTED", "Device $deviceId is not connected", null)
+        return@AsyncFunction
+      }
+      promise.resolve(bundleOf(
+        "deviceId" to deviceId,
+        "mtu" to mtu.mtu,
+        "maxNotificationPayload" to mtu.maxNotificationPayload
+      ))
+    }
+
+    AsyncFunction("getConnectedDevices") { promise: Promise ->
+      val mgr = manager ?: run {
+        promise.resolve(emptyList<Any>())
+        return@AsyncFunction
+      }
+      promise.resolve(mgr.connectedDeviceList().map { (deviceId, name) ->
+        bundleOf("deviceId" to deviceId, "name" to (name ?: ""))
+      })
+    }
+
+    AsyncFunction("disconnectDevice") { deviceId: String, promise: Promise ->
+      permissionError(android.Manifest.permission.BLUETOOTH_CONNECT, "disconnectDevice")
+        ?.let { (code, message) ->
+          promise.reject(code, message, null)
+          return@AsyncFunction
+        }
+      val mgr = manager ?: run {
+        promise.reject("ERR_NO_SERVER", "Server not created", null)
+        return@AsyncFunction
+      }
+      try {
+        mgr.disconnect(deviceId)
+        promise.resolve(null)
+      } catch (e: GattServerException) {
+        promise.reject(e.code, e.message, e)
+      } catch (e: Exception) {
+        promise.reject("ERR_DISCONNECT", e.message, e)
+      }
+    }
+
+    AsyncFunction("isServerRunning") { promise: Promise ->
+      promise.resolve(manager?.isServerRunning() ?: false)
+    }
+
+    AsyncFunction("isAdvertising") { promise: Promise ->
+      promise.resolve(manager?.isAdvertising() ?: false)
+    }
+
+    AsyncFunction("getBluetoothState") { promise: Promise ->
+      val context = appContext.reactContext
+      if (context == null) {
+        promise.resolve("unknown")
+      } else {
+        promise.resolve(currentBluetoothState(context))
+      }
+    }
+
+    AsyncFunction("createServer") {
+      services: List<Map<String, Any?>>,
+      options: Map<String, Any?>,
+      promise: Promise ->
+      permissionError(android.Manifest.permission.BLUETOOTH_CONNECT)?.let { (code, message) ->
+        promise.reject(code, message, null)
         return@AsyncFunction
       }
 
@@ -45,21 +142,41 @@ class ExpoGattServerModule : Module() {
       }
 
       try {
+        val requestTimeoutMs = parseRequestTimeout(options["requestTimeoutMs"])
+        parseServices(services)
+        val delegations = parseDelegations(services)
+
         manager?.stop()
-        val mgr = GattServerManager(context)
+        // A stopServer already in flight would otherwise close the server opened below.
+        awaitPendingTeardown()
+        val mgr = GattServerManager(context, requestTimeoutMs)
         mgr.listener = createListener()
-        val gattServices = services.map { parseServiceConfig(it) }
-        mgr.open(gattServices)
+        mgr.onStateChange = { state ->
+          sendEvent("onBluetoothStateChanged", bundleOf("state" to state))
+        }
+        mgr.setDelegations(delegations)
         manager = mgr
-        promise.resolve(null)
+        // Resolves after services are confirmed registered.
+        mgr.open({ error ->
+          if (error != null) {
+            promise.reject(error.code, error.message, error)
+          } else {
+            promise.resolve(null)
+          }
+        }) {
+          parseServices(services)
+        }
+      } catch (e: GattServerException) {
+        // Preserve GattServerException codes (e.g. ERR_BLUETOOTH) instead of flattening to ERR_CREATE_SERVER.
+        promise.reject(e.code, e.message, e)
       } catch (e: Exception) {
         promise.reject("ERR_CREATE_SERVER", e.message, e)
       }
     }
 
     AsyncFunction("startAdvertising") { config: Map<String, Any?>, promise: Promise ->
-      if (missingPermission(android.Manifest.permission.BLUETOOTH_ADVERTISE)) {
-        promise.reject("ERR_PERMISSION", "BLUETOOTH_ADVERTISE permission not granted", null)
+      permissionError(android.Manifest.permission.BLUETOOTH_ADVERTISE)?.let { (code, message) ->
+        promise.reject(code, message, null)
         return@AsyncFunction
       }
 
@@ -67,18 +184,52 @@ class ExpoGattServerModule : Module() {
         promise.reject("ERR_NO_SERVER", "Server not created. Call createServer first.", null)
         return@AsyncFunction
       }
+      val localName = config["localName"] as? String
+      val androidOptions = config["android"] as? Map<*, *>
+      val setAdapterName = androidOptions?.get("setAdapterName") as? Boolean ?: false
+      // A config that asks for a name still gets one advertised — the device's own, since Android
+      // has nowhere to put the requested string.
+      val includeDeviceName =
+        androidOptions?.get("includeDeviceName") as? Boolean ?: (localName != null)
+
+      // `BluetoothAdapter.setName` enforces BLUETOOTH_CONNECT on API 31+, so checking here makes the
+      // opt-in fail with a permission error rather than a SecurityException from the Bluetooth stack.
+      if (setAdapterName) {
+        permissionError(
+          android.Manifest.permission.BLUETOOTH_CONNECT, "android.setAdapterName"
+        )?.let { (code, message) ->
+          promise.reject(code, message, null)
+          return@AsyncFunction
+        }
+      }
+
       try {
-        val localName = config["localName"] as? String
-        val serviceUuids = (config["serviceUuids"] as? List<*>)?.mapNotNull { it as? String }
-        val includeTxPower = config["includeTxPowerLevel"] as? Boolean ?: false
-        val connectable = config["connectable"] as? Boolean ?: true
-        mgr.startAdvertising(localName, serviceUuids, includeTxPower, connectable) { error ->
+        val options = AdvertiseOptions(
+          localName = localName,
+          // Parse every entry; silently dropping non-strings would lose service UUIDs and make discovery fail silently.
+          serviceUuids = (config["serviceUuids"] as? List<*>)
+            ?.map { parseUuid(it, "service") }
+            ?: emptyList(),
+          includeTxPower = config["includeTxPowerLevel"] as? Boolean ?: false,
+          connectable = config["connectable"] as? Boolean ?: true,
+          includeDeviceName = includeDeviceName,
+          setAdapterName = setAdapterName,
+          mode = advertiseModeFor(config["mode"] as? String),
+          txPowerLevel = advertiseTxPowerFor(config["txPowerLevel"] as? String),
+          timeoutMs = parseAdvertisingTimeout(config["timeoutMs"]),
+          manufacturerData = parseManufacturerData(config["manufacturerData"]),
+          serviceData = parseServiceData(config["serviceData"]),
+        )
+        // Waits for services to be registered rather than sampling state; createServer and power-on reregistration are asynchronous.
+        mgr.startAdvertising(options) { error ->
           if (error != null) {
-            promise.reject("ERR_ADVERTISE", error, null)
+            promise.reject(error.code, error.message, error)
           } else {
             promise.resolve(null)
           }
         }
+      } catch (e: GattServerException) {
+        promise.reject(e.code, e.message, e)
       } catch (e: Exception) {
         promise.reject("ERR_ADVERTISE", e.message, e)
       }
@@ -92,17 +243,27 @@ class ExpoGattServerModule : Module() {
       deviceId: String,
       serviceUuid: String,
       characteristicUuid: String,
-      value: List<Int>,
+      value: List<Double>,
       confirm: Boolean,
+      requireSubscription: Boolean,
       promise: Promise ->
       val mgr = manager ?: run {
         promise.reject("ERR_NO_SERVER", "Server not created", null)
         return@AsyncFunction
       }
       try {
-        val bytes = value.map { it.toByte() }.toByteArray()
-        mgr.sendNotification(deviceId, serviceUuid, characteristicUuid, bytes, confirm)
-        promise.resolve(null)
+        val bytes = toByteArray(value, "notification")
+        // Resolves once the platform confirms delivery, so a caller that awaits it paces itself against
+        // the link instead of overrunning it.
+        mgr.sendNotification(
+          deviceId, serviceUuid, characteristicUuid, bytes, confirm, requireSubscription
+        ) { error ->
+          if (error != null) {
+            promise.reject(error.code, error.message, error)
+          } else {
+            promise.resolve(null)
+          }
+        }
       } catch (e: GattServerException) {
         promise.reject(e.code, e.message, e)
       } catch (e: Exception) {
@@ -110,19 +271,41 @@ class ExpoGattServerModule : Module() {
       }
     }
 
+    // Declared as Double and narrowed by parseIntArgument to match iOS.
+    // If declared as Int, expo-modules-core would use asDouble().toInt(), which loses NaN and truncates fractions differently per platform.
     AsyncFunction("sendResponse") {
       deviceId: String,
-      requestId: Int,
-      status: Int,
-      offset: Int,
-      value: List<Int>,
+      rawRequestId: Double,
+      rawStatus: Double,
+      rawOffset: Double,
+      value: List<Double>,
       promise: Promise ->
+      val (requestId, status, offset) = try {
+        Triple(
+          parseIntArgument(
+            rawRequestId, "response request id", 0, Int.MAX_VALUE,
+            "A request id is the whole number the matching request event carried."
+          ),
+          parseIntArgument(
+            rawStatus, "response status", 0, 0xFF, "An ATT error code is a single byte."
+          ),
+          parseIntArgument(
+            rawOffset, "response offset", 0, 0xFFFF, "An ATT offset is an unsigned 16-bit value."
+          ),
+        )
+      } catch (e: Exception) {
+        promise.reject("ERR_RESPONSE", e.message, e)
+        return@AsyncFunction
+      }
+      // REQUEST_NOT_FOUND (not ERR_NO_SERVER) so unmount-race handlers get one code to branch on across platforms.
       val mgr = manager ?: run {
-        promise.reject("ERR_NO_SERVER", "Server not created", null)
+        promise.reject(
+          "REQUEST_NOT_FOUND", "Request $requestId not found or already responded", null
+        )
         return@AsyncFunction
       }
       try {
-        val bytes = value.map { it.toByte() }.toByteArray()
+        val bytes = toByteArray(value, "response")
         mgr.sendResponse(deviceId, requestId, status, offset, bytes)
         promise.resolve(null)
       } catch (e: GattServerException) {
@@ -132,22 +315,43 @@ class ExpoGattServerModule : Module() {
       }
     }
 
-    Function("updateCharacteristicValue") {
+    AsyncFunction("updateCharacteristicValue") {
       serviceUuid: String,
       characteristicUuid: String,
-      value: List<Int> ->
-      val bytes = value.map { it.toByte() }.toByteArray()
-      manager?.updateCharacteristicValue(serviceUuid, characteristicUuid, bytes)
+      value: List<Double>,
+      promise: Promise ->
+      val mgr = manager ?: run {
+        promise.reject("ERR_NO_SERVER", "Server not created", null)
+        return@AsyncFunction
+      }
+      try {
+        // Respects the same attribute value bound as configuration.
+        mgr.updateCharacteristicValue(
+          serviceUuid, characteristicUuid, parseAttributeValue(value, "characteristic")
+        )
+        promise.resolve(null)
+      } catch (e: GattServerException) {
+        promise.reject(e.code, e.message, e)
+      } catch (e: Exception) {
+        promise.reject("ERR_UPDATE_VALUE", e.message, e)
+      }
     }
 
+    // Synchronous to preserve ordering against createServer (see serverStopEpoch in src/index.ts):
+    // the manager is dropped here, on the JavaScript thread, so every later call already sees no
+    // server. Only the teardown itself is deferred, since it blocks on the Bluetooth process.
     Function("stopServer") {
-      manager?.stop()
+      val stopping = manager
       manager = null
+      stopping?.let { teardownExecutor.execute { it.stop() } }
     }
 
     OnDestroy {
+      // Synchronous: the module is going away, so the teardown has to finish before it does.
       manager?.stop()
       manager = null
+      awaitPendingTeardown()
+      teardownExecutor.shutdown()
     }
   }
 
@@ -200,66 +404,40 @@ class ExpoGattServerModule : Module() {
         "status" to status
       ))
     }
-  }
 
-  private fun parseServiceConfig(map: Map<String, Any?>): BluetoothGattService {
-    val uuid = UUID.fromString(map["uuid"] as String)
-    val service = BluetoothGattService(uuid, BluetoothGattService.SERVICE_TYPE_PRIMARY)
-
-    val characteristics = (map["characteristics"] as? List<*>) ?: emptyList<Any>()
-    for (item in characteristics) {
-      val charMap = item as? Map<*, *> ?: continue
-      service.addCharacteristic(parseCharacteristicConfig(charMap))
-    }
-    return service
-  }
-
-  private fun parseCharacteristicConfig(map: Map<*, *>): BluetoothGattCharacteristic {
-    val uuid = UUID.fromString(map["uuid"] as String)
-    val properties = parseProperties(map["properties"] as? List<*>)
-    val permissions = parsePermissions(map["permissions"] as? List<*>)
-    val characteristic = BluetoothGattCharacteristic(uuid, properties, permissions)
-
-    if (properties and (BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0) {
-      val cccd = android.bluetooth.BluetoothGattDescriptor(
-        CCCD_UUID,
-        android.bluetooth.BluetoothGattDescriptor.PERMISSION_READ or
-          android.bluetooth.BluetoothGattDescriptor.PERMISSION_WRITE
-      )
-      characteristic.addDescriptor(cccd)
+    override fun onMtuChanged(deviceId: String, mtu: DeviceMtu) {
+      sendEvent("onMtuChanged", bundleOf(
+        "deviceId" to deviceId,
+        "mtu" to mtu.mtu,
+        "maxNotificationPayload" to mtu.maxNotificationPayload
+      ))
     }
 
-    val initialValue = (map["value"] as? List<*>)?.mapNotNull { (it as? Number)?.toByte() }?.toByteArray()
-    if (initialValue != null) {
-      @Suppress("DEPRECATION")
-      characteristic.value = initialValue
+    override fun onServerPublicationFailed(code: String, message: String) {
+      sendEvent("onServerPublicationFailed", bundleOf(
+        "code" to code,
+        "message" to message
+      ))
     }
 
-    return characteristic
-  }
-
-  private fun parseProperties(list: List<*>?): Int {
-    var props = 0
-    list?.forEach {
-      when (it as? String) {
-        "read" -> props = props or BluetoothGattCharacteristic.PROPERTY_READ
-        "write" -> props = props or BluetoothGattCharacteristic.PROPERTY_WRITE
-        "writeNoResponse" -> props = props or BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE
-        "notify" -> props = props or BluetoothGattCharacteristic.PROPERTY_NOTIFY
-        "indicate" -> props = props or BluetoothGattCharacteristic.PROPERTY_INDICATE
-      }
+    override fun onCharacteristicSubscribed(
+      deviceId: String, serviceUuid: String, characteristicUuid: String
+    ) {
+      sendEvent("onCharacteristicSubscribed", bundleOf(
+        "deviceId" to deviceId,
+        "serviceUuid" to serviceUuid,
+        "characteristicUuid" to characteristicUuid
+      ))
     }
-    return props
-  }
 
-  private fun parsePermissions(list: List<*>?): Int {
-    var perms = 0
-    list?.forEach {
-      when (it as? String) {
-        "readable" -> perms = perms or BluetoothGattCharacteristic.PERMISSION_READ
-        "writeable" -> perms = perms or BluetoothGattCharacteristic.PERMISSION_WRITE
-      }
+    override fun onCharacteristicUnsubscribed(
+      deviceId: String, serviceUuid: String, characteristicUuid: String
+    ) {
+      sendEvent("onCharacteristicUnsubscribed", bundleOf(
+        "deviceId" to deviceId,
+        "serviceUuid" to serviceUuid,
+        "characteristicUuid" to characteristicUuid
+      ))
     }
-    return perms
   }
 }

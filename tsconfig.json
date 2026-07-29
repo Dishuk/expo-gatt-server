@@ -1,14 +1,18 @@
 {
+  "extends": "expo-module-scripts/tsconfig.base",
   "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "declaration": true,
+    "rootDir": "./src",
     "outDir": "./build",
-    "jsx": "react-jsx",
-    "esModuleInterop": true,
-    "skipLibCheck": true
+    // The base config turns both on, but `package.json`'s `files` ships only `build` — and the tarball
+    // check in CI actively forbids `src` — so every emitted map pointed at `../src/index.ts`, a path no
+    // consumer's install contains. A map that cannot resolve is worse than none: it sends a debugger and
+    // go-to-definition to a missing file instead of to the shipped `.js`/`.d.ts`. `plugin/build` already
+    // emits none, so this also makes the two builds agree.
+    "sourceMap": false,
+    "declarationMap": false,
+    // Goes with them: the base sets it, and TypeScript rejects it without a sourcemap to inline into.
+    "inlineSources": false
   },
-  "include": ["./src"]
+  "include": ["./src"],
+  "exclude": ["**/__mocks__/*", "**/__tests__/*"]
 }

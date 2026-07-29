@@ -55,9 +55,17 @@ Expo Module Bridge (ExpoGattServerModule)
 │  - Tracks connected devices, MTU, subscriptions  │
 │  - Handles GATT callbacks (read/write/notify)    │
 │  - Caches characteristic values for auto-respond │
+│  - Answers or delegates each ATT request         │
+│  - Queues notifications, one outstanding at a    │
+│    time per device                               │
+│  - Watches adapter state, re-publishes services  │
 │  - MTU validation                                │
 └─────────────────────────────────────────────────┘
 ```
+
+Above the bridge, `src/index.ts` is not a pass-through. It normalises every UUID onto its 128-bit form,
+range-checks bytes, offsets, statuses and timeouts, rejects unrecognised enum names, warns about
+advertising options iOS ignores, and degrades gracefully when the native module is absent.
 
 ## Native Module Bridge
 
@@ -65,52 +73,82 @@ Expo Module Bridge (ExpoGattServerModule)
 
 | Responsibility | Details |
 |----------------|---------|
-| Config parsing | Converts JS objects to `CBMutableService` (iOS) or `BluetoothGattService` (Android) |
-| Permission checks | iOS: `CBPeripheralManager.authorization`, Android: `ContextCompat.checkSelfPermission` |
-| Async wrapping | Maps native callbacks to JS Promises via Expo's `AsyncFunction` |
+| Config parsing | Converts JS objects to `CBMutableService` (iOS) or `BluetoothGattService` (Android), and refuses what the platform cannot express |
+| Permission checks | iOS: `CBManager.authorization`, Android: `ContextCompat.checkSelfPermission` for `BLUETOOTH_CONNECT` / `BLUETOOTH_ADVERTISE` |
+| Async wrapping | Maps native callbacks to JS Promises via Expo's `AsyncFunction`, with a coded rejection per failure mode |
 | Event dispatch | Forwards native delegate/callback events to JS listeners |
 
 The module does not hold BLE state itself -- it delegates to `GattServerManager`.
 
 ## GATT Server Manager
 
-**GattServerManager** (Swift / Kotlin) owns the native BLE peripheral and manages all state.
+**GattServerManager** (Swift / Kotlin) owns the native BLE peripheral. It publishes the database, routes
+every ATT callback to either an automatic answer or a JavaScript event, and holds the connection state.
+
+The concerns with state of their own live beside it, one class each, on both platforms:
+
+| Collaborator | iOS | Android | Owns |
+|---|---|---|---|
+| Advertising | `AdvertisingCoordinator` | `AdvertisingController` | The advertisement, the promise waiting for the stack to confirm it, the start and airtime bounds, and on Android the borrowed adapter name |
+| Notifications | `NotificationQueue` | `NotificationDispatcher` | The sends the stack refused, one outstanding per link |
+| Delegated requests | `PendingRequestStore` | (in the manager) | Requests handed to JavaScript, with the expiry that answers one it never answers |
+| Attribute values | (in the manager) | `AttributeStore` | The mirrored values reads are answered from. Android needs a monitor; iOS is main-queue only |
+| Subscriptions | (in the manager) | `SubscriptionRegistry` | Per-client CCCD state |
+| Queued writes | not applicable | `PreparedWriteQueue` | The prepare queues and the atomic execute |
+
+The ATT arithmetic — write assembly, response rebasing, CCCD bits, MTU checks — is stateless and lives
+in `WriteBatch.swift` and `AttOperations.kt`. That is the part the host suites cover.
 
 ### Managed State
 
 | State | iOS Type | Android Type | Purpose |
 |-------|----------|--------------|---------|
-| Connected devices | `[String: CBCentral]` (via subscriptions) | `ConcurrentHashMap<String, BluetoothDevice>` | Track which centrals are connected |
-| Device MTU | Derived from `central.maximumUpdateValueLength` | `ConcurrentHashMap<String, Int>` | Validate payload size |
-| Pending requests | `[Int: CBATTRequest]` | `ConcurrentHashMap<Int, String>` | Match `sendResponse` to read requests |
-| Characteristic values | `[CBUUID: Data]` | Set on `BluetoothGattCharacteristic.value` | Auto-respond to reads |
-| Subscribed centrals | `[String: [CBUUID: CBCentral]]` | Managed via CCCD descriptor | Track notification subscribers |
+| Connected devices | `[String: CBCentral]` (from observed ATT activity) | `ConcurrentHashMap<String, BluetoothDevice>` | Track which centrals are connected, and answer `getConnectedDevices` |
+| Device MTU | Read live from `central.maximumUpdateValueLength`; the last value seen is cached only to detect a change | `ConcurrentHashMap<String, Int>` | Validate payload size, answer `getMtu`, emit `onMtuChanged` |
+| Pending requests | `[Int: PendingRequest]` -- the id is a module-owned counter, unique across the process | `ConcurrentHashMap<RequestKey, PendingRequest>`, keyed by device *and* request id, because Android passes through the raw ATT transaction id and the stack counts those per connection | Match `sendResponse` to a request, validate its device, rebase the response onto the requested offset, and expire it after `requestTimeoutMs` |
+| Characteristic values | `[CharacteristicAddress: Data]` | Set on the per-service `BluetoothGattCharacteristic` instance | Auto-respond to reads |
+| Subscribed centrals | `[String: [CharacteristicAddress: CBCentral]]` -- membership only, since CoreBluetooth does not report which bit was set | `ConcurrentHashMap<String, ConcurrentHashMap<CharacteristicAddress, Int>>` -- the raw two-octet CCCD value per device, keyed by service *and* characteristic so the same characteristic UUID in two services keeps separate subscriptions | Track notification subscribers, answer per-client CCCD reads on Android |
+| Delegations | `[CharacteristicAddress: CharacteristicDelegation]` | `ConcurrentHashMap<CharacteristicAddress, CharacteristicDelegation>` | Decide whether a read or write is answered natively or handed to JavaScript |
+| Notification queue | `[QueuedNotification]`, one queue for the peripheral manager's transmit queue | `ConcurrentHashMap<String, NotificationQueue>`, one per device | Keep at most one send outstanding, and resolve `sendNotification` on the platform's own callback |
+| Prepared writes | Not applicable -- CoreBluetooth does not expose them | `ConcurrentHashMap<String, MutableList<PreparedWrite>>` | Buffer a long or reliable write until its execute |
+| Published state | A four-state `publication` plus the retained service configuration | A four-state `publication` plus a service factory | Answer `isServerRunning`, park a `startAdvertising` until the database is published, and rebuild the database when Bluetooth returns |
 
 ### Lifecycle
 
 ```
-open(services)
+open(services)  ──►  resolves only once every service is published
     │
     ▼
 startAdvertising()  ◄──  Central scans and finds the device
     │
     ▼
 [Central connects]  ──►  onDeviceConnected event
+    │                    (iOS: on the central's first ATT activity)
     │
-    ├── [Central reads]   ──►  Auto-respond or onCharacteristicReadRequest
-    ├── [Central writes]  ──►  onCharacteristicWriteRequest
-    ├── sendNotification  ──►  Push update to central
+    ├── [Central reads]      ──►  Auto-respond, or onCharacteristicReadRequest
+    ├── [Central writes]     ──►  Auto-acknowledge, or onCharacteristicWriteRequest
+    ├── [Central subscribes] ──►  onCharacteristicSubscribed
+    ├── sendNotification     ──►  Push update to a subscribed central
     │
     ▼
 stopAdvertising()
     │
     ▼
-stop()  ──►  Remove services, disconnect, release resources
+stop()  ──►  Unpublish services, release resources. Disconnects nobody
 ```
+
+An adapter power cycle interrupts this without ending it. Turning Bluetooth off destroys the published
+database on both platforms, so the module reports every subscription as ended and every known central
+as disconnected, and `isServerRunning` goes `false`. It retains the service configuration and
+re-publishes it on the next transition to `poweredOn` -- **advertising is not resumed**, because the
+consumer chose when to start it.
 
 ## Event Flow
 
-### Read Request (no cached value)
+Which of the two read paths and which of the two write paths a request takes is decided by the
+characteristic's `delegate` configuration and, for reads, by whether a cached value exists.
+
+### Read Request (no cached value, or `delegate.read`)
 
 ```
 Central                    Native                     JavaScript
@@ -122,6 +160,10 @@ Central                    Native                     JavaScript
   │   ◄── ATT response ─────┤                            │
 ```
 
+If `sendResponse` never comes, the module answers with `ATT_ERROR_UNLIKELY_ERROR` after
+`requestTimeoutMs` -- otherwise the central would stall until its own 30 s ATT transaction timeout,
+which then bars every further request and notification on that bearer.
+
 ### Read Request (cached value)
 
 ```
@@ -131,6 +173,37 @@ Central                    Native                     JavaScript
   │                          │  (auto-respond from cache) │
   │   ◄── ATT response ─────┤                            │
 ```
+
+### Write Request (default)
+
+```
+Central                    Native                     JavaScript
+  │                          │                            │
+  ├── Write request ─────►   │                            │
+  │   ◄── ATT response ─────┤  (auto-acknowledged)        │
+  │                          ├── onCharacteristicWriteRequest ──►
+  │                          │      responseNeeded: false │
+```
+
+The written value is stored before the listener runs, on both platforms, so a later read of the same
+characteristic serves it without JavaScript doing anything. The value is *replaced* rather than merged,
+as `ATT_WRITE_REQ` requires; a fragment bearing a non-zero offset, which only arises from the
+queued-write procedure, is spliced in at that offset instead.
+
+### Write Request (`delegate.write`)
+
+```
+Central                    Native                     JavaScript
+  │                          │                            │
+  ├── Write request ─────►   │                            │
+  │                          ├── onCharacteristicWriteRequest ──►
+  │                          │      responseNeeded: true  │
+  │                          │   ◄── sendResponse ────────┤
+  │   ◄── ATT response ─────┤     (GATT_SUCCESS or an ATT error)
+```
+
+The value is not applied until JavaScript accepts the write, so an `ATT_ERROR_*` status rejects it
+outright. Committing the accepted value is the listener's job, via `updateCharacteristicValue`.
 
 ### Notification
 
@@ -143,29 +216,82 @@ JavaScript                 Native                     Central
   │   ◄── onNotificationSent┤                            │
 ```
 
+At most one notification is outstanding per device, and `sendNotification`'s promise settles on the
+platform's own completion -- so awaiting it paces a stream against the link. `onNotificationSent`
+reports the same outcome as an event, with a caveat: on Android it is the platform's delivery callback
+and carries its status, while on iOS it is emitted when CoreBluetooth accepts the payload and is not
+emitted at all for a failed send.
+
 ## MTU Handling
 
 The ATT protocol has a default MTU of 23 bytes (3-byte header + 20-byte payload). Centrals can negotiate a larger MTU after connecting.
 
 | Scenario | Behavior |
 |----------|----------|
-| Payload <= 20 bytes, no MTU negotiation | Sent normally |
-| Payload > 20 bytes, no MTU negotiation | Data is sent, then `MTU_SMALL` error is thrown |
-| Payload <= negotiated MTU - 3 | Sent normally |
-| Payload > negotiated MTU - 3 | Data is sent, then `PAYLOAD_EXCEEDS_MTU` error is thrown |
+| Notification payload <= `min(MTU - 3, 512)` | Sent normally |
+| Notification payload > `min(MTU - 3, 512)` | Rejected with `PAYLOAD_EXCEEDS_MTU`; **nothing is transmitted** |
+| Read response of any length | Sent as-is; the central continues a long value with a Read Blob request |
 
-The "send first, throw after" pattern ensures the central receives whatever the BLE stack can deliver, while still alerting the JavaScript layer that data may have been truncated.
+`sendNotification` validates the payload **before** transmitting. Up to the 512-octet attribute limit both platforms silently truncate an oversized notification rather than failing it -- Apple documents that `updateValue` truncates a value exceeding `maximumUpdateValueLength` "to fit", and the Android stack logs "attribute value too long, to be truncated to N" while building the `ATT_HANDLE_VALUE_NTF` PDU. Past that limit Android does not truncate at all: `notifyCharacteristicChanged` throws `IllegalArgumentException`, on a binder thread where nothing catches it. Because a notification has no continuation mechanism, transmitting it would lose the tail with nothing to recover it, so the send is refused before either can happen.
+
+`sendResponse` is not size-checked. An `ATT_READ_RSP` carries at most `ATT_MTU - 1` octets and the central finishes a longer value with `ATT_READ_BLOB_REQ`, which arrives as another read request bearing an offset. The module's automatic read path answers with the whole remainder from the requested offset.
 
 On iOS, the negotiated payload size is read from `central.maximumUpdateValueLength`. On Android, it is tracked via the `onMtuChanged` callback.
+
+### Exposing the MTU to JavaScript
+
+The public unit is the **ATT MTU in octets** -- what the Bluetooth Core Specification and the Android platform both call "MTU". `getMtu(deviceId)` returns it, and `onMtuChanged` reports every change. `maxNotificationPayload` is supplied as `min(mtu - 3, 512)` -- the maximum Attribute Value length of an `ATT_HANDLE_VALUE_NTF` PDU, bounded by the 512-octet maximum length of an attribute value itself.
+
+The two platforms report different halves of the same figure exactly, and derive the other:
+
+| | iOS | Android |
+|---|---|---|
+| Native source | `CBCentral.maximumUpdateValueLength`, a **payload length** | `onMtuChanged`, an **ATT MTU** |
+| `maxNotificationPayload` | Exact | Derived as `min(mtu - 3, 512)` |
+| `mtu` | Derived as `maximumUpdateValueLength + 3` | Exact |
+| Change notification | None exists; the value is sampled on the central's next ATT activity | Delivered as it happens |
 
 ## Platform Differences
 
 | Behavior | iOS | Android |
 |----------|-----|---------|
-| Device identifier | UUID (opaque, can rotate) | MAC address (stable) |
-| Connection event | Fires on first CCCD subscription | Fires on `onConnectionStateChange` |
-| Write auto-response | Not automatic; JS must respond if `responseNeeded` | Automatic for `responseNeeded` requests |
-| CCCD descriptor | Managed by CoreBluetooth internally | Explicitly added by the module |
-| MTU source | `central.maximumUpdateValueLength` | `onMtuChanged` callback |
-| Bluetooth state check | `CBManagerState.poweredOn` | `BluetoothAdapter.isEnabled()` |
-| Permission model | `CBPeripheralManager.authorization` | Runtime permissions (API 31+) |
+| Device identifier | `CBCentral.identifier` UUID (opaque, can rotate) | MAC address (stable) |
+| Device name | Never available -- CoreBluetooth exposes no name for a central | `BluetoothDevice.getName()` |
+| Connection event | Fires on the central's first ATT activity (subscribe, read or write) -- `CBPeripheralManagerDelegate` has no connection callback. A central that never touches an attribute is never reported | Fires on `onConnectionStateChange` |
+| Disconnection event | Inferred from the loss of the last subscription, or reported for every known central when Bluetooth leaves `poweredOn`. Generally undetectable for a read/write-only central | Fires on `onConnectionStateChange` |
+| Dropping a central | **Impossible** -- `disconnectDevice` rejects with `ERR_UNSUPPORTED` | `BluetoothGattServer.cancelConnection` |
+| Read auto-response | From the module's own value cache, keyed by service **and** characteristic | From `BluetoothGattCharacteristic.value`, which is already per service |
+| Write auto-response | Automatic, unless the characteristic sets `delegate.write` | Automatic, unless the characteristic sets `delegate.write` |
+| Prepared / long writes | Not exposed at all; CoreBluetooth handles the procedure below the app layer | Buffered per device and applied on execute |
+| `confirm` on a notification | Never reaches the platform; CoreBluetooth picks notification or indication from the declared properties | Passed to `notifyCharacteristicChanged` |
+| CCCD descriptor | Created by CoreBluetooth on publication; per-client bits are not exposed | Explicitly added by the module, which tracks the per-client bits itself |
+| Custom descriptors | Only `0x2901` and `0x2904`; anything else rejects with `ERR_UNSUPPORTED` | Any UUID except the CCCD |
+| MTU source | `central.maximumUpdateValueLength` (a payload length) | `onMtuChanged` callback (an ATT MTU) |
+| MTU change event | No callback exists; sampled on the central's next ATT activity | Delivered as it happens |
+| Advertised local name | `CBAdvertisementDataLocalNameKey`, verbatim | No per-advertisement name exists; the adapter's own name is advertised instead |
+| Advertising `timeoutMs` | Emulated by a module timer | `AdvertiseSettings.setTimeout` |
+| Bluetooth state source | `CBPeripheralManager.state`, which needs an instantiated manager | `BluetoothAdapter.getState()`, plus an `ACTION_STATE_CHANGED` receiver registered while the server is open |
+| Permission model | `CBManager.authorization` | Runtime permissions (API 31+): `BLUETOOTH_CONNECT`, `BLUETOOTH_ADVERTISE` |
+
+The [API reference](./api.md) states the consequence of each of these at the function or type it
+affects.
+
+## Known Limits
+
+Two behaviours are shared by both platforms and are not what the specification asks for.
+
+**A subscription does not survive a disconnect, even for a bonded central.** "The Client Characteristic
+Configuration descriptor value shall be persistent across connections for bonded devices" (Core Spec
+Vol 3, Part G, §3.3.3.3). This module discards the per-client bits when the central disconnects and
+never consults the bond state, so a bonded central that reconnects — and, having cached the ATT
+database, does not rewrite its CCCD — is treated as unsubscribed: no `onCharacteristicSubscribed`
+fires and `sendNotification` rejects `ERR_NO_SUBSCRIBER`. Pass `requireSubscription: false` to notify
+one anyway, or have the central rewrite its CCCD on connect.
+
+**A write batch in which every characteristic is delegated is not atomic.** The queued-write procedure
+is one operation: "if the execution of one of the requests would cause a failure […] none of the
+requests should be executed" (Core Spec Vol 3, Part F, §3.4.6.3). Values for characteristics that did
+*not* opt in are withheld until the batch is answered, and are reverted if it is refused. Delegated
+ones are yours to commit with `updateCharacteristicValue`, so a batch touching two delegated
+characteristics can have the second committed by your handler and the batch then refused by the first.
+Commit a delegated value only once you know how you will answer.

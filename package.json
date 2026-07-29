@@ -1,22 +1,43 @@
 {
   "name": "expo-gatt-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Expo module for BLE GATT server (peripheral) functionality",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./build/index.js",
+  "types": "./build/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./build/index.d.ts",
+      "default": "./build/index.js"
+    },
+    "./app.plugin.js": "./app.plugin.js",
+    "./expo-module.config.json": "./expo-module.config.json",
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.19.4"
+  },
   "files": [
-    "src",
+    "build",
     "ios",
     "android/src",
     "android/build.gradle",
     "android/consumer-rules.pro",
-    "expo-module.config.json"
+    "expo-module.config.json",
+    "app.plugin.js",
+    "plugin/build"
   ],
   "scripts": {
     "build": "expo-module build",
-    "clean": "expo-module clean",
-    "lint": "expo-module lint",
-    "test": "expo-module test"
+    "build:plugin": "expo-module build plugin",
+    "clean": "expo-module clean && expo-module clean plugin",
+    "lint": "expo-module lint --max-warnings 0 && expo-module lint plugin --max-warnings 0",
+    "typecheck": "tsc --noEmit -p tsconfig.check.json && tsc --noEmit -p plugin/tsconfig.check.json",
+    "test": "expo-module test",
+    "test:ios": "swift test",
+    "test:android": "./scripts/test-android.sh",
+    "prepare": "node ./scripts/build-package.js",
+    "prepublishOnly": "node ./scripts/build-package.js --clean"
   },
   "keywords": [
     "expo",
@@ -35,12 +56,18 @@
   "homepage": "https://github.com/Dishuk/expo-gatt-server",
   "license": "MIT",
   "devDependencies": {
-    "expo-module-scripts": "^4.0.0",
-    "expo-modules-core": "^2.0.0"
+    "@types/node": "^26.1.1",
+    "eslint": "^9.39.5",
+    "expo": "~57.0.8",
+    "expo-module-scripts": "^56.0.3",
+    "expo-modules-core": "~57.0.7",
+    "jest": "^29.7.0",
+    "react": "19.2.3",
+    "react-native": "0.86.0",
+    "typescript": "~5.9.3"
   },
   "peerDependencies": {
-    "expo": "*",
-    "react": "*",
-    "react-native": "*"
+    "expo": ">=57.0.0",
+    "expo-modules-core": ">=57.0.0"
   }
 }

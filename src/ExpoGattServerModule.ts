@@ -1,13 +1,17 @@
-import { requireNativeModule, NativeModule } from 'expo';
+import { requireOptionalNativeModule, NativeModule } from 'expo';
 
 import type {
   GattServiceConfig,
+  CreateServerOptions,
   AdvertiseConfig,
+  BluetoothState,
+  ConnectedDevice,
+  DeviceMtu,
   GattServerEvents,
 } from './ExpoGattServer.types';
 
 declare class ExpoGattServerModuleType extends NativeModule<GattServerEvents> {
-  createServer(services: GattServiceConfig[]): Promise<void>;
+  createServer(services: GattServiceConfig[], options: CreateServerOptions): Promise<void>;
   startAdvertising(config: AdvertiseConfig): Promise<void>;
   stopAdvertising(): void;
   sendNotification(
@@ -16,6 +20,7 @@ declare class ExpoGattServerModuleType extends NativeModule<GattServerEvents> {
     characteristicUuid: string,
     value: number[],
     confirm: boolean,
+    requireSubscription: boolean,
   ): Promise<void>;
   sendResponse(
     deviceId: string,
@@ -28,8 +33,19 @@ declare class ExpoGattServerModuleType extends NativeModule<GattServerEvents> {
     serviceUuid: string,
     characteristicUuid: string,
     value: number[],
-  ): void;
+  ): Promise<void>;
   stopServer(): void;
+  getBluetoothState(): Promise<BluetoothState>;
+  getMtu(deviceId: string): Promise<DeviceMtu>;
+  getConnectedDevices(): Promise<ConnectedDevice[]>;
+  disconnectDevice(deviceId: string): Promise<void>;
+  isServerRunning(): Promise<boolean>;
+  isAdvertising(): Promise<boolean>;
 }
 
-export default requireNativeModule<ExpoGattServerModuleType>('ExpoGattServer');
+export type { ExpoGattServerModuleType };
+
+/**
+ * null if native module not installed. Optional variant required at import time—requireNativeModule would throw.
+ */
+export default requireOptionalNativeModule<ExpoGattServerModuleType>('ExpoGattServer');

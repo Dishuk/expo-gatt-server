@@ -7,8 +7,13 @@ def safeExtGet(prop, fallback) {
   rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
 }
 
+// Read from package.json, as the podspec already does, so one bump moves every artefact.
+def packageVersion = new groovy.json.JsonSlurper()
+  .parseText(file('../package.json').text)
+  .version
+
 group = 'expo.modules.gattserver'
-version = '0.1.0'
+version = packageVersion
 
 android {
   namespace "expo.modules.gattserver"
@@ -17,7 +22,7 @@ android {
   defaultConfig {
     minSdk safeExtGet("minSdkVersion", 24)
     versionCode 1
-    versionName '0.1.0'
+    versionName packageVersion
     consumerProguardFiles 'consumer-rules.pro'
   }
 

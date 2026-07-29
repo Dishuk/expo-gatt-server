@@ -1,0 +1,58 @@
+plugins {
+  id 'com.android.library' version '8.13.1'
+  id 'org.jetbrains.kotlin.android' version '2.2.10'
+}
+
+android {
+  namespace 'expo.modules.gattserver.tests'
+  compileSdk 35
+
+  defaultConfig {
+    minSdk 24
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  kotlinOptions {
+    jvmTarget = '17'
+  }
+
+  sourceSets {
+    main {
+      // Sources compiled in place, not copied.
+      java.srcDirs = ['../../android/src/main/java']
+      manifest.srcFile '../../android/src/main/AndroidManifest.xml'
+    }
+    test {
+      java.srcDirs = ['src/test/java']
+    }
+  }
+
+  testOptions {
+    unitTests {
+      includeAndroidResources = true
+      all {
+        testLogging {
+          events 'failed'
+          exceptionFormat 'full'
+        }
+      }
+    }
+  }
+}
+
+// ExpoGattServerModule excluded (thin Expo binding; would require expo-module-gradle-plugin and host app).
+android.sourceSets.main.java.filter.exclude '**/ExpoGattServerModule.kt'
+// Kotlin plugin requires separate exclusion.
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+  exclude '**/ExpoGattServerModule.kt'
+}
+
+dependencies {
+  testImplementation 'junit:junit:4.13.2'
+  // Runs real Android Bluetooth framework classes (not stubs).
+  testImplementation 'org.robolectric:robolectric:4.16.1'
+}
