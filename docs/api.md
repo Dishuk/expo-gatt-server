@@ -221,7 +221,9 @@ Requires a **published** database: rejects with `ERR_NO_SERVER` before `createSe
 
 A parked call is settled by: terminal Bluetooth state (`ERR_BLUETOOTH`), lost authorization (`ERR_PERMISSION` on iOS), publication failure (`ERR_NO_SERVER`), or `stopServer` / `stopAdvertising` (`ERR_ADVERTISE`). `stopAdvertising` / `stopServer` issued while the call is in flight always win, even if they reach the native side in reverse order — the shared layer tracks call order across the JavaScript/native boundary.
 
-Calling `startAdvertising` again replaces the current advertisement and rejects the earlier call with `ERR_ADVERTISE`.
+Calling `startAdvertising` again, once the earlier call has settled, replaces the current advertisement.
+
+**Await each call before starting another.** Overlapping calls differ by platform, because `peripheralManagerDidStartAdvertising` names no call while Android's `AdvertiseCallback` is a distinct object per start: iOS rejects the *second* call with `ERR_ADVERTISE` and leaves the first to its own outcome, where Android lets the second displace the first and rejects the *first* with `ERR_ADVERTISE`.
 
 **Rejects** with:
 

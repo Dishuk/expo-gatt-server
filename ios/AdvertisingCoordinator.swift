@@ -48,18 +48,22 @@ final class AdvertisingCoordinator {
       completion(GattServerError.databaseNotPublished)
       return
     }
+    // `peripheralManagerDidStartAdvertising` names no start, so displacing one still awaiting it would
+    // hand this call the displaced one's outcome. A start whose promise has settled is replaced as
+    // before; only an overlapping one is refused.
+    guard self.completion == nil else {
+      completion(advertisingError(
+        "A startAdvertising call is still waiting for CoreBluetooth to report the advertisement as " +
+          "started. Await it before starting another, or call stopAdvertising first."
+      ))
+      return
+    }
     let advertisedUuids = (serviceUuids ?? []).map { $0.advertisedForm }
     do {
       try assertAdvertisementFits(localName: localName, serviceUuids: advertisedUuids)
     } catch {
       completion(advertisingError(error.localizedDescription))
       return
-    }
-    let displaced = claimCompletion()
-    displaced?(advertisingError("Advertising restarted"))
-    // Stop the old one before starting the new one. Callback carries no identity, so race remains possible if starts are issued back-to-back.
-    if displaced != nil {
-      peripheral()?.stopAdvertising()
     }
     self.completion = completion
     var advertisementData: [String: Any] = [:]

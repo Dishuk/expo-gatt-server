@@ -7,6 +7,7 @@ import androidx.core.os.bundleOf
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import java.util.concurrent.Executors
 
 class ExpoGattServerModule : Module() {
   /**
@@ -15,6 +16,21 @@ class ExpoGattServerModule : Module() {
    */
   @Volatile
   private var manager: GattServerManager? = null
+
+  /**
+   * Where a `stopServer` teardown runs, so it does not hold the JavaScript thread across the binder
+   * calls `stop` makes under `serverLifecycleLock`. Single-threaded: `createServer` drains it before
+   * opening, so a deferred stop can never close the server that replaced it.
+   */
+  private val teardownExecutor = Executors.newSingleThreadExecutor { runnable ->
+    Thread(runnable, "ExpoGattServerTeardown")
+  }
+
+  /** Blocks until any deferred teardown has finished. Never called from the JavaScript thread. */
+  private fun awaitPendingTeardown() {
+    // Explicit Runnable: `submit {}` is ambiguous between the Runnable and Callable overloads.
+    runCatching { teardownExecutor.submit(Runnable {}).get() }
+  }
 
   /**
    * Returns rejection code and message if [permission] is not granted, or null. Checks React context
@@ -131,6 +147,8 @@ class ExpoGattServerModule : Module() {
         val delegations = parseDelegations(services)
 
         manager?.stop()
+        // A stopServer already in flight would otherwise close the server opened below.
+        awaitPendingTeardown()
         val mgr = GattServerManager(context, requestTimeoutMs)
         mgr.listener = createListener()
         mgr.onStateChange = { state ->
@@ -319,16 +337,21 @@ class ExpoGattServerModule : Module() {
       }
     }
 
-    // Synchronous to preserve ordering against createServer (see serverStopEpoch in src/index.ts).
-    // This runs on the JavaScript thread and takes serverLifecycleLock; a power cycle will block until the Bluetooth process responds.
+    // Synchronous to preserve ordering against createServer (see serverStopEpoch in src/index.ts):
+    // the manager is dropped here, on the JavaScript thread, so every later call already sees no
+    // server. Only the teardown itself is deferred, since it blocks on the Bluetooth process.
     Function("stopServer") {
-      manager?.stop()
+      val stopping = manager
       manager = null
+      stopping?.let { teardownExecutor.execute { it.stop() } }
     }
 
     OnDestroy {
+      // Synchronous: the module is going away, so the teardown has to finish before it does.
       manager?.stop()
       manager = null
+      awaitPendingTeardown()
+      teardownExecutor.shutdown()
     }
   }
 

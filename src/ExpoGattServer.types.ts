@@ -116,8 +116,9 @@ export interface SendNotificationOptions {
    */
   confirm?: boolean;
   /**
-   * Reject with `ERR_NO_SUBSCRIBER` if not subscribed to this transmission mode.
-   * Defaults to `true`. Android checks CCCD bits; iOS checks subscription state only.
+   * Reject with `ERR_NO_SUBSCRIBER` if not subscribed to this transmission mode. Defaults to `true`.
+   * Android checks the CCCD bit, and `false` sends anyway. iOS ignores `false`: `updateValue` drops
+   * unsubscribed centrals, so a forced send has nowhere to go.
    */
   requireSubscription?: boolean;
 }
@@ -146,7 +147,8 @@ export interface AndroidAdvertiseOptions {
   includeDeviceName?: boolean;
   /**
    * Rename system Bluetooth adapter. Changes system-wide name, not just advertisement.
-   * Restored on stopAdvertising/stopServer, unless adapter is off (hazard: name persists if stopServer runs while off).
+   * Restored on stopAdvertising/stopServer, or at the next createServer or power-on when the adapter
+   * was off then (`setName` fails while it is). A rename outlives the process that applied it.
    * Requires BLUETOOTH_CONNECT API 31+. Rejects with ERR_ADVERTISE unless localName is set.
    */
   setAdapterName?: boolean;

@@ -660,6 +660,9 @@ class GattServerManager(
         return
       }
 
+      // Undoes a rename a previous run could not: nothing is registered to hear the power-on between runs.
+      advertisingController.restoreAdapterName()
+
       if (!openServer()) {
         finishOpen(
           DatabasePublication.FAILED,

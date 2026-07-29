@@ -97,8 +97,6 @@ internal class AdvertisingController(
   private val airtimeTimeout = AtomicReference<Runnable?>(null)
   // Timeout for start, paired with callback to prevent stale timeout from evicting replacement.
   private val startTimeout = AtomicReference<Pair<AdvertiseCallback, Runnable>?>(null)
-  // Set from the caller's thread, read again during a teardown that may be on another.
-  private val originalAdapterName = AtomicReference<String?>(null)
 
   fun isAdvertising(): Boolean = advertising.get()
 
@@ -433,5 +431,13 @@ internal class AdvertisingController(
       // teardown is most likely to run.
       Log.w(TAG, "Could not restore the adapter name to \"$previous\" yet")
     }
+  }
+
+  companion object {
+    /**
+     * Held for the process, not for one controller: a restore the adapter being off defeats has to
+     * survive `stop`, or the next controller takes the name left on the adapter for the device's own.
+     */
+    private val originalAdapterName = AtomicReference<String?>(null)
   }
 }

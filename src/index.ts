@@ -577,6 +577,10 @@ function assertOneOf<T extends string>(value: unknown, allowed: T[], field: stri
  * Begins advertising the published GATT database. Rejects with ERR_NO_SERVER if no database
  * published. Safe before createServer resolves; waits for in-flight publication. Replaces
  * current advertisement rather than adding a second one.
+ *
+ * Await it before starting again. A call issued while an earlier one is still in flight rejects with
+ * ERR_ADVERTISE on iOS, where the platform's start callback names no call and the two cannot be told
+ * apart; on Android it displaces the earlier one, which rejects with ERR_ADVERTISE instead.
  */
 export async function startAdvertising(config: AdvertiseConfig = {}): Promise<void> {
   // Read before anything else; stops after this call are detected as out-of-order.
