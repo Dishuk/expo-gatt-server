@@ -6,10 +6,10 @@ Expo module that turns your React Native app into a BLE GATT server. Advertise s
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| [Expo](https://expo.dev/) | SDK 57 | Framework and module system -- the version this package is developed and tested against |
+| [Expo](https://expo.dev/) | SDK 56+ | Framework and module system -- developed and tested against SDK 57, verified to build on 56 |
 | [React Native](https://reactnative.dev/) | as bundled with your Expo SDK | Runtime |
 | [Node.js](https://nodejs.org/) | >= 20.19.4 | Build tooling -- the floor React Native 0.86 sets |
-| Xcode | 26.5 | iOS builds (iOS 15.1+ deployment target, Swift 5.9). Bounded by Expo SDK 57 compatibility. |
+| Xcode | 26.5 | iOS builds (iOS 16.4+ deployment target, Swift 5.9). Bounded by Expo SDK 57 compatibility. |
 | Android Studio | any | Android builds (API 24+ / Android 7.0, compileSdk 35) |
 
 **A development build is required.** The package ships native code, so it cannot run in Expo Go. Use
@@ -134,7 +134,7 @@ expo-gatt-server/
 │   ├── ExpoGattServer.types.ts    # TypeScript type definitions
 │   └── __tests__/                 # Unit tests for the TypeScript layer
 ├── ios/
-│   ├── ExpoGattServer.podspec     # CocoaPods spec (iOS 15.1+)
+│   ├── ExpoGattServer.podspec     # CocoaPods spec (iOS 16.4+)
 │   ├── ExpoGattServerModule.swift # Expo module definition
 │   ├── GattServerManager.swift    # CoreBluetooth peripheral: publication and ATT routing
 │   ├── AdvertisingCoordinator.swift # The radio and the promise waiting on it
