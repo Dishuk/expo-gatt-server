@@ -17,7 +17,8 @@ Detailed iOS and Android configuration for BLE peripheral mode.
 
 ### Minimum Version
 
-iOS 15.1+. Set in the podspec and enforced at build time.
+iOS 16.4+, the floor ExpoModulesCore sets. Declared in the podspec; Expo's CocoaPods integration
+raises any Expo module below it, so a lower value here would be overridden rather than honoured.
 
 ### Permissions
 

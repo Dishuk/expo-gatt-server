@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > - `createServer` requires `services` array (not `undefined`); each service requires `characteristics` array
 > - Characteristic/descriptor values bounded at `MAX_ATTRIBUTE_VALUE_LENGTH` (512 octets)
 > - Android stops renaming adapter unless `android.setAdapterName` is set; `ACCESS_FINE_LOCATION` permission removed; `android.hardware.bluetooth_le` no longer required
-> - `expo` peer dependency narrows to `>=57.0.0`; apps on SDK 51–56 no longer resolve this package; `expo-modules-core` now required, and the unused `react` / `react-native` peers are gone
+> - `expo` peer dependency narrows to `>=56.0.0`; apps on SDK 51–55 no longer resolve this package; `expo-modules-core` now required, and the unused `react` / `react-native` peers are gone
 > - Node 20.19.4 is the minimum, matching React Native 0.86
 
 ### Added
@@ -65,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking: `sendResponse` error after `stopServer`.** Rejects with `REQUEST_NOT_FOUND` (not `ERR_NO_SERVER`) on both platforms
 - **Android per-request tracing.** Logs only when `adb shell setprop log.tag.ExpoGattServer DEBUG` is set; descriptor payloads reported by length only
 - **No sourcemaps in package.** Sourcemaps removed from shipped output
-- **Breaking: peer dependencies.** `expo: ">=57.0.0"` (was `*`); `expo-modules-core` now required as peer dependency
+- **Breaking: peer dependencies.** `expo: ">=56.0.0"` (was `*`); `expo-modules-core` now required as peer dependency
 - **`npm run lint` fails on warnings.** Prettier rules now enforced
 - **Breaking: `delegate` flag validation.** Misspelled flags like `delegate: { reed: true }` now throw instead of silently failing
 - **Breaking: config plugin validation.** Invalid types (e.g., `bluetoothAlwaysPermission: true` or `requireBluetoothLeHardware: "false"`) now fail prebuild
@@ -217,7 +217,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking: `GATT_FAILURE`.** Was `257` (GATT status not ATT code); use `ATT_ERROR_*` constants instead (e.g., `ATT_ERROR_UNLIKELY_ERROR` for general failures)
 - **Breaking: `MTU_SMALL` error code.** Use `PAYLOAD_EXCEEDS_MTU` instead; oversized `sendResponse` no longer an error
 - **Breaking: `ACCESS_FINE_LOCATION` permission.** Removed from manifest (peripheral doesn't scan); apps that scan must declare it themselves
-- **`react` and `react-native` peer dependencies.** Neither is imported by the package; `expo >=57.0.0` already states the runtime
+- **`react` and `react-native` peer dependencies.** Neither is imported by the package; `expo >=56.0.0` already states the runtime
 
 ## [0.1.0] - 2026-05-23
 
